@@ -180,7 +180,7 @@ mod tests {
 
     pub fn quad(z: f32) -> Mesh {
         let v = |x: f32, y: f32| Vertex { position: [x, y, z], normal: [0.0, 0.0, 1.0], uv: [x, 1.0 - y] };
-        Mesh { vertices: vec![v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0), v(0.0, 1.0)], indices: vec![0, 1, 2, 0, 2, 3] }
+        Mesh { vertices: vec![v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0), v(0.0, 1.0)], indices: vec![0, 1, 2, 0, 2, 3], ..Default::default() }
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
-        let g = Geometry::new(&Mesh { vertices, indices });
+        let g = Geometry::new(&Mesh { vertices, indices, ..Default::default() });
         assert!(g.curvature.iter().all(|k| *k > 0.0), "every cube corner/edge vertex is convex: {:?}", g.curvature);
         assert_eq!(g.piece.iter().collect::<std::collections::HashSet<_>>().len(), 1, "one connected piece");
     }

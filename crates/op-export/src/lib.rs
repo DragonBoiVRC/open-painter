@@ -536,7 +536,7 @@ mod tests {
         use op_mesh::{Mesh, Vertex};
         let v = |u: f32, w: f32| Vertex { position: [0.0; 3], normal: [0.0, 1.0, 0.0], uv: [u, w] };
         // One triangle covering the lower-left half of UV space (v grows downward in images).
-        let m = Mesh { vertices: vec![v(0.0, 0.0), v(0.0, 1.0), v(1.0, 1.0)], indices: vec![0, 1, 2] };
+        let m = Mesh { vertices: vec![v(0.0, 0.0), v(0.0, 1.0), v(1.0, 1.0)], indices: vec![0, 1, 2], ..Default::default() };
         let cov = uv_coverage(&m, 32);
         let at = |x: usize, y: usize| cov[y * 32 + x];
         assert!(at(2, 28) && at(10, 30), "inside texels missing");

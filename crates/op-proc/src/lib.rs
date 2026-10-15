@@ -323,7 +323,7 @@ mod tests {
                 tri.swap(1, 2);
             }
         }
-        Mesh { vertices, indices }
+        Mesh { vertices, indices, ..Default::default() }
     }
 
     /// Tiny vector helpers so the test does not need glam as a dependency of this crate.

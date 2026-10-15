@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
+fbxcel-dom = "0.0.10"
 glam = "0.34.1"
 gltf = "1.4.1"
 serde = "1.0.229"

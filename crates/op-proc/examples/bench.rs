@@ -36,7 +36,7 @@ fn cube(n: usize) -> Mesh {
             }
         }
     }
-    Mesh { vertices, indices }
+    Mesh { vertices, indices, ..Default::default() }
 }
 
 fn main() {

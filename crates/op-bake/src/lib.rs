@@ -611,7 +611,7 @@ mod tests {
         let mut vertices = floor.to_vec();
         vertices.extend(wall);
         let indices = vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
-        let corner = Mesh { vertices, indices };
+        let corner = Mesh { vertices, indices, ..Default::default() };
         let r = run(&corner, None, &BakeSettings { size: 32, maps: vec![MeshMap::AmbientOcclusion], samples: 64, ao_distance: 0.5, ..Default::default() });
         let near = at(&r, MeshMap::AmbientOcclusion, 1, 16)[0];
         let far = at(&r, MeshMap::AmbientOcclusion, 30, 16)[0];
@@ -660,7 +660,7 @@ mod tests {
                 vertices.extend(f);
                 indices.extend([b, b + 1, b + 2, b, b + 2, b + 3]);
             }
-            Mesh { vertices, indices }
+            Mesh { vertices, indices, ..Default::default() }
         };
         let s = BakeSettings { size: 16, maps: vec![MeshMap::Thickness], samples: 64, thickness_distance: 0.5, ..Default::default() };
         let (thin, thick) = (run(&slab(0.1), None, &s), run(&slab(0.3), None, &s));
@@ -729,7 +729,7 @@ mod tests {
                 indices.extend([a, b, c, a, c, d]);
             }
         }
-        let mut high = Mesh { vertices, indices };
+        let mut high = Mesh { vertices, indices, ..Default::default() };
         high.recompute_normals();
         let s = BakeSettings { size: 32, maps: vec![MeshMap::NormalBase, MeshMap::HeightBase, MeshMap::OpacityBase], cage_front: 0.2, cage_rear: 0.2, ..Default::default() };
         let r = run(&plane(), Some(&high), &s);
