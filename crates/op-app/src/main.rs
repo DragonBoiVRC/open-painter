@@ -801,7 +801,7 @@ impl App {
                     if set == self.active {
                         self.pending.push(op);
                     } else if materialized {
-                        self.enqueue_batch(viewport::SetBatch { set, doc, ops: vec![op] });
+                        self.enqueue_batch(viewport::SetBatch { tile: None, set, doc, ops: vec![op] });
                     }
                 }
                 self.bake.job = None;

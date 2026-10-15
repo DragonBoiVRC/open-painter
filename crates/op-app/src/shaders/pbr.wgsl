@@ -18,6 +18,8 @@ struct Globals {
 @group(1) @binding(3) var paint_samp: sampler;
 // Tangent-space normal map from painted height and the baked normal, packed in 0..1.
 @group(1) @binding(4) var paint_normal: texture_2d<f32>;
+// UV offset of the tile this draw shows (0, 0 unless UV tiles are in use).
+@group(1) @binding(5) var<uniform> tile: vec4<f32>;
 
 // Baked map preview. light_dir.w selects the mode: 0 shaded, 1 show the map as-is,
 // 2 shaded with the map (ambient occlusion) multiplied into the ambient light, 3 the painted
@@ -81,21 +83,22 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
+    let uv_t = i.uv - tile.xy;
     var n = normalize(i.normal);
     let v = normalize(g.camera_pos.xyz - i.world_pos);
     let l = normalize(g.light_dir.xyz);
     let h = normalize(v + l);
 
-    let pv = textureSample(preview_tex, preview_samp, i.uv);
-    let nmap = textureSample(paint_normal, paint_samp, i.uv).rgb;
+    let pv = textureSample(preview_tex, preview_samp, uv_t);
+    let nmap = textureSample(paint_normal, paint_samp, uv_t).rgb;
     if (g.light_dir.w > 2.5) {
         return vec4<f32>(nmap, 1.0);
     }
     // Cotangent frame from screen-space derivatives. The image's +Y is up, and v grows downwards.
     let dp1 = dpdx(i.world_pos);
     let dp2 = dpdy(i.world_pos);
-    let duv1 = dpdx(i.uv);
-    let duv2 = dpdy(i.uv);
+    let duv1 = dpdx(uv_t);
+    let duv2 = dpdy(uv_t);
     let dp2perp = cross(dp2, n);
     let dp1perp = cross(n, dp1);
     let tan = dp2perp * duv1.x + dp1perp * duv2.x;
@@ -110,9 +113,9 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(pv.rgb, 1.0);
     }
     let ao = select(1.0, pv.r, g.light_dir.w >= 1.5);
-    let pb = textureSample(paint_base, paint_samp, i.uv);
-    let pm = textureSample(paint_metal, paint_samp, i.uv);
-    let pr = textureSample(paint_rough, paint_samp, i.uv);
+    let pb = textureSample(paint_base, paint_samp, uv_t);
+    let pm = textureSample(paint_metal, paint_samp, uv_t);
+    let pr = textureSample(paint_rough, paint_samp, uv_t);
     let metallic = pm.r + g.params.x * (1.0 - pm.g);
     let roughness = clamp(pr.r + g.params.y * (1.0 - pr.g), 0.04, 1.0);
     let a = roughness * roughness;

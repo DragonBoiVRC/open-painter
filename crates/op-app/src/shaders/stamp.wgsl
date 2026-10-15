@@ -10,6 +10,7 @@ struct StampGlobals {
     view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
     viewport: vec4<f32>,   // width px, height px, near, far
+    tile: vec4<f32>,       // UV offset of the tile being painted
 };
 
 @group(0) @binding(0) var<uniform> sg: StampGlobals;
@@ -39,7 +40,8 @@ struct VsOut {
 fn vs_main(v: VsIn) -> VsOut {
     var o: VsOut;
     // Texture space has v pointing down; clip space has y pointing up.
-    o.clip = vec4<f32>(v.uv.x * 2.0 - 1.0, 1.0 - v.uv.y * 2.0, 0.0, 1.0);
+    let uv = v.uv - sg.tile.xy;
+    o.clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
     o.world_pos = v.position;
     o.normal = v.normal;
     o.brush = v.brush;

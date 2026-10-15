@@ -61,7 +61,7 @@ impl App {
         if !ops.is_empty() {
             self.thumbs_dirty();
         }
-        let batches = vec![SetBatch { set: self.active, doc: self.doc.clone(), ops }];
+        let batches = vec![SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
         let wire = self.uv_wire.then_some([0.35, 0.75, 1.0, 0.55]);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,

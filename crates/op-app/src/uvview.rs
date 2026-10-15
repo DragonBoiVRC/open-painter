@@ -1,7 +1,6 @@
 //! The 2D UV view's GPU side: a pan/zoom view of one texture set's textures with a tile grid and a
 //! wireframe of its UVs, drawn inside egui's render pass like the 3D viewport's blit.
 
-use crate::paint::PaintOp;
 use crate::viewport::{SetBatch, ViewportGpu};
 use eframe::egui_wgpu::{self, wgpu};
 use wgpu::util::DeviceExt;
@@ -87,7 +86,9 @@ struct Lines {
 }
 
 pub struct UvGpu {
-    view_pipeline: wgpu::RenderPipeline,
+    bg_pipeline: wgpu::RenderPipeline,
+    tile_pipeline: wgpu::RenderPipeline,
+    grid_pipeline: wgpu::RenderPipeline,
     wire_pipeline: wgpu::RenderPipeline,
     params: wgpu::Buffer,
     params_bind: wgpu::BindGroup,
@@ -124,22 +125,32 @@ impl UvGpu {
             bind_group_layouts: &[Some(&params_layout), Some(material_layout)],
             immediate_size: 0,
         });
-        let view_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("uv_view"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_quad"), compilation_options: Default::default(), buffers: &[] },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_view"),
-                compilation_options: Default::default(),
-                targets: &[Some(target_format.into())],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
+        let pl_params = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("uv_pl_params"),
+            bind_group_layouts: &[Some(&params_layout)],
+            immediate_size: 0,
         });
+        let make = |label: &str, layout: &wgpu::PipelineLayout, vs: &str, fs: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), compilation_options: Default::default(), buffers: &[] },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format: target_format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let bg_pipeline = make("uv_bg", &pl_params, "vs_full", "fs_bg", None);
+        let tile_pipeline = make("uv_tile", &pl, "vs_tile", "fs_tile", None);
+        let grid_pipeline = make("uv_grid", &pl_params, "vs_full", "fs_grid", Some(wgpu::BlendState::ALPHA_BLENDING));
         // The wireframe reads only the mesh's UVs (location 2 of the shared vertex layout).
         let attrs = wgpu::vertex_attr_array![2 => Float32x2];
         let wire_attrs = [wgpu::VertexAttribute { offset: 24, ..attrs[0] }];
@@ -172,7 +183,7 @@ impl UvGpu {
             multiview_mask: None,
             cache: None,
         });
-        Self { view_pipeline, wire_pipeline, params, params_bind, lines: None, generation: 0 }
+        Self { bg_pipeline, tile_pipeline, grid_pipeline, wire_pipeline, params, params_bind, lines: None, generation: 0 }
     }
 
     /// Make sure the edge list of `set` exists. `tris` are the set's triangle indices.
@@ -249,14 +260,19 @@ impl ViewportGpu {
     }
 
     fn paint_uv(&self, pass: &mut wgpu::RenderPass<'static>, set: usize, wire: bool) {
-        let Some(paint) = self.sets.get(set) else { return };
-        pass.set_pipeline(&self.uv.view_pipeline);
+        let Some(unit) = self.sets.get(set) else { return };
         pass.set_bind_group(0, &self.uv.params_bind, &[]);
-        pass.set_bind_group(1, paint.material_bind(), &[]);
+        pass.set_pipeline(&self.uv.bg_pipeline);
+        pass.draw(0..3, 0..1);
+        pass.set_pipeline(&self.uv.tile_pipeline);
+        for paint in &unit.tiles {
+            pass.set_bind_group(1, paint.material_bind(), &[]);
+            pass.draw(0..6, 0..1);
+        }
+        pass.set_pipeline(&self.uv.grid_pipeline);
         pass.draw(0..3, 0..1);
         if let (true, Some(lines), Some(v)) = (wire, self.uv.lines.as_ref().filter(|l| l.set == set), &self.vbuf) {
             pass.set_pipeline(&self.uv.wire_pipeline);
-            pass.set_bind_group(0, &self.uv.params_bind, &[]);
             pass.set_vertex_buffer(0, v.slice(..));
             pass.set_index_buffer(lines.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..lines.count, 0, 0..1);
@@ -267,25 +283,16 @@ impl ViewportGpu {
     pub fn apply_batches(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, batches: &[SetBatch]) {
         let queued = std::mem::take(&mut self.queued);
         let depth = self.dummy_depth.create_view(&Default::default());
+        let view = crate::paint::StampView {
+            view_proj: [[0.0; 4]; 4],
+            camera_pos: [0.0; 4],
+            size_px: [1, 1],
+            near_far: [0.1, 10.0],
+            depth: &depth,
+        };
         for b in queued.iter().chain(batches) {
-            let Some(paint) = self.sets.get_mut(b.set) else { continue };
-            paint.apply(
-                device,
-                queue,
-                encoder,
-                &b.doc,
-                &b.ops,
-                None,
-                &crate::paint::StampView {
-                    view_proj: [[0.0; 4]; 4],
-                    camera_pos: [0.0; 4],
-                    size_px: [1, 1],
-                    near_far: [0.1, 10.0],
-                    depth: &depth,
-                },
-            );
+            crate::viewport::apply_batch(&mut self.sets, None, device, queue, encoder, b, &view);
         }
-        let _ = PaintOp::DropRedo; // keep the import used even when no ops are special-cased here
     }
 }
 

@@ -17,6 +17,8 @@ pub enum MeshError {
 
 mod fbx;
 mod obj;
+mod tiles;
+pub use tiles::{Tile, TileRange, MAX_TILE_U, MAX_TILE_V};
 mod triangulate;
 
 const MESH_MAGIC_V1: &[u8; 8] = b"OPMESH01";

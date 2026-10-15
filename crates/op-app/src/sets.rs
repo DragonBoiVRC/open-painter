@@ -121,7 +121,7 @@ impl App {
             if let Some(st) = slot.as_mut().filter(|_| i != active) {
                 if !st.redo.is_empty() {
                     st.redo.clear();
-                    drops.push(SetBatch { set: i, doc: st.doc.clone(), ops: vec![PaintOp::DropRedo] });
+                    drops.push(SetBatch { tile: None, set: i, doc: st.doc.clone(), ops: vec![PaintOp::DropRedo] });
                 }
             }
         }
@@ -163,7 +163,7 @@ impl App {
     fn flush_pending(&mut self) {
         if !self.pending.is_empty() {
             let ops = std::mem::take(&mut self.pending);
-            self.enqueue(SetBatch { set: self.active, doc: self.doc.clone(), ops });
+            self.enqueue(SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops });
         }
     }
 
@@ -183,7 +183,7 @@ impl App {
         let first = self.parked[0].take().expect("just created");
         self.put_live(first);
         self.parked[0] = None;
-        self.enqueue(SetBatch { set: 0, doc: self.doc.clone(), ops: vec![PaintOp::Reset(size)] });
+        self.enqueue(SetBatch { tile: None, set: 0, doc: self.doc.clone(), ops: vec![PaintOp::Reset(size)] });
         for set in 1..n {
             let doc = Document::with_default_material();
             self.gpu_rebuild(set, &doc, PLACEHOLDER_SIZE);
@@ -213,7 +213,7 @@ impl App {
                 if st.baked.contains_key(&MeshMap::NormalBase) {
                     ops.push(baked_normal_op(&st.baked, size));
                 }
-                self.enqueue(SetBatch { set, doc: st.doc.clone(), ops });
+                self.enqueue(SetBatch { tile: None, set, doc: st.doc.clone(), ops });
             }
         }
         self.parked = states.into_iter().map(Some).collect();
@@ -284,7 +284,7 @@ impl App {
         self.gpu_rebuild(set, &doc, size);
         let op = self.parked[set].as_ref().map(|st| baked_normal_op(&st.baked, size));
         if let (Some(op), true) = (op, self.parked[set].as_ref().is_some_and(|st| st.baked.contains_key(&MeshMap::NormalBase))) {
-            self.enqueue(SetBatch { set, doc, ops: vec![op] });
+            self.enqueue(SetBatch { tile: None, set, doc, ops: vec![op] });
         }
         if let Some(Some(st)) = self.parked.get_mut(set) {
             st.materialized = true;

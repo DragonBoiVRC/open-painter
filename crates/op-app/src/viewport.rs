@@ -56,6 +56,78 @@ fn make_preview_bind(
 }
 
 /// GPU objects shared between frames; lives in egui's callback resources.
+/// The paint stores of one texture set: one per UV tile (a single one unless UV tiles are in use).
+/// Dereferences to the first tile, so code that only knows single-tile sets keeps working.
+pub struct SetGpu {
+    pub tiles: Vec<PaintGpu>,
+    /// The index-buffer run (first index, count) of each tile's triangles.
+    pub tile_ranges: Vec<(u32, u32)>,
+}
+
+impl std::ops::Deref for SetGpu {
+    type Target = PaintGpu;
+    fn deref(&self) -> &PaintGpu {
+        &self.tiles[0]
+    }
+}
+
+impl std::ops::DerefMut for SetGpu {
+    fn deref_mut(&mut self) -> &mut PaintGpu {
+        &mut self.tiles[0]
+    }
+}
+
+/// 2D stamps are given in global UV space; a tile's store works in tile-local UVs.
+fn ops_for_tile(ops: &[PaintOp], tile: op_mesh::Tile) -> std::borrow::Cow<'_, [PaintOp]> {
+    if (tile.u == 0 && tile.v == 0) || !ops.iter().any(|o| matches!(o, PaintOp::Stamps2d { .. })) {
+        return std::borrow::Cow::Borrowed(ops);
+    }
+    let shifted = ops
+        .iter()
+        .map(|op| match op {
+            PaintOp::Stamps2d { layer, target, stamps } => {
+                let moved = stamps
+                    .iter()
+                    .map(|s| {
+                        let mut s = *s;
+                        s.brush[0] -= tile.u as f32;
+                        s.brush[1] -= tile.v as f32;
+                        s
+                    })
+                    .collect();
+                PaintOp::Stamps2d { layer: *layer, target: *target, stamps: moved }
+            }
+            other => other.clone(),
+        })
+        .collect();
+    std::borrow::Cow::Owned(shifted)
+}
+
+/// Apply one batch to the tiles of its set. `view` is the 3D camera state (a dummy when only the
+/// 2D view is drawn, in which case `mesh_bufs` is `None` and 3D strokes are skipped).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_batch(
+    sets: &mut [SetGpu],
+    mesh_bufs: Option<(&wgpu::Buffer, &wgpu::Buffer)>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    b: &SetBatch,
+    view: &StampView<'_>,
+) {
+    let Some(set) = sets.get_mut(b.set) else { return };
+    let ranges = set.tile_ranges.clone();
+    for (ti, paint) in set.tiles.iter_mut().enumerate() {
+        if b.tile.is_some_and(|t| t != ti) {
+            continue;
+        }
+        let (first_index, index_count) = ranges.get(ti).copied().unwrap_or((0, 0));
+        let mesh = mesh_bufs.map(|(vertices, indices)| MeshBuffers { vertices, indices, first_index, index_count });
+        let ops = ops_for_tile(&b.ops, paint.tile);
+        paint.apply(device, queue, encoder, &b.doc, &ops, mesh, view);
+    }
+}
+
 pub struct ViewportGpu {
     pbr: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
@@ -73,7 +145,7 @@ pub struct ViewportGpu {
     plain_bind: wgpu::BindGroup,
     offscreen: Option<Offscreen>,
     /// One paint store per texture set.
-    pub sets: Vec<PaintGpu>,
+    pub sets: Vec<SetGpu>,
     /// The set being edited and previewed.
     pub active: usize,
     /// Batches waiting for the next rendered frame (set up by the app outside of frames).
@@ -86,7 +158,10 @@ pub struct ViewportGpu {
     pub(crate) dummy_depth: wgpu::Texture,
     preview_layout: wgpu::BindGroupLayout,
     preview_sampler: wgpu::Sampler,
+    /// The neutral preview (a white texel), shown for everything that has no baked map to show.
     preview_bind: wgpu::BindGroup,
+    /// Baked-map previews of the active set, one per tile.
+    preview_tiles: Vec<wgpu::BindGroup>,
 }
 
 impl ViewportGpu {
@@ -277,7 +352,7 @@ impl ViewportGpu {
             plain_buf,
             plain_bind,
             offscreen: None,
-            sets: vec![paint],
+            sets: vec![SetGpu { tiles: vec![paint], tile_ranges: vec![(0, 0)] }],
             active: 0,
             queued: Vec::new(),
             thumbnailer: crate::thumbs::Thumbnailer::new(device),
@@ -296,11 +371,11 @@ impl ViewportGpu {
             preview_layout,
             preview_sampler,
             preview_bind,
+            preview_tiles: Vec::new(),
         }
     }
 
-    /// Show `rgba8` (a `size` x `size` image) on the model, or go back to the neutral preview.
-    pub fn set_preview(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: Option<(u32, &[u8])>) {
+    fn preview_bind_for(&self, device: &wgpu::Device, queue: &wgpu::Queue, image: Option<(u32, &[u8])>) -> wgpu::BindGroup {
         let tex = match image {
             Some((size, rgba8)) if rgba8.len() == (size * size * 4) as usize => device.create_texture_with_data(
                 queue,
@@ -315,10 +390,28 @@ impl ViewportGpu {
                 &[255, 255, 255, 255],
             ),
         };
-        self.preview_bind = make_preview_bind(device, &self.preview_layout, &tex.create_view(&Default::default()), &self.preview_sampler);
+        make_preview_bind(device, &self.preview_layout, &tex.create_view(&Default::default()), &self.preview_sampler)
+    }
+
+    /// Show `rgba8` (a `size` x `size` image) on the model, or go back to the neutral preview.
+    pub fn set_preview(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: Option<(u32, &[u8])>) {
+        self.set_previews(device, queue, &[image]);
+    }
+
+    /// Baked-map previews of the active set, one per tile (tiles beyond the list show nothing).
+    pub fn set_previews(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &[Option<(u32, &[u8])>]) {
+        let binds: Vec<_> = images.iter().map(|img| self.preview_bind_for(device, queue, *img)).collect();
+        self.preview_bind = self.preview_bind_for(device, queue, None);
+        self.preview_tiles = binds;
     }
 
     pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: &Mesh) {
+        self.set_mesh_tiles(device, mesh, false);
+    }
+
+    /// Upload a mesh. With `udim` each texture set gets one paint store per UV tile it occupies and
+    /// `mesh` must have been through `partition_tiles`; without it each set is a single tile.
+    pub fn set_mesh_tiles(&mut self, device: &wgpu::Device, mesh: &Mesh, udim: bool) {
         self.vbuf = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh_vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
@@ -333,13 +426,25 @@ impl ViewportGpu {
         self.cpu_indices = mesh.indices.clone();
         self.uv.generation += 1;
         self.ranges = mesh.set_ranges().iter().map(|s| (s.first_index, s.index_count)).collect();
-        // One paint store per texture set. Extra stores are dropped; new ones start at the default size
-        // and are given their real size by a `Reset`/`Load` op.
-        self.sets.truncate(self.ranges.len().max(1));
-        while self.sets.len() < self.ranges.len() {
-            self.sets.push(PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE));
+        let layout = mesh.unit_ranges(udim);
+        // Keep the stores that are still wanted (a store is identified by its position), add the
+        // missing ones at the default size (a `Reset`/`Load` op gives the real size) and drop the rest.
+        let mut old: Vec<Vec<PaintGpu>> = std::mem::take(&mut self.sets).into_iter().map(|s| s.tiles).collect();
+        old.reverse();
+        for set in 0..self.ranges.len() {
+            let wanted: Vec<_> = layout.iter().filter(|r| r.set == set).collect();
+            let mut have = old.pop().unwrap_or_default();
+            have.reverse();
+            let mut tiles = Vec::new();
+            for r in &wanted {
+                let mut paint = have.pop().unwrap_or_else(|| PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE));
+                paint.set_tile(device, r.tile);
+                tiles.push(paint);
+            }
+            self.sets.push(SetGpu { tile_ranges: wanted.iter().map(|r| (r.first_index, r.index_count)).collect(), tiles });
         }
-        self.active = self.active.min(self.sets.len() - 1);
+        self.active = self.active.min(self.sets.len().saturating_sub(1));
+        self.preview_tiles.clear();
     }
 
     /// 32x32 previews of the wanted layer textures of `set`: `(node, is_mask)` -> RGBA8 bytes.
@@ -357,8 +462,10 @@ impl ViewportGpu {
 
     /// Reallocate one set's paint store at `size` and composite `doc` immediately.
     pub fn rebuild_set(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, set: usize, doc: &Document, size: u32) {
-        if let Some(p) = self.sets.get_mut(set) {
-            p.rebuild(device, queue, doc, size);
+        if let Some(s) = self.sets.get_mut(set) {
+            for p in &mut s.tiles {
+                p.rebuild(device, queue, doc, size);
+            }
         }
     }
 
@@ -421,7 +528,7 @@ impl ViewportGpu {
     /// Single-set convenience used by tests: apply `ops` to set 0 and draw.
     #[cfg(test)]
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, globals: &Globals, size: [u32; 2], doc: &Document, ops: &[PaintOp]) {
-        let batch = [SetBatch { set: 0, doc: doc.clone(), ops: ops.to_vec() }];
+        let batch = [SetBatch { tile: None, set: 0, doc: doc.clone(), ops: ops.to_vec() }];
         self.render_sets(device, queue, encoder, globals, size, &batch);
     }
 
@@ -438,29 +545,19 @@ impl ViewportGpu {
         // so this frame's scene pass already shows the new strokes.
         let depth = off.depth_view.clone();
         let queued = std::mem::take(&mut self.queued);
+        let view = StampView {
+            view_proj: globals.view_proj,
+            camera_pos: globals.camera_pos,
+            size_px: size,
+            near_far: [globals.params[2], globals.params[3]],
+            depth: &depth,
+        };
+        let bufs = match (&self.vbuf, &self.ibuf) {
+            (Some(v), Some(i)) => Some((v, i)),
+            _ => None,
+        };
         for b in queued.iter().chain(batches) {
-            let (Some(paint), Some(&(first_index, index_count))) = (self.sets.get_mut(b.set), self.ranges.get(b.set).or(self.ranges.first())) else {
-                continue;
-            };
-            let mesh = match (&self.vbuf, &self.ibuf) {
-                (Some(v), Some(i)) => Some(MeshBuffers { vertices: v, indices: i, first_index, index_count }),
-                _ => None,
-            };
-            paint.apply(
-                device,
-                queue,
-                encoder,
-                &b.doc,
-                &b.ops,
-                mesh,
-                &StampView {
-                    view_proj: globals.view_proj,
-                    camera_pos: globals.camera_pos,
-                    size_px: size,
-                    near_far: [globals.params[2], globals.params[3]],
-                    depth: &depth,
-                },
-            );
+            apply_batch(&mut self.sets, bufs, device, queue, encoder, b, &view);
         }
 
         let color_view = off.color.create_view(&Default::default());
@@ -486,16 +583,22 @@ impl ViewportGpu {
         });
         if let (Some(v), Some(i)) = (&self.vbuf, &self.ibuf) {
             pass.set_pipeline(&self.pbr);
-            pass.set_bind_group(2, &self.preview_bind, &[]);
             pass.set_vertex_buffer(0, v.slice(..));
             pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
-            for (set, paint) in self.sets.iter().enumerate() {
-                let Some(&(first, count)) = self.ranges.get(set) else { continue };
+            for (set, unit) in self.sets.iter().enumerate() {
                 // The baked-map preview belongs to the set being edited; the others are shaded normally.
                 let globals = if set == self.active { &self.globals_bind } else { &self.plain_bind };
                 pass.set_bind_group(0, globals, &[]);
-                pass.set_bind_group(1, paint.material_bind(), &[]);
-                pass.draw_indexed(first..first + count, 0, 0..1);
+                for (ti, paint) in unit.tiles.iter().enumerate() {
+                    let Some(&(first, count)) = unit.tile_ranges.get(ti) else { continue };
+                    if count == 0 {
+                        continue;
+                    }
+                    let preview = if set == self.active { self.preview_tiles.get(ti).unwrap_or(&self.preview_bind) } else { &self.preview_bind };
+                    pass.set_bind_group(1, paint.material_bind(), &[]);
+                    pass.set_bind_group(2, preview, &[]);
+                    pass.draw_indexed(first..first + count, 0, 0..1);
+                }
             }
         }
     }
@@ -505,6 +608,8 @@ impl ViewportGpu {
 #[derive(Clone)]
 pub struct SetBatch {
     pub set: usize,
+    /// Only this tile of the set (`None`: every tile).
+    pub tile: Option<usize>,
     pub doc: Document,
     pub ops: Vec<PaintOp>,
 }
@@ -713,7 +818,7 @@ mod tests {
         a.add(None, None, "metal", fill(None, Some(1.0), None));
         b.add(None, None, "metal half", fill(None, Some(0.5), None));
         let layer_b = b.add(None, None, "paint", NodeKind::Paint);
-        let reset = |set, doc: &Document| SetBatch { set, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
+        let reset = |set, doc: &Document| SetBatch { tile: None, set, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
         rig.run_sets(&[reset(0, &a), reset(1, &b)]);
 
         // The camera looks at the northern half: set 0's fill is everywhere in set 0's texture, and
@@ -728,6 +833,7 @@ mod tests {
         // A stroke in set 1 aimed at northern geometry paints nothing: its triangles are not drawn.
         let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
         let stroke = |set, doc: &Document, layer| SetBatch {
+            tile: None,
             set,
             doc: doc.clone(),
             ops: vec![
@@ -1062,6 +1168,78 @@ mod tests {
         assert_eq!(mask[0], 0);
     }
 
+    /// A sphere (one texture set) whose southern half has its UVs moved into tile 1002.
+    fn two_tile_sphere() -> Mesh {
+        let mut m = Mesh::uv_sphere(1.0, 96, 48);
+        let half = m.indices.len() / 6 * 3;
+        let mut moved = std::collections::HashMap::new();
+        for k in half..m.indices.len() {
+            let old = m.indices[k];
+            let new = *moved.entry(old).or_insert_with(|| {
+                let mut v = m.vertices[old as usize];
+                v.uv[0] += 1.0;
+                m.vertices.push(v);
+                (m.vertices.len() - 1) as u32
+            });
+            m.indices[k] = new;
+        }
+        m.partition_tiles();
+        m
+    }
+
+    /// With UV tiles, each tile of a set has its own paint store: strokes land only in the tile whose
+    /// triangles they touch, 2D stamps are addressed in global UV space, and layers composite per tile.
+    #[test]
+    fn uv_tiles_have_separate_paint_stores() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mesh = two_tile_sphere();
+        rig.gpu.set_mesh_tiles(&rig.device, &mesh, true);
+        assert_eq!(rig.gpu.sets.len(), 1);
+        let set = &rig.gpu.sets[0];
+        assert_eq!(set.tiles.len(), 2);
+        assert_eq!((set.tiles[0].tile.udim(), set.tiles[1].tile.udim()), (1001, 1002));
+
+        let mut doc = Document::default();
+        doc.add(None, None, "metal", fill(None, Some(1.0), None));
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        let reset = SetBatch { tile: None, set: 0, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
+        rig.run_sets(&[reset]);
+        let tile_metal = |rig: &Rig, t: usize| rig.read(&rig.gpu.sets[0].tiles[t].output.metal, 2);
+        // The fill layer reaches every tile.
+        for t in 0..2 {
+            assert!(tile_metal(&rig, t).chunks_exact(2).all(|p| p[1] == 255), "tile {t} is filled");
+        }
+
+        // A 3D stroke aimed at the northern half (tile 1001) paints only tile 1001.
+        let stamp = dab(SIZE as f32 / 2.0, 20.0, 0.0, [0.0, 1.0, 0.0, 0.0]); // metallic 0 where it lands
+        let stroke = SetBatch {
+            tile: None,
+            set: 0,
+            doc: doc.clone(),
+            ops: vec![
+                PaintOp::BeginStroke { layer, target: Target::Content },
+                PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] },
+            ],
+        };
+        rig.run_sets(&[stroke]);
+        let uv = sphere_uv(rig.front);
+        assert!(texel_rg(&tile_metal(&rig, 0), uv).0 < 10, "the front texel of tile 1001 was painted to 0");
+        assert!(tile_metal(&rig, 1).chunks_exact(2).all(|p| p[0] == 255), "tile 1002 must be untouched");
+
+        // A 2D stamp at global UV (1.5, 0.5) lands in tile 1002 at local (0.5, 0.5), and not in 1001.
+        let dab2d = Stamp { brush: [1.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [0.0, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0] };
+        let paint2d = SetBatch { tile: None, set: 0, doc: doc.clone(), ops: vec![PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![dab2d] }] };
+        rig.run_sets(&[paint2d]);
+        let centre = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;
+        assert!(tile_metal(&rig, 1)[centre] < 10, "tile 1002 centre is now metallic 0");
+        let first = tile_metal(&rig, 0);
+        assert_eq!(first[centre], 255, "tile 1001 centre is not touched by a stamp in 1002");
+
+        // Undo reverts every tile together.
+        rig.run_sets(&[SetBatch { tile: None, set: 0, doc: doc.clone(), ops: vec![PaintOp::UndoStroke] }]);
+        assert!(texel_rg(&tile_metal(&rig, 0), uv).0 > 240, "the 3D stroke is undone in tile 1001");
+    }
+
     /// Paint in two texture sets survives a save and reload, each set keeping its own textures.
     #[test]
     fn two_sets_of_paint_survive_a_project_round_trip() {
@@ -1071,12 +1249,13 @@ mod tests {
         let (mut a, mut b) = (Document::default(), Document::default());
         let pa = a.add(None, None, "paint a", NodeKind::Paint);
         let pb = b.add(None, None, "paint b", NodeKind::Paint);
-        let reset = |set, doc: &Document| SetBatch { set, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
+        let reset = |set, doc: &Document| SetBatch { tile: None, set, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
         rig.run_sets(&[reset(0, &a), reset(1, &b)]);
 
         // Set 0 gets a real stroke; set 1 is restored from stored bytes (the camera only sees set 0).
         let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
         let stroke = SetBatch {
+            tile: None,
             set: 0,
             doc: a.clone(),
             ops: vec![PaintOp::Stamps { layer: pa, target: Target::Content, stamps: vec![stamp] }],
@@ -1088,7 +1267,7 @@ mod tests {
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Rough, bytes: (0..n * 2).map(|i| (i % 7) as u8).collect() },
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Height, bytes: (0..n * 2).map(|i| (i % 5) as u8).collect() },
         ];
-        let load_b = SetBatch { set: 1, doc: b.clone(), ops: vec![PaintOp::Load { size: SIZE, blobs: blobs_b.clone() }] };
+        let load_b = SetBatch { tile: None, set: 1, doc: b.clone(), ops: vec![PaintOp::Load { size: SIZE, blobs: blobs_b.clone() }] };
         rig.run_sets(&[stroke, load_b]);
 
         let capture = |rig: &Rig, set: usize, doc: &Document| rig.gpu.sets[set].capture_blobs(&rig.device, &rig.queue, doc);
@@ -1117,7 +1296,7 @@ mod tests {
             .sets
             .iter()
             .enumerate()
-            .map(|(i, s)| SetBatch { set: i, doc: s.document.clone(), ops: vec![PaintOp::Load { size: s.texture_size, blobs: s.blobs.clone() }] })
+            .map(|(i, s)| SetBatch { tile: None, set: i, doc: s.document.clone(), ops: vec![PaintOp::Load { size: s.texture_size, blobs: s.blobs.clone() }] })
             .collect();
         fresh.run_sets(&batches);
         assert_eq!(capture(&fresh, 0, &loaded.sets[0].document), c0, "set 0 after reload");

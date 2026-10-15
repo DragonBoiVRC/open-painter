@@ -101,7 +101,7 @@ impl App {
         if !ops.is_empty() {
             self.thumbs_dirty();
         }
-        let batches = vec![SetBatch { set: self.active, doc: self.doc.clone(), ops }];
+        let batches = vec![SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
 
         let size_px = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
         let cam = self.camera.position();

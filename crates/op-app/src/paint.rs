@@ -7,9 +7,9 @@
 
 use crate::composite::Compositor;
 use crate::normal_gpu::NormalPass;
-use eframe::egui_wgpu::wgpu;
+use eframe::egui_wgpu::wgpu::{self, util::DeviceExt};
 use op_core::{Document, Node, NodeId, NodeKind};
-use op_mesh::Vertex;
+use op_mesh::{Tile, Vertex};
 use op_project::{BlobKind, TextureBlob};
 use std::collections::{HashMap, HashSet};
 
@@ -47,6 +47,8 @@ struct StampGlobals {
     camera_pos: [f32; 4],
     /// width px, height px, near, far
     viewport: [f32; 4],
+    /// UV offset of the tile being painted (u, v, 0, 0).
+    tile: [f32; 4],
 }
 
 /// Camera state the stamp pass needs; supplied each frame.
@@ -230,6 +232,9 @@ pub struct PaintGpu {
     pub output: Layer,
     material_bind: wgpu::BindGroup,
     pub(crate) normal: NormalPass,
+    /// Which UV tile this store holds (the first tile unless UV tiles are in use).
+    pub tile: Tile,
+    tile_buf: wgpu::Buffer,
     compositor: Compositor,
     last_doc: Option<Document>,
     undo: Vec<StrokeSnap>,
@@ -280,6 +285,12 @@ impl PaintGpu {
                 tex_entry(1),
                 tex_entry(2),
                 tex_entry(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -403,7 +414,8 @@ impl PaintGpu {
 
         let output = Layer::new(device, size);
         let normal = NormalPass::new(device, size);
-        let material_bind = Self::make_material_bind(device, &material_layout, &sampler, &output, &normal);
+        let tile_buf = Self::tile_buffer(device, Tile::FIRST);
+        let material_bind = Self::make_material_bind(device, &material_layout, &sampler, &output, &normal, &tile_buf);
         Self {
             pipeline_content,
             pipeline_mask,
@@ -420,6 +432,8 @@ impl PaintGpu {
             output,
             material_bind,
             normal,
+            tile: Tile::FIRST,
+            tile_buf,
             compositor: Compositor::new(device, size),
             last_doc: None,
             undo: Vec::new(),
@@ -433,6 +447,7 @@ impl PaintGpu {
         sampler: &wgpu::Sampler,
         layer: &Layer,
         normal: &NormalPass,
+        tile_buf: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         let [b, m, r, _] = layer.views();
         let n = normal.target.create_view(&Default::default());
@@ -445,8 +460,27 @@ impl PaintGpu {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&r) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&n) },
+                wgpu::BindGroupEntry { binding: 5, resource: tile_buf.as_entire_binding() },
             ],
         })
+    }
+
+    fn tile_buffer(device: &wgpu::Device, tile: Tile) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tile_offset"),
+            contents: bytemuck::cast_slice(&[tile.u as f32, tile.v as f32, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+    }
+
+    /// Make this store hold `tile`: its textures are sampled and painted at that UV offset.
+    pub fn set_tile(&mut self, device: &wgpu::Device, tile: Tile) {
+        if self.tile == tile {
+            return;
+        }
+        self.tile = tile;
+        self.tile_buf = Self::tile_buffer(device, tile);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
     }
 
     pub fn material_bind(&self) -> &wgpu::BindGroup {
@@ -542,7 +576,7 @@ impl PaintGpu {
         self.output = Layer::new(device, size);
         self.output.clear(encoder);
         self.normal.resize(device, size);
-        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
         self.compositor.set_size(size);
         self.last_doc = None;
         self.ensure_store(device, encoder, doc);
@@ -803,6 +837,7 @@ impl PaintGpu {
                                 view.near_far[0],
                                 view.near_far[1],
                             ],
+                            tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
                         }),
                     );
                     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
