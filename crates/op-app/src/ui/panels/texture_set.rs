@@ -19,8 +19,7 @@ impl App {
                     });
                 if self.tex_size != before {
                     // Changing resolution discards all paint and history.
-                    self.undo.clear();
-                    self.redo.clear();
+                    self.clear_active_history();
                     self.pending.push(PaintOp::Reset(self.tex_size));
                     // Baked maps are tied to the resolution they were baked at.
                     self.clear_baked();

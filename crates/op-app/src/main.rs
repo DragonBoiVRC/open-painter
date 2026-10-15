@@ -213,6 +213,9 @@ struct App {
     pending: Vec<PaintOp>,
     undo: Vec<Hist>,
     redo: Vec<Hist>,
+    /// Which texture set each undo entry belongs to, oldest first, so undo follows the order edits were made in.
+    hist_order: Vec<usize>,
+    redo_order: Vec<usize>,
     /// Document as it was before the widget gesture currently in progress.
     gesture_before: Option<Document>,
     status: String,
@@ -323,6 +326,8 @@ impl App {
             pending: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            hist_order: Vec::new(),
+            redo_order: Vec::new(),
             gesture_before: None,
             status: String::from("Select a layer and paint. Orbit: Alt+left or middle. Drop a .fbx, .obj, .glb/.gltf or .opproj to open."),
             render_state: rs,
@@ -915,12 +920,18 @@ impl App {
             self.redo.clear();
             self.pending.push(PaintOp::DropRedo);
         }
+        self.drop_other_redo();
     }
 
     fn push_hist(&mut self, h: Hist) {
         self.undo.push(h);
+        self.hist_order.push(self.active);
         if self.undo.len() > MAX_HISTORY {
             self.undo.remove(0);
+            // The oldest entry of this set is the first one in the order list that names it.
+            if let Some(at) = self.hist_order.iter().position(|s| *s == self.active) {
+                self.hist_order.remove(at);
+            }
         }
         self.clear_redo();
         self.modified = true;
@@ -962,7 +973,36 @@ impl App {
         }
     }
 
+    /// Undo the most recent edit in any texture set, switching to its set first.
     fn do_undo(&mut self) {
+        let Some(&set) = self.hist_order.last() else { return };
+        if set != self.active {
+            self.switch_set(set);
+        }
+        self.hist_order.pop();
+        self.redo_order.push(set);
+        self.undo_here();
+    }
+
+    fn do_redo(&mut self) {
+        let Some(&set) = self.redo_order.last() else { return };
+        if set != self.active {
+            self.switch_set(set);
+        }
+        self.redo_order.pop();
+        self.hist_order.push(set);
+        self.redo_here();
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.hist_order.is_empty()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.redo_order.is_empty()
+    }
+
+    fn undo_here(&mut self) {
         match self.undo.pop() {
             Some(Hist::Doc { before, after }) => {
                 self.doc = before.clone();
@@ -980,7 +1020,7 @@ impl App {
         }
     }
 
-    fn do_redo(&mut self) {
+    fn redo_here(&mut self) {
         match self.redo.pop() {
             Some(Hist::Doc { before, after }) => {
                 self.doc = after.clone();

@@ -446,9 +446,14 @@ pub fn bake_with_occluders(
     progress: &Progress,
 ) -> Result<BakeResult, BakeError> {
     validate(low, high, settings)?;
-    let geo = Geometry::new(low);
+    let mut geo = Geometry::new(low);
     let high_geo = high.map(Geometry::new);
-    let occluder_geo = occluders.filter(|_| high.is_none()).map(Geometry::new);
+    let occluder_geo = occluders.map(Geometry::new);
+    if let Some(whole) = &occluder_geo {
+        geo.adopt_curvature(whole);
+    }
+    // Rays only go to the whole model when there is no high-poly mesh to take precedence.
+    let occluder_geo = occluder_geo.filter(|_| high.is_none());
     let target_geo = high_geo.as_ref().or(occluder_geo.as_ref()).unwrap_or(&geo);
     let diag = occluder_geo.as_ref().map_or_else(|| geo.diagonal(), |g| g.diagonal());
     let ctx = Context {

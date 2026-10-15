@@ -173,6 +173,29 @@ fn pieces(tris: &[[u32; 3]], weld: &[u32]) -> Vec<u32> {
     tris.iter().map(|t| find(&mut parent, weld[t[0] as usize])).collect()
 }
 
+impl Geometry {
+    /// Replace this part's curvature with the values of the whole model it belongs to, matched by
+    /// position, so the seam between two materials has the curvature of the surface it really is
+    /// (on its own, a part's border looks like a flat edge). Vertices the whole model lacks keep
+    /// their own value.
+    pub fn adopt_curvature(&mut self, whole: &Geometry) {
+        let quant = |p: Vec3| -> (i64, i64, i64) {
+            let q = (self.diagonal() * 1e-5).max(1e-9);
+            ((p.x / q).round() as i64, (p.y / q).round() as i64, (p.z / q).round() as i64)
+        };
+        let mut by_pos: HashMap<(i64, i64, i64), f32> = HashMap::with_capacity(whole.positions.len());
+        for (p, k) in whole.positions.iter().zip(&whole.curvature) {
+            by_pos.entry(quant(*p)).or_insert(*k);
+        }
+        let found: Vec<Option<f32>> = self.positions.iter().map(|p| by_pos.get(&quant(*p)).copied()).collect();
+        for (k, f) in self.curvature.iter_mut().zip(found) {
+            if let Some(v) = f {
+                *k = v;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +204,34 @@ mod tests {
     pub fn quad(z: f32) -> Mesh {
         let v = |x: f32, y: f32| Vertex { position: [x, y, z], normal: [0.0, 0.0, 1.0], uv: [x, 1.0 - y] };
         Mesh { vertices: vec![v(0.0, 0.0), v(1.0, 0.0), v(1.0, 1.0), v(0.0, 1.0)], indices: vec![0, 1, 2, 0, 2, 3], ..Default::default() }
+    }
+
+    /// Two quads folded along a shared edge: alone each is flat, together the fold is convex.
+    #[test]
+    fn a_part_adopts_the_curvature_of_the_whole_model_at_its_seam() {
+        let v = |p: [f32; 3], uv: [f32; 2]| op_mesh::Vertex { position: p, normal: [0.0, 1.0, 0.0], uv };
+        let whole = Mesh {
+            vertices: vec![
+                v([0.0, 0.0, 0.0], [0.0, 0.0]),
+                v([1.0, 0.0, 0.0], [1.0, 0.0]),
+                v([1.0, 0.0, 1.0], [1.0, 1.0]),
+                v([0.0, 0.0, 1.0], [0.0, 1.0]),
+                v([1.0, -1.0, 0.0], [2.0, 0.0]),
+                v([1.0, -1.0, 1.0], [2.0, 1.0]),
+            ],
+            // Top quad (y = 0) and a wall hanging down from its x = 1 edge.
+            indices: vec![0, 3, 2, 0, 2, 1, 1, 2, 5, 1, 5, 4],
+            ..Default::default()
+        };
+        let part = Mesh { vertices: whole.vertices.clone(), indices: whole.indices[..6].to_vec(), ..Default::default() };
+        let mut alone = Geometry::new(&part);
+        assert!(alone.curvature.iter().all(|k| k.abs() < 1e-6), "a single flat quad has no curvature");
+        let all = Geometry::new(&whole);
+        assert!(all.curvature[1] > 0.1 && all.curvature[2] > 0.1, "the fold is convex: {:?}", all.curvature);
+        alone.adopt_curvature(&all);
+        assert_eq!(alone.curvature[1], all.curvature[1]);
+        assert_eq!(alone.curvature[2], all.curvature[2]);
+        assert!(alone.curvature[0].abs() < 1e-6, "far from the seam it stays flat");
     }
 
     #[test]

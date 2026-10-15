@@ -81,6 +81,33 @@ impl App {
         self.collapsed = s.collapsed;
     }
 
+    /// Forget the active set's undo history (its paint was discarded), leaving other sets' alone.
+    pub(crate) fn clear_active_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        let a = self.active;
+        self.hist_order.retain(|s| *s != a);
+        self.redo_order.retain(|s| *s != a);
+    }
+
+    /// A new edit ends every redo chain, including those of sets that are not being edited.
+    pub(crate) fn drop_other_redo(&mut self) {
+        self.redo_order.clear();
+        let active = self.active;
+        let mut drops = Vec::new();
+        for (i, slot) in self.parked.iter_mut().enumerate() {
+            if let Some(st) = slot.as_mut().filter(|_| i != active) {
+                if !st.redo.is_empty() {
+                    st.redo.clear();
+                    drops.push(SetBatch { set: i, doc: st.doc.clone(), ops: vec![PaintOp::DropRedo] });
+                }
+            }
+        }
+        for b in drops {
+            self.enqueue(b);
+        }
+    }
+
     /// Restart background mask generation, which belongs to one set's layers and baked maps.
     fn restart_procgen(&mut self) {
         self.thumbs.clear();
@@ -120,6 +147,8 @@ impl App {
         let n = self.mesh.set_ranges().len();
         self.pending.clear();
         self.clear_queue();
+        self.hist_order.clear();
+        self.redo_order.clear();
         self.gesture_before = None;
         self.stroke.active = false;
         self.restart_procgen();
@@ -140,6 +169,8 @@ impl App {
         debug_assert_eq!(states.len(), loads.len());
         self.pending.clear();
         self.clear_queue();
+        self.hist_order.clear();
+        self.redo_order.clear();
         self.gesture_before = None;
         self.stroke.active = false;
         self.restart_procgen();

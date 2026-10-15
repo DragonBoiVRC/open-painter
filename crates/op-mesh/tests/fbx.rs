@@ -88,3 +88,24 @@ fn damaged_and_foreign_files_are_errors_not_panics() {
     assert!(Mesh::load_fbx(dir.join("missing.fbx")).is_err());
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Regression: set order must not depend on hash ordering inside the FBX library.
+#[test]
+fn set_order_is_the_same_on_every_load() {
+    let names = |m: &Mesh| m.sets.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+    let first = names(&load());
+    for _ in 0..30 {
+        assert_eq!(names(&load()), first);
+    }
+}
+
+#[test]
+fn ascii_fbx_gets_a_helpful_error() {
+    let dir = std::env::temp_dir().join(format!("op-fbx-ascii-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("a.fbx");
+    std::fs::write(&p, "; FBX 7.3.0 project file\nFBXHeaderExtension:  {\n}\n").unwrap();
+    let e = Mesh::load_fbx(&p).unwrap_err().to_string();
+    assert!(e.contains("ASCII") && e.contains("binary"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}

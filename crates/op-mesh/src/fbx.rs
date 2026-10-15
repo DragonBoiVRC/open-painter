@@ -24,6 +24,16 @@ fn err(why: impl ToString) -> MeshError {
 
 pub fn load(path: &Path) -> Result<Mesh, MeshError> {
     let file = std::fs::File::open(path).map_err(err)?;
+    // ASCII FBX starts with a "; FBX" comment instead of the binary magic.
+    {
+        use std::io::Read;
+        let mut head = [0u8; 20];
+        let n = (&file).take(20).read(&mut head).map_err(err)?;
+        if head[..n].starts_with(b"; FBX") || head[..n].starts_with(b"\xEF\xBB\xBF; FBX") {
+            return Err(err("this is an ASCII FBX file; export it as binary FBX (7.x) and try again"));
+        }
+    }
+    let file = std::fs::File::open(path).map_err(err)?;
     match AnyDocument::from_seekable_reader(BufReader::new(file)).map_err(err)? {
         AnyDocument::V7400(_, doc) => load_document(&doc),
         _ => Err(err("only FBX 7.x files are supported")),
@@ -181,7 +191,10 @@ impl Builder {
 fn load_document(doc: &Document) -> Result<Mesh, MeshError> {
     let fix = scene_fix(doc);
     let mut b = Builder::default();
-    for obj in doc.objects() {
+    // Object order in the file's index is not stable between loads; the object id is.
+    let mut objects: Vec<_> = doc.objects().collect();
+    objects.sort_by_key(|o| o.object_id());
+    for obj in objects {
         let TypedObjectHandle::Model(TypedModelHandle::Mesh(model)) = obj.get_typed() else { continue };
         let Ok(geometry) = model.geometry() else { continue };
         let typed = TypedModelHandle::Mesh(model.clone());

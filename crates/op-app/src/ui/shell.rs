@@ -127,11 +127,11 @@ impl App {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                    if ui.add_enabled(self.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
                         self.do_undo();
                         ui.close();
                     }
-                    if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                    if ui.add_enabled(self.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
                         self.do_redo();
                         ui.close();
                     }
