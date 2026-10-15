@@ -3,6 +3,7 @@
 mod bake;
 mod brush;
 mod display;
+mod layer_dnd;
 mod layers;
 mod properties;
 mod shelf;

@@ -88,6 +88,9 @@ pub enum PaintOp {
     /// Replace a layer's mask with generated content (one byte per texel). Ignored if the
     /// resolution no longer matches or the layer has no mask.
     SetMask { layer: NodeId, size: u32, bytes: Vec<u8> },
+    /// Copy each (source, destination) node's paint and mask pixels (layer duplication). The
+    /// destinations already exist in the document; missing sources are skipped.
+    CopyLayers(Vec<(NodeId, NodeId)>),
     /// Like `Reset`, then restore saved texture contents (opening a project).
     Load { size: u32, blobs: Vec<TextureBlob> },
 }
@@ -626,6 +629,25 @@ impl PaintGpu {
                             dirty = true;
                         }
                     }
+                }
+                PaintOp::CopyLayers(pairs) => {
+                    for (from, to) in pairs {
+                        if from == to {
+                            continue;
+                        }
+                        let size = self.size;
+                        let Some(src) = self.store.remove(from) else { continue };
+                        if let Some(dst) = self.store.get_mut(to) {
+                            if let (Some(s), Some(d)) = (&src.content, &dst.content) {
+                                d.copy_from(encoder, s);
+                            }
+                            if let (Some(s), Some(d)) = (&src.mask, &dst.mask) {
+                                copy_tex(encoder, s, d, size);
+                            }
+                        }
+                        self.store.insert(*from, src);
+                    }
+                    dirty = true;
                 }
                 PaintOp::DropRedo => self.redo.clear(),
                 PaintOp::Gc(keep) => self.gc(doc, keep),

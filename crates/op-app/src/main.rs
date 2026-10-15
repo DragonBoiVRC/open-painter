@@ -72,11 +72,6 @@ enum Hist {
     Stroke,
 }
 
-enum Act {
-    Select(NodeId),
-    Visible(NodeId, bool),
-}
-
 /// Actions that would discard unsaved work, held until the user confirms.
 #[derive(Clone)]
 enum Pending {
@@ -184,6 +179,10 @@ struct App {
     mesh: Mesh,
     mesh_name: String,
     selected: Option<NodeId>,
+    /// Groups folded shut in the layers panel.
+    collapsed: std::collections::HashSet<NodeId>,
+    /// Layer being renamed in place, with its draft name.
+    renaming: Option<(NodeId, String)>,
     target: Target,
     tool: Tool,
     brush: Brush,
@@ -276,6 +275,8 @@ impl App {
             mesh: Mesh::default(),
             mesh_name: "sphere".into(),
             selected,
+            collapsed: Default::default(),
+            renaming: None,
             target: Target::Content,
             tool: Tool::Paint,
             brush: Brush { radius_pts: 24.0, hardness: 0.6, opacity: 1.0, spacing: 0.15 },

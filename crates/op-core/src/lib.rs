@@ -370,6 +370,22 @@ fn list_of_mut(nodes: &mut Vec<Node>, id: NodeId) -> Option<(&mut Vec<Node>, usi
     None
 }
 
+fn find_in_node(node: &Node, id: NodeId) -> bool {
+    match &node.kind {
+        NodeKind::Group { children } => children.iter().any(|c| c.id == id || find_in_node(c, id)),
+        _ => false,
+    }
+}
+
+fn collect_preorder(node: &Node, out: &mut Vec<NodeId>) {
+    out.push(node.id);
+    if let NodeKind::Group { children } = &node.kind {
+        for c in children {
+            collect_preorder(c, out);
+        }
+    }
+}
+
 fn collect_ids(nodes: &[Node], out: &mut Vec<NodeId>) {
     for n in nodes {
         out.push(n.id);
@@ -480,6 +496,78 @@ impl Document {
     pub fn remove(&mut self, id: NodeId) -> Option<Node> {
         let (list, i) = list_of_mut(&mut self.nodes, id)?;
         Some(list.remove(i))
+    }
+
+    /// True if `id` is `ancestor` itself or lies anywhere beneath it.
+    pub fn is_within(&self, ancestor: NodeId, id: NodeId) -> bool {
+        match self.find(ancestor) {
+            Some(n) => ancestor == id || find_in_node(n, id),
+            None => false,
+        }
+    }
+
+    /// Move a node (with everything under it) to a drop slot: into `parent`'s children (`None` = top
+    /// level), *before the element currently at `index`* (`index == len` appends, i.e. the top of
+    /// the stack). Returns false, changing nothing, if the move is impossible: unknown ids, a
+    /// parent that is not a group, or a parent inside the moved node.
+    pub fn move_to(&mut self, id: NodeId, parent: Option<NodeId>, index: usize) -> bool {
+        if self.find(id).is_none() {
+            return false;
+        }
+        if let Some(p) = parent {
+            match self.find(p) {
+                Some(Node { kind: NodeKind::Group { .. }, .. }) => {}
+                _ => return false,
+            }
+            if self.is_within(id, p) {
+                return false; // would put a group inside itself
+            }
+        }
+        let Some((old_parent, old_index)) = self.locate(id) else { return false };
+        let mut at = index;
+        if old_parent == parent && old_index < index {
+            at -= 1; // removing the node first shifts everything after it down by one
+        }
+        let node = self.remove(id).expect("located above");
+        let list = match parent.and_then(|p| self.find_mut(p)) {
+            Some(Node { kind: NodeKind::Group { children }, .. }) => children,
+            _ => &mut self.nodes,
+        };
+        list.insert(at.min(list.len()), node);
+        true
+    }
+
+    /// Copy a node and everything under it, placed just above the original. Returns the copy's id
+    /// and the (original, copy) id pairs of every node in the subtree, in pre-order, so callers can
+    /// copy per-node data (such as paint) too.
+    pub fn duplicate(&mut self, id: NodeId) -> Option<(NodeId, Vec<(NodeId, NodeId)>)> {
+        let (parent, index) = self.locate(id)?;
+        let mut copy = self.find(id)?.clone();
+        let mut old_ids = Vec::new();
+        collect_preorder(&copy, &mut old_ids);
+        self.reassign_ids(&mut copy);
+        let mut new_ids = Vec::new();
+        collect_preorder(&copy, &mut new_ids);
+        copy.name = format!("{} copy", copy.name);
+        let top = copy.id;
+        self.insert_nodes_raw(parent, index + 1, copy);
+        Some((top, old_ids.into_iter().zip(new_ids).collect()))
+    }
+
+    /// Replace a node by a new group containing it, in the same position.
+    pub fn wrap_in_group(&mut self, id: NodeId) -> Option<NodeId> {
+        let (parent, index) = self.locate(id)?;
+        let node = self.remove(id)?;
+        let group = self.add(parent, Some(index), "Group", NodeKind::Group { children: vec![node] });
+        Some(group)
+    }
+
+    fn insert_nodes_raw(&mut self, parent: Option<NodeId>, index: usize, node: Node) {
+        let list = match parent.and_then(|p| self.find_mut(p)) {
+            Some(Node { kind: NodeKind::Group { children }, .. }) => children,
+            _ => &mut self.nodes,
+        };
+        list.insert(index.min(list.len()), node);
     }
 
     /// Move one step toward the top of its sibling list.
@@ -599,6 +687,133 @@ mod tests {
         assert_eq!(d.remove(inner).unwrap().id, inner);
         assert!(d.find(inner).is_none());
         assert_eq!(d.ids().len(), 3);
+    }
+
+    fn order(d: &Document) -> Vec<String> {
+        d.nodes.iter().map(|n| n.name.clone()).collect()
+    }
+
+    fn four() -> (Document, [NodeId; 4]) {
+        let mut d = Document::default();
+        let ids = ["a", "b", "c", "d"].map(|n| d.add(None, None, n, NodeKind::Paint));
+        (d, ids)
+    }
+
+    #[test]
+    fn move_to_a_slot_within_one_list_uses_pre_removal_indices() {
+        // slot k means "before the element currently at k"
+        let (mut d, [a, _b, _c, dd]) = four();
+        assert!(d.move_to(a, None, 3)); // before d
+        assert_eq!(order(&d), ["b", "c", "a", "d"]);
+        assert!(d.move_to(dd, None, 0)); // to the very bottom
+        assert_eq!(order(&d), ["d", "b", "c", "a"]);
+        assert!(d.move_to(dd, None, 4)); // append: the very top
+        assert_eq!(order(&d), ["b", "c", "a", "d"]);
+        // Dropping where it already is changes nothing, whichever side of itself the slot is on.
+        let before = order(&d);
+        let c = d.nodes[1].id;
+        assert!(d.move_to(c, None, 1) && d.move_to(c, None, 2));
+        assert_eq!(order(&d), before);
+    }
+
+    #[test]
+    fn move_to_into_and_out_of_groups() {
+        let (mut d, [a, b, c, _d]) = four();
+        let g = d.add(None, None, "g", NodeKind::Group { children: vec![] });
+        assert!(d.move_to(a, Some(g), 0));
+        assert!(d.move_to(b, Some(g), 1)); // append above a
+        assert_eq!(d.locate(a), Some((Some(g), 0)));
+        assert_eq!(d.locate(b), Some((Some(g), 1)));
+        assert!(d.move_to(a, Some(g), 2)); // within the group, to the top
+        assert_eq!(d.locate(b), Some((Some(g), 0)));
+        assert_eq!(d.locate(a), Some((Some(g), 1)));
+        assert!(d.move_to(b, None, 0)); // out of the group, to the very bottom
+        assert_eq!(d.locate(b), Some((None, 0)));
+        assert_eq!(d.find(c).unwrap().name, "c");
+        assert_eq!(d.ids().len(), 5, "no node was lost or duplicated");
+    }
+
+    #[test]
+    fn impossible_moves_change_nothing() {
+        let (mut d, [a, b, ..]) = four();
+        let g = d.add(None, None, "g", NodeKind::Group { children: vec![] });
+        let inner = d.add(Some(g), None, "inner", NodeKind::Group { children: vec![] });
+        let before = d.clone();
+        assert!(!d.move_to(g, Some(g), 0), "a group into itself");
+        assert!(!d.move_to(g, Some(inner), 0), "a group into its own descendant");
+        assert!(!d.move_to(a, Some(b), 0), "a paint layer is not a container");
+        assert!(!d.move_to(999, None, 0), "unknown node");
+        assert!(!d.move_to(a, Some(999), 0), "unknown parent");
+        assert_eq!(d, before);
+        assert!(d.move_to(inner, None, 0), "but a child may leave its group");
+    }
+
+    #[test]
+    fn move_to_clamps_absurd_indices_and_keeps_ids_and_contents() {
+        let (mut d, [a, ..]) = four();
+        d.find_mut(a).unwrap().opacity = 0.25;
+        assert!(d.move_to(a, None, usize::MAX / 2));
+        assert_eq!(d.nodes.last().unwrap().id, a);
+        assert_eq!(d.find(a).unwrap().opacity, 0.25);
+    }
+
+    #[test]
+    fn is_within_follows_the_tree() {
+        let mut d = Document::default();
+        let g = d.add(None, None, "g", NodeKind::Group { children: vec![] });
+        let h = d.add(Some(g), None, "h", NodeKind::Group { children: vec![] });
+        let leaf = d.add(Some(h), None, "leaf", NodeKind::Paint);
+        let other = d.add(None, None, "other", NodeKind::Paint);
+        assert!(d.is_within(g, leaf) && d.is_within(g, h) && d.is_within(g, g));
+        assert!(!d.is_within(leaf, g) && !d.is_within(g, other) && !d.is_within(h, other));
+        assert!(!d.is_within(999, leaf));
+    }
+
+    #[test]
+    fn duplicate_copies_a_subtree_above_the_original_with_fresh_ids() {
+        let mut d = Document::default();
+        let base = d.add(None, None, "base", NodeKind::Paint);
+        let g = d.add(None, None, "grp", NodeKind::Group { children: vec![] });
+        let x = d.add(Some(g), None, "x", NodeKind::Paint);
+        let y = d.add(Some(g), None, "y", NodeKind::Fill(FillParams { base: Some([0.1, 0.2, 0.3]), metallic: None, roughness: None }));
+        d.find_mut(y).unwrap().mask = Some(Mask::generated(Generator::new(GeneratorKind::EdgeWear).with("amount", 0.9)));
+        let (copy, pairs) = d.duplicate(g).unwrap();
+        assert_eq!(d.locate(copy), Some((None, 2)), "directly above the original");
+        assert_eq!(d.find(copy).unwrap().name, "grp copy");
+        assert_eq!(pairs.len(), 3, "group and both children");
+        assert_eq!(pairs[0].0, g);
+        let ids = d.ids();
+        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 7, "ids are unique");
+        // children are copied in order with their settings, masks and generators
+        let NodeKind::Group { children } = &d.find(copy).unwrap().kind else { panic!() };
+        assert_eq!(children.len(), 2);
+        assert_eq!((pairs[1].0, pairs[2].0), (x, y));
+        assert_eq!((children[0].id, children[1].id), (pairs[1].1, pairs[2].1));
+        assert_eq!(children[1].mask, d.find(y).unwrap().mask);
+        assert!(d.duplicate(999).is_none());
+        let _ = base;
+    }
+
+    #[test]
+    fn duplicating_inside_a_group_stays_in_the_group() {
+        let mut d = Document::default();
+        let g = d.add(None, None, "g", NodeKind::Group { children: vec![] });
+        let a = d.add(Some(g), None, "a", NodeKind::Paint);
+        let top = d.add(Some(g), None, "top", NodeKind::Paint);
+        let (copy, _) = d.duplicate(a).unwrap();
+        assert_eq!(d.locate(copy), Some((Some(g), 1)));
+        assert_eq!(d.locate(top), Some((Some(g), 2)), "the layer above is pushed up, not overwritten");
+    }
+
+    #[test]
+    fn wrap_in_group_keeps_the_position() {
+        let (mut d, [_a, b, ..]) = four();
+        let g = d.wrap_in_group(b).unwrap();
+        assert_eq!(d.locate(g), Some((None, 1)));
+        assert_eq!(d.locate(b), Some((Some(g), 0)));
+        assert_eq!(order(&d), ["a", "Group", "c", "d"]);
+        assert!(d.wrap_in_group(999).is_none());
     }
 
     #[test]
