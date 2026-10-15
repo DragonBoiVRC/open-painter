@@ -80,6 +80,12 @@ impl SetState {
     }
 }
 
+/// The sets to hide so that only `i` is shown; or nothing hidden if `i` is already alone.
+pub fn isolate(hidden: &HashSet<usize>, i: usize, count: usize) -> HashSet<usize> {
+    let alone = !hidden.contains(&i) && (0..count).filter(|s| *s != i).all(|s| hidden.contains(&s));
+    if alone { HashSet::new() } else { (0..count).filter(|s| *s != i).collect() }
+}
+
 /// The op that gives a set's paint store its baked normal map (or removes it).
 pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32) -> PaintOp {
     let rgba8 = baked.get(&MeshMap::NormalBase).filter(|b| b.size == size && b.channels == 3).map(|b| {
@@ -95,6 +101,30 @@ pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32) -> PaintOp
 }
 
 impl App {
+    /// Per-set "hidden" flags for the 3D view.
+    pub(crate) fn hidden_flags(&self) -> Vec<bool> {
+        (0..self.parked.len()).map(|i| self.hidden_sets.contains(&i)).collect()
+    }
+
+    pub(crate) fn toggle_set_visible(&mut self, i: usize) {
+        if !self.hidden_sets.remove(&i) {
+            self.hidden_sets.insert(i);
+        }
+        self.modified = true;
+    }
+
+    pub(crate) fn isolate_set(&mut self, i: usize) {
+        self.hidden_sets = isolate(&self.hidden_sets, i, self.parked.len());
+        self.modified = true;
+    }
+
+    pub(crate) fn show_all_sets(&mut self) {
+        if !self.hidden_sets.is_empty() {
+            self.hidden_sets.clear();
+            self.modified = true;
+        }
+    }
+
     pub(crate) fn set_ranges_len(&self) -> usize {
         self.mesh.set_ranges().len()
     }
@@ -217,6 +247,7 @@ impl App {
         self.gesture_before = None;
         self.stroke.active = false;
         self.restart_procgen();
+        self.hidden_sets.clear();
         self.parked = (0..n).map(|set| Some(SetState::fresh(size, self.tile_count(set)))).collect();
         self.active = 0;
         let first = self.parked[0].take().expect("just created");
@@ -275,7 +306,7 @@ impl App {
         // wgpu clip space has depth 0 at the near plane and 1 at the far plane.
         let near = inv.project_point3(ndc.extend(0.0));
         let far = inv.project_point3(ndc.extend(1.0));
-        match self.mesh.raycast_set(near, (far - near).normalize_or_zero()) {
+        match self.mesh.raycast_set_where(near, (far - near).normalize_or_zero(), |s| !self.hidden_sets.contains(&s)) {
             Some((set, _)) => self.switch_set(set),
             None => self.status = "No model under the cursor.".into(),
         }
@@ -307,6 +338,8 @@ impl App {
         self.active = i;
         let view = self.view;
         self.set_view(view);
+        // Working on a set you cannot see is confusing, so choosing it brings it back.
+        self.hidden_sets.remove(&i);
         self.status = format!("Texture set '{}'.", self.set_name(i));
     }
 
@@ -364,6 +397,19 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolating_hides_everything_else_and_a_second_isolate_restores() {
+        let none = HashSet::new();
+        let only_2 = isolate(&none, 2, 5);
+        assert_eq!(only_2, HashSet::from([0, 1, 3, 4]));
+        assert!(isolate(&only_2, 2, 5).is_empty(), "isolating the one that is alone shows everything again");
+        // Isolating a different one switches over.
+        assert_eq!(isolate(&only_2, 3, 5), HashSet::from([0, 1, 2, 4]));
+        // A hidden set being isolated becomes the only visible one.
+        assert_eq!(isolate(&HashSet::from([2]), 2, 3), HashSet::from([0, 1]));
+        assert!(isolate(&none, 0, 1).is_empty(), "with a single set there is nothing to hide");
+    }
 
     #[test]
     fn a_fresh_set_has_the_default_material_selected() {

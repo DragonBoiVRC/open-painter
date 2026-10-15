@@ -148,6 +148,8 @@ pub struct ViewportGpu {
     pub sets: Vec<SetGpu>,
     /// The set being edited and previewed.
     pub active: usize,
+    /// Texture sets left out of the 3D view (indexed by set; missing entries are shown).
+    pub hidden: Vec<bool>,
     /// Batches waiting for the next rendered frame (set up by the app outside of frames).
     pub(crate) queued: Vec<SetBatch>,
     thumbnailer: crate::thumbs::Thumbnailer,
@@ -354,6 +356,7 @@ impl ViewportGpu {
             offscreen: None,
             sets: vec![SetGpu { tiles: vec![paint], tile_ranges: vec![(0, 0)] }],
             active: 0,
+            hidden: Vec::new(),
             queued: Vec::new(),
             thumbnailer: crate::thumbs::Thumbnailer::new(device),
             uv: crate::uvview::UvGpu::new(device, target_format, &paint_layout),
@@ -588,6 +591,9 @@ impl ViewportGpu {
             pass.set_vertex_buffer(0, v.slice(..));
             pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
             for (set, unit) in self.sets.iter().enumerate() {
+                if self.hidden.get(set).copied().unwrap_or(false) {
+                    continue;
+                }
                 // The baked-map preview belongs to the set being edited; the others are shaded normally.
                 let globals = if set == self.active { &self.globals_bind } else { &self.plain_bind };
                 pass.set_bind_group(0, globals, &[]);
@@ -623,6 +629,7 @@ pub struct ViewportCallback {
     pub batches: Vec<SetBatch>,
     /// The set shown with the baked-map preview.
     pub active: usize,
+    pub hidden: Vec<bool>,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -636,6 +643,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(gpu) = resources.get_mut::<ViewportGpu>() {
             gpu.active = self.active.min(gpu.sets.len().saturating_sub(1));
+            gpu.hidden = self.hidden.clone();
             gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
         }
         Vec::new()
@@ -1019,6 +1027,7 @@ mod tests {
             }],
             active: 0,
             udim: false,
+            hidden_sets: Vec::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.opproj");
@@ -1247,6 +1256,34 @@ mod tests {
         assert!(texel_rg(&tile_metal(&rig, 0), uv).0 > 240, "the 3D stroke is undone in tile 1001");
     }
 
+    /// A hidden texture set is not drawn: the view goes through it to whatever is behind.
+    #[test]
+    fn hidden_texture_sets_are_not_drawn() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        rig.gpu.set_mesh(&rig.device, &two_set_sphere());
+        let red = Document::with_default_material();
+        let mut red = red;
+        red.find_mut(1).unwrap().kind = fill(Some([1.0, 0.0, 0.0]), Some(0.0), Some(0.6));
+        let mut green = Document::with_default_material();
+        green.find_mut(1).unwrap().kind = fill(Some([0.0, 1.0, 0.0]), Some(0.0), Some(0.6));
+        let reset = |set, doc: &Document| SetBatch { tile: None, set, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
+        rig.run_sets(&[reset(0, &red), reset(1, &green)]);
+        let shown = center_pixel(&rig);
+        assert!(shown[0] > shown[1], "the camera sees the red northern set: {shown:?}");
+
+        rig.gpu.hidden = vec![true, false];
+        rig.run_sets(&[]);
+        let hidden = center_pixel(&rig);
+        assert!(hidden[0] < shown[0] && hidden[0] <= hidden[1], "with the red set hidden it is gone: {hidden:?}");
+
+        rig.gpu.hidden = vec![false, true];
+        rig.run_sets(&[]);
+        assert_eq!(center_pixel(&rig), shown, "hiding the other set leaves the view unchanged");
+        rig.gpu.hidden = Vec::new();
+        rig.run_sets(&[]);
+        assert_eq!(center_pixel(&rig), shown, "nothing hidden again");
+    }
+
     /// Paint in two texture sets survives a save and reload, each set keeping its own textures.
     #[test]
     fn two_sets_of_paint_survive_a_project_round_trip() {
@@ -1291,6 +1328,7 @@ mod tests {
             ],
             active: 1,
             udim: false,
+            hidden_sets: Vec::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("two.opproj");

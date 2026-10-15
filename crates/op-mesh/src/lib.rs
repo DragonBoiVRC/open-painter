@@ -104,9 +104,18 @@ impl Mesh {
     /// The nearest surface along a ray: the texture set it belongs to and the distance. Both sides
     /// of a triangle count. Brute force, which is fast enough for a click on a large model.
     pub fn raycast_set(&self, origin: Vec3, dir: Vec3) -> Option<(usize, f32)> {
+        self.raycast_set_where(origin, dir, |_| true)
+    }
+
+    /// Like [`Mesh::raycast_set`], but only sets for which `visible` is true can be hit; the others are
+    /// seen through.
+    pub fn raycast_set_where(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool) -> Option<(usize, f32)> {
         let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
         let mut best: Option<(usize, f32)> = None;
         for (set, r) in self.set_ranges().iter().enumerate() {
+            if !visible(set) {
+                continue;
+            }
             let tris = &self.indices[r.first_index as usize..(r.first_index + r.index_count) as usize];
             for t in tris.chunks_exact(3) {
                 let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
@@ -450,6 +459,11 @@ mod tests {
         assert_eq!(south_set, 1);
         assert!(m.raycast_set(Vec3::new(5.0, 5.0, 5.0), Vec3::new(1.0, 0.0, 0.0)).is_none(), "a miss");
         assert!(m.raycast_set(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, 1.0)).is_none(), "pointing away");
+        // A hidden set is seen through: aiming at the northern half with it hidden finds nothing.
+        let north = (Vec3::new(5.0, 0.3, 0.2), Vec3::new(-1.0, 0.0, 0.0));
+        assert_eq!(m.raycast_set_where(north.0, north.1, |_| true).map(|h| h.0), Some(0));
+        let seen_through = m.raycast_set_where(north.0, north.1, |s| s != 0);
+        assert!(seen_through.is_none_or(|(set, _)| set == 1), "{seen_through:?}");
     }
 
     #[test]

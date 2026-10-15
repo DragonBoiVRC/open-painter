@@ -119,6 +119,8 @@ pub struct Project {
     pub active: usize,
     /// Whether UV tiles are in use: then each set has a tile for every UDIM tile its UVs occupy.
     pub udim: bool,
+    /// Texture sets hidden in the 3D view (a view setting, remembered with the project).
+    pub hidden_sets: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -157,6 +159,8 @@ struct Manifest {
     active: usize,
     #[serde(default)]
     udim: bool,
+    #[serde(default)]
+    hidden: Vec<usize>,
     sets: Vec<SetEntry>,
 }
 
@@ -345,6 +349,7 @@ fn write_zip(path: &Path, project: &Project) -> Result<(), ProjectError> {
         mesh_name: project.mesh_name.clone(),
         active: project.active,
         udim: project.udim,
+        hidden: project.hidden_sets.clone(),
         sets: project
             .sets
             .iter()
@@ -473,6 +478,7 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
         document: Document,
         tiles: Vec<(Place, Vec<BlobEntry>, Vec<BakeEntry>)>,
     }
+    let mut hidden_sets = Vec::new();
     let (mesh_name, entries, active, udim): (String, Vec<Pending>, usize, bool) = if header.version >= 4 {
         let m: Manifest = serde_json::from_slice(&manifest_bytes)?;
         let sets = m
@@ -485,6 +491,7 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
                 tiles: s.tiles.into_iter().enumerate().map(|(t, e)| (Place::Tile(i, t), e.blobs, e.bakes)).collect(),
             })
             .collect();
+        hidden_sets = m.hidden;
         (m.mesh_name, sets, m.active, m.udim)
     } else if header.version == 3 {
         let m: ManifestV3 = serde_json::from_slice(&manifest_bytes)?;
@@ -520,7 +527,10 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
         }
         sets.push(SetData { texture_size: e.texture_size, document: e.document, tiles: data });
     }
-    Ok(Project { mesh_name, mesh, sets, active, udim })
+    hidden_sets.retain(|s| *s < sets.len());
+    hidden_sets.sort_unstable();
+    hidden_sets.dedup();
+    Ok(Project { mesh_name, mesh, sets, active, udim, hidden_sets })
 }
 
 /// Where to autosave: next to a saved project, or in `fallback_dir` for an untitled one.
@@ -565,6 +575,7 @@ mod tests {
             sets: vec![SetData { texture_size: SIZE, document: doc, tiles: vec![TileData { blobs, baked }] }],
             active: 0,
             udim: false,
+            hidden_sets: Vec::new(),
         }
     }
 
@@ -900,6 +911,7 @@ mod tests {
             sets: vec![SetData { texture_size: SIZE, document: doc, tiles: vec![tile(10), tile(20)] }],
             active: 0,
             udim: true,
+            hidden_sets: Vec::new(),
         }
     }
 
@@ -918,6 +930,46 @@ mod tests {
             assert_eq!(q.sets[0].tiles[t].baked, p.sets[0].tiles[t].baked, "tile {t}");
         }
         assert_ne!(q.sets[0].tiles[0].blobs[0].bytes, q.sets[0].tiles[1].blobs[0].bytes, "the tiles hold different paint");
+    }
+
+    #[test]
+    fn hidden_sets_are_remembered_and_stale_entries_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.opproj");
+        let mut p = two_sets();
+        p.hidden_sets = vec![1];
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path).unwrap().hidden_sets, [1]);
+        // A hand-edited list pointing at sets that do not exist is cleaned up on load.
+        p.hidden_sets = vec![1, 7, 1, 0];
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path).unwrap().hidden_sets, [0, 1]);
+        assert!(load_without_hidden_field(&path).hidden_sets.is_empty(), "older files have no such field");
+    }
+
+    /// Rewrite a saved project's manifest without the `hidden` field, as an older build wrote it.
+    fn load_without_hidden_field(path: &Path) -> Project {
+        let mut zin = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&read_limited(&mut zin.by_name("manifest.json").unwrap(), 1 << 22, "m").unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("hidden");
+        let out = path.with_extension("old");
+        let mut zout = zip::ZipWriter::new(File::create(&out).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zout.start_file("manifest.json", opts).unwrap();
+        zout.write_all(&serde_json::to_vec(&value).unwrap()).unwrap();
+        for i in 0..zin.len() {
+            let mut f = zin.by_index(i).unwrap();
+            let name = f.name().unwrap().to_string();
+            if name == "manifest.json" {
+                continue;
+            }
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            zout.start_file(name, opts).unwrap();
+            zout.write_all(&data).unwrap();
+        }
+        zout.finish().unwrap();
+        load(&out).unwrap()
     }
 
     #[test]

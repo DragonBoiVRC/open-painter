@@ -277,6 +277,8 @@ struct App {
     bakes: Vec<sets::TileBake>,
     /// Background mask generation, one state per tile.
     procs: Vec<sets::TileProc>,
+    /// Texture sets hidden in the 3D view; a view setting, saved with the project.
+    hidden_sets: std::collections::HashSet<usize>,
     /// Whether UV tiles (UDIM) are in use: each set then has a paint store per tile its UVs occupy.
     udim: bool,
     /// Paint operations meant for one tile only, as (tile, op); sent with the next frame.
@@ -417,6 +419,7 @@ impl App {
             view: View::Shaded,
             procs: vec![sets::TileProc::new()],
             udim: false,
+            hidden_sets: Default::default(),
             pending_tiles: Vec::new(),
             custom_generators,
             smart_materials,
@@ -532,6 +535,7 @@ impl App {
             states.push(sets::SetState::restored(s.document, s.texture_size, baked));
         }
         self.install_sets(states, loads, p.active);
+        self.hidden_sets = p.hidden_sets.into_iter().collect();
         self.set_view(View::Shaded);
         self.project_path = path;
         self.modified = modified;
@@ -609,7 +613,9 @@ impl App {
                 .collect();
             sets.push(op_project::SetData { texture_size, document: doc.clone(), tiles });
         }
-        Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active, udim: self.udim })
+        let mut hidden_sets: Vec<usize> = self.hidden_sets.iter().copied().collect();
+        hidden_sets.sort_unstable();
+        Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active, udim: self.udim, hidden_sets })
     }
 
     fn do_save(&mut self, mut path: PathBuf, ctx: &egui::Context) {
@@ -1487,6 +1493,7 @@ impl App {
                         ("Delete / F2", "delete / rename the selected layer"),
                         ("Ctrl+PageUp / PageDown", "previous / next texture set"),
                         ("Ctrl + click", "pick the texture set under the cursor"),
+                        ("H / Shift+H", "hide or show the active material / show all"),
                         ("P / E", "paint / erase"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
@@ -1742,6 +1749,12 @@ impl App {
         // Single-key shortcuts must not fire while a text field has focus.
         if ctx.egui_wants_keyboard_input() {
             return;
+        }
+        let (hide, show_all) = ui.input(|i| (i.key_pressed(Key::H) && !i.modifiers.any(), i.key_pressed(Key::H) && i.modifiers.shift && !i.modifiers.command));
+        if show_all {
+            self.show_all_sets();
+        } else if hide && self.set_ranges_len() > 1 {
+            self.toggle_set_visible(self.active);
         }
         let (delete, rename) = ui.input(|i| (i.key_pressed(Key::Delete), i.key_pressed(Key::F2)));
         if delete {

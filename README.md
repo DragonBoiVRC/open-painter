@@ -10,6 +10,7 @@ baked mesh maps, height-to-normal painting, UDIM tiles and export presets.
 - Layer stack with groups, blend modes, fill and paint layers, masks and generated masks.
 - Brush painting in 3D (projective) and in the 2D UV view, with Base color, Metallic, Roughness and
   Height channels; height becomes a tangent-space normal map.
+- Show, hide or isolate individual materials in the 3D view.
 - Optional UV tiles (UDIM): one texture per tile, baked and exported separately.
 - CPU baking (AO, curvature, thickness, normals, position, ID and more), including from a high-poly mesh.
 - Export presets (PBR, Unity, Unreal, glTF, and import of Substance Painter `.spexp` presets).
