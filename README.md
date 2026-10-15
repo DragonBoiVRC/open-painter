@@ -33,7 +33,7 @@ packaging/install.sh --remove   # removes it again
 ```
 
 This installs for the current user only (`~/.local`), registers `.opproj` files, and turns on
-automatic updates: at most every six hours the launcher checks this repository for new commits
+automatic updates: each time you start it, the launcher checks this repository for new commits
 and, if there are any (and your checkout has no local changes), pulls and rebuilds in the
 background. The new version is used the next time you start the program. To turn that off, put
 `off` in `~/.config/open-painter/auto-update`, or set `OPEN_PAINTER_NO_UPDATE=1`. The update log is

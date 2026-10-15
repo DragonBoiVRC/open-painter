@@ -4,7 +4,7 @@
 program as `~/.local/share/open-painter/open-painter-bin`. Starting the launcher:
 
 1. starts the program straight away;
-2. in the background, at most once every six hours, runs `git fetch` in the source checkout recorded in
+2. in the background, on every launch, runs `git fetch` in the source checkout recorded in
    `~/.local/share/open-painter/source`;
 3. if the remote has new commits and the checkout has no uncommitted changes, fast-forwards it,
    rebuilds with `packaging/install.sh --update` and swaps the new binary in atomically.

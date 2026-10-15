@@ -8,7 +8,6 @@ data="${XDG_DATA_HOME:-$HOME/.local/share}/open-painter"
 state="${XDG_STATE_HOME:-$HOME/.local/state}/open-painter"
 conf="${XDG_CONFIG_HOME:-$HOME/.config}/open-painter/auto-update"
 prog="$data/open-painter-bin"
-interval=21600   # seconds between update checks
 
 if [ ! -x "$prog" ]; then
     echo "open-painter: $prog is missing; run packaging/install.sh again." >&2
@@ -25,7 +24,6 @@ update() {
     mkdir "$state/lock" 2>/dev/null || return 0
     trap 'rmdir "$state/lock"' EXIT
     export PATH="$HOME/.cargo/bin:$PATH"
-    touch "$state/last-check"
 
     git -C "$src" fetch --quiet origin >>"$log" 2>&1 || return 0
     behind=$(git -C "$src" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)
@@ -51,11 +49,8 @@ enabled=1
 [ "$(cat "$conf" 2>/dev/null)" = "off" ] && enabled=0
 
 if [ "$enabled" = 1 ]; then
-    last=$(stat -c %Y "$state/last-check" 2>/dev/null || echo 0)
-    if [ $(( $(date +%s) - last )) -ge "$interval" ]; then
-        # Detached, so it never delays or ties up the program.
-        ( update ) </dev/null >/dev/null 2>&1 &
-    fi
+    # Checked on every launch. Detached, so it never delays or ties up the program.
+    ( update ) </dev/null >/dev/null 2>&1 &
 fi
 
 exec "$prog" "$@"

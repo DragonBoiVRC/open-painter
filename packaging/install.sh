@@ -64,5 +64,5 @@ refresh
 
 echo "Installed. Look for 'open-painter' in your application menu."
 echo "From a terminal: $bin_dir/open-painter [model-or-project]"
-echo "Automatic updates are on (checked at most every 6 hours); see README.md to turn them off."
+echo "Automatic updates are on (checked each time you start it); see README.md to turn them off."
 case ":$PATH:" in *":$bin_dir:"*) ;; *) echo "Note: $bin_dir is not on your PATH, so only the menu entry will find it." ;; esac
