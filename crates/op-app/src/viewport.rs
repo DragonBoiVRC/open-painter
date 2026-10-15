@@ -78,6 +78,7 @@ pub struct ViewportGpu {
     pub active: usize,
     /// Batches waiting for the next rendered frame (set up by the app outside of frames).
     queued: Vec<SetBatch>,
+    thumbnailer: crate::thumbs::Thumbnailer,
     preview_layout: wgpu::BindGroupLayout,
     preview_sampler: wgpu::Sampler,
     preview_bind: wgpu::BindGroup,
@@ -273,6 +274,7 @@ impl ViewportGpu {
             sets: vec![paint],
             active: 0,
             queued: Vec::new(),
+            thumbnailer: crate::thumbs::Thumbnailer::new(device),
             preview_layout,
             preview_sampler,
             preview_bind,
@@ -318,6 +320,19 @@ impl ViewportGpu {
             self.sets.push(PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE));
         }
         self.active = self.active.min(self.sets.len() - 1);
+    }
+
+    /// 32x32 previews of the wanted layer textures of `set`: `(node, is_mask)` -> RGBA8 bytes.
+    pub fn thumbnails(&self, device: &wgpu::Device, queue: &wgpu::Queue, set: usize, wanted: &[(u64, bool)]) -> Vec<((u64, bool), Vec<u8>)> {
+        let Some(paint) = self.sets.get(set) else { return Vec::new() };
+        wanted
+            .iter()
+            .filter_map(|&(node, mask)| {
+                let g = paint.store.get(&node)?;
+                let tex = if mask { g.mask.as_ref()? } else { &g.content.as_ref()?.base };
+                Some(((node, mask), self.thumbnailer.render(device, queue, tex, mask)))
+            })
+            .collect()
     }
 
     /// Hold `batch` until the next frame is rendered; queued batches run before that frame's own.

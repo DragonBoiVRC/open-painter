@@ -83,6 +83,8 @@ impl App {
 
     /// Restart background mask generation, which belongs to one set's layers and baked maps.
     fn restart_procgen(&mut self) {
+        self.thumbs.clear();
+        self.thumbs_dirty();
         for j in &self.proc_jobs {
             j.cancel.store(true, Ordering::Relaxed);
         }

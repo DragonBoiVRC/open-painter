@@ -30,7 +30,26 @@ enum LayerAct {
     Drop(NodeId, Drop),
 }
 
+/// Keyboard commands that act on the selected layer.
+#[derive(Clone, Copy)]
+pub enum LayerCmd {
+    Duplicate,
+    Group,
+    Delete,
+    Rename,
+}
+
 impl App {
+    pub(crate) fn layer_command(&mut self, cmd: LayerCmd) {
+        let Some(id) = self.selected.filter(|id| self.doc.find(*id).is_some()) else { return };
+        self.apply_layer_act(match cmd {
+            LayerCmd::Duplicate => LayerAct::Duplicate(id),
+            LayerCmd::Group => LayerAct::Wrap(id),
+            LayerCmd::Delete => LayerAct::Delete(id),
+            LayerCmd::Rename => LayerAct::BeginRename(id),
+        });
+    }
+
     pub(crate) fn layers_panel(&mut self, ui: &mut egui::Ui) {
         self.layer_toolbar(ui);
         ui.add_space(2.0);
@@ -65,6 +84,7 @@ impl App {
                                 &self.doc,
                                 self.selected,
                                 &mut self.renaming,
+                                &self.thumbs,
                                 node,
                                 row,
                                 dragging,
@@ -251,6 +271,7 @@ fn layer_row(
     doc: &Document,
     selected: Option<NodeId>,
     renaming: &mut Option<(NodeId, String)>,
+    thumbs: &std::collections::HashMap<(NodeId, bool), egui::TextureHandle>,
     node: &Node,
     row: &Row,
     dragging: Option<NodeId>,
@@ -316,11 +337,11 @@ fn layer_row(
 
     // Thumbnails.
     let thumb = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - THUMB / 2.0), egui::vec2(THUMB, THUMB));
-    paint_thumb(&p, thumb, node, dim);
+    paint_thumb(&p, thumb, node, dim, thumbs.get(&(node.id, false)));
     x += THUMB + 4.0;
     if let Some(mask) = &node.mask {
         let m = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - THUMB / 2.0), egui::vec2(THUMB, THUMB));
-        paint_mask_thumb(&p, m, mask, dim);
+        paint_mask_thumb(&p, m, mask, dim, thumbs.get(&(node.id, true)));
         x += THUMB + 4.0;
     }
     x += 4.0;
@@ -511,7 +532,7 @@ fn checker(p: &egui::Painter, rect: egui::Rect) {
 
 /// A stand-in preview of what the layer holds: a swatch for fills, a folder for groups, a checker
 /// with a brush for paint layers.
-fn paint_thumb(p: &egui::Painter, rect: egui::Rect, node: &Node, dim: bool) {
+fn paint_thumb(p: &egui::Painter, rect: egui::Rect, node: &Node, dim: bool, image: Option<&egui::TextureHandle>) {
     let fade = |c: egui::Color32| if dim { c.gamma_multiply(0.45) } else { c };
     match &node.kind {
         NodeKind::Fill(f) => {
@@ -532,6 +553,11 @@ fn paint_thumb(p: &egui::Painter, rect: egui::Rect, node: &Node, dim: bool) {
                 fade(theme::TEXT),
             );
         }
+        NodeKind::Paint if image.is_some() => {
+            checker(p, rect);
+            let tint = if dim { egui::Color32::WHITE.gamma_multiply(0.45) } else { egui::Color32::WHITE };
+            p.image(image.expect("checked").id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+        }
         NodeKind::Paint => {
             checker(p, rect);
             p.text(
@@ -546,8 +572,14 @@ fn paint_thumb(p: &egui::Painter, rect: egui::Rect, node: &Node, dim: bool) {
     p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Outside);
 }
 
-fn paint_mask_thumb(p: &egui::Painter, rect: egui::Rect, mask: &Mask, dim: bool) {
+fn paint_mask_thumb(p: &egui::Painter, rect: egui::Rect, mask: &Mask, dim: bool, image: Option<&egui::TextureHandle>) {
     let fade = |c: egui::Color32| if dim { c.gamma_multiply(0.45) } else { c };
+    if let Some(img) = image {
+        let tint = if dim { egui::Color32::WHITE.gamma_multiply(0.45) } else { egui::Color32::WHITE };
+        p.image(img.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+        p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, if mask.enabled { theme::BORDER } else { theme::DANGER }), egui::StrokeKind::Outside);
+        return;
+    }
     let base = if mask.init_white {
         egui::Color32::WHITE
     } else {

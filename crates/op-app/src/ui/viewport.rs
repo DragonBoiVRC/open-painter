@@ -92,6 +92,9 @@ impl App {
         if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
             ops.push(PaintOp::Stamps { layer, target, stamps });
         }
+        if !ops.is_empty() {
+            self.thumbs_dirty();
+        }
         let batches = vec![SetBatch { set: self.active, doc: self.doc.clone(), ops }];
 
         let size_px = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];

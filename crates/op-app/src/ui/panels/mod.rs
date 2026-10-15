@@ -4,7 +4,7 @@ mod bake;
 mod brush;
 mod display;
 mod layer_dnd;
-mod layers;
+pub mod layers;
 mod properties;
 mod sets;
 mod shelf;

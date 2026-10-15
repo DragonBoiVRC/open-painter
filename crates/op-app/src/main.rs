@@ -6,12 +6,14 @@ mod paint;
 mod picker;
 mod procgen;
 mod sets;
+mod thumbs;
 mod ui;
 mod viewport;
 
 use camera::OrbitCamera;
 use egui_dock::DockState;
 use ui::dock::{self, Tab};
+use ui::panels::layers;
 use eframe::{egui, egui_wgpu};
 use op_bake::{BakeSettings, Progress as BakeProgress};
 use op_core::smart::{builtin_smart_materials, SmartMaterial};
@@ -221,6 +223,11 @@ struct App {
     todo: Vec<Todo>,
     dialog: Option<PathDialog>,
     picker: Option<picker::Picker>,
+    /// Previews of the active set's paint and masks, keyed by (layer, is_mask).
+    thumbs: HashMap<(NodeId, bool), egui::TextureHandle>,
+    paint_rev: u64,
+    thumb_rev: u64,
+    thumb_at: Instant,
     confirm: Option<Pending>,
     after_save: Option<Pending>,
     allow_close: bool,
@@ -324,6 +331,10 @@ impl App {
             todo: Vec::new(),
             dialog: None,
             picker: None,
+            thumbs: HashMap::new(),
+            paint_rev: 1,
+            thumb_rev: 0,
+            thumb_at: Instant::now() - Duration::from_secs(10),
             confirm: None,
             after_save: None,
             allow_close: false,
@@ -844,6 +855,7 @@ impl App {
             }
         }
         self.poll_picker(ctx);
+        self.refresh_thumbs(ctx);
         self.poll_bake(ctx);
         self.drive_procgen(ctx);
         if let Some(rx) = &self.export.running {
@@ -931,6 +943,7 @@ impl App {
     /// Record a structural edit that already happened (`before` is the state prior to it).
     fn record(&mut self, before: Document) {
         if self.doc != before {
+            self.thumbs_dirty();
             let after = self.doc.clone();
             self.push_hist(Hist::Doc { before, after });
             self.send_gc();
@@ -1239,6 +1252,9 @@ impl App {
                     for (keys, what) in [
                         ("Ctrl+N / Ctrl+O / Ctrl+S", "new / open / save"),
                         ("Ctrl+Z / Ctrl+Y", "undo / redo"),
+                        ("Ctrl+D / Ctrl+G", "duplicate / group the selected layer"),
+                        ("Delete / F2", "delete / rename the selected layer"),
+                        ("Ctrl+PageUp / PageDown", "previous / next texture set"),
                         ("P / E", "paint / erase"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
@@ -1441,15 +1457,32 @@ fn srgb_for_display(c: [f32; 3]) -> [f32; 4] {
 impl App {
     fn handle_shortcuts(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
-        let (undo, redo, save, new, open, quit) = ui.input_mut(|i| {
+        let (undo, redo, save, new, open, quit, dup, group, next_set, prev_set) = ui.input_mut(|i| {
             let redo = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y);
             let undo = i.consume_key(Modifiers::COMMAND, Key::Z);
             let save = i.consume_key(Modifiers::COMMAND, Key::S);
             let new = i.consume_key(Modifiers::COMMAND, Key::N);
             let open = i.consume_key(Modifiers::COMMAND, Key::O);
             let quit = i.consume_key(Modifiers::COMMAND, Key::Q);
-            (undo, redo, save, new, open, quit)
+            let dup = i.consume_key(Modifiers::COMMAND, Key::D);
+            let group = i.consume_key(Modifiers::COMMAND, Key::G);
+            let next_set = i.consume_key(Modifiers::COMMAND, Key::PageDown);
+            let prev_set = i.consume_key(Modifiers::COMMAND, Key::PageUp);
+            (undo, redo, save, new, open, quit, dup, group, next_set, prev_set)
         });
+        if dup {
+            self.layer_command(layers::LayerCmd::Duplicate);
+        }
+        if group {
+            self.layer_command(layers::LayerCmd::Group);
+        }
+        let sets = self.set_ranges_len();
+        if next_set && sets > 1 {
+            self.switch_set((self.active + 1) % sets);
+        }
+        if prev_set && sets > 1 {
+            self.switch_set((self.active + sets - 1) % sets);
+        }
         if undo {
             self.do_undo();
         }
@@ -1476,6 +1509,13 @@ impl App {
         // Single-key shortcuts must not fire while a text field has focus.
         if ctx.egui_wants_keyboard_input() {
             return;
+        }
+        let (delete, rename) = ui.input(|i| (i.key_pressed(Key::Delete), i.key_pressed(Key::F2)));
+        if delete {
+            self.layer_command(layers::LayerCmd::Delete);
+        }
+        if rename {
+            self.layer_command(layers::LayerCmd::Rename);
         }
         let (smaller, larger, paint, erase, frame) = ui.input(|i| {
             (
