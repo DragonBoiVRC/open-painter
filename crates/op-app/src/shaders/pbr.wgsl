@@ -16,9 +16,12 @@ struct Globals {
 @group(1) @binding(1) var paint_metal: texture_2d<f32>;
 @group(1) @binding(2) var paint_rough: texture_2d<f32>;
 @group(1) @binding(3) var paint_samp: sampler;
+// Tangent-space normal map from painted height and the baked normal, packed in 0..1.
+@group(1) @binding(4) var paint_normal: texture_2d<f32>;
 
 // Baked map preview. light_dir.w selects the mode: 0 shaded, 1 show the map as-is,
-// 2 shaded with the map (ambient occlusion) multiplied into the ambient light.
+// 2 shaded with the map (ambient occlusion) multiplied into the ambient light, 3 the painted
+// normal map as colour.
 @group(2) @binding(0) var preview_tex: texture_2d<f32>;
 @group(2) @binding(1) var preview_samp: sampler;
 
@@ -78,12 +81,31 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(i.normal);
+    var n = normalize(i.normal);
     let v = normalize(g.camera_pos.xyz - i.world_pos);
     let l = normalize(g.light_dir.xyz);
     let h = normalize(v + l);
 
     let pv = textureSample(preview_tex, preview_samp, i.uv);
+    let nmap = textureSample(paint_normal, paint_samp, i.uv).rgb;
+    if (g.light_dir.w > 2.5) {
+        return vec4<f32>(nmap, 1.0);
+    }
+    // Cotangent frame from screen-space derivatives. The image's +Y is up, and v grows downwards.
+    let dp1 = dpdx(i.world_pos);
+    let dp2 = dpdy(i.world_pos);
+    let duv1 = dpdx(i.uv);
+    let duv2 = dpdy(i.uv);
+    let dp2perp = cross(dp2, n);
+    let dp1perp = cross(n, dp1);
+    let tan = dp2perp * duv1.x + dp1perp * duv2.x;
+    let bit = -(dp2perp * duv1.y + dp1perp * duv2.y);
+    let longest = max(dot(tan, tan), dot(bit, bit));
+    if (longest > 1e-20) {
+        let s = inverseSqrt(longest);
+        let tn = nmap * 2.0 - 1.0;
+        n = normalize(tan * s * tn.x + bit * s * tn.y + n * tn.z);
+    }
     if (g.light_dir.w > 0.5 && g.light_dir.w < 1.5) {
         return vec4<f32>(pv.rgb, 1.0);
     }

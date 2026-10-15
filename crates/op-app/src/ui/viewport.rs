@@ -21,11 +21,13 @@ impl App {
         let label = |v: View| match v {
             View::Shaded => "Shaded".to_string(),
             View::ShadedAo => "Shaded + baked AO".to_string(),
+            View::PaintedNormal => "Normal map".to_string(),
             View::Map(m) => m.label().to_string(),
         };
         let mut view = self.view;
         egui::ComboBox::from_id_salt("viewport_shading").selected_text(label(self.view)).width(150.0).show_ui(ui, |ui| {
             ui.selectable_value(&mut view, View::Shaded, "Shaded");
+            ui.selectable_value(&mut view, View::PaintedNormal, "Normal map");
             if self.baked.contains_key(&MeshMap::AmbientOcclusion) {
                 ui.selectable_value(&mut view, View::ShadedAo, "Shaded + baked AO");
             }
@@ -116,6 +118,7 @@ impl App {
                     View::Shaded => 0.0,
                     View::Map(_) => 1.0,
                     View::ShadedAo => 2.0,
+                    View::PaintedNormal => 3.0,
                 },
             ],
             // Shown only where the layer stack leaves a pixel uncovered.

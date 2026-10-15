@@ -21,8 +21,8 @@ struct VsIn {
     @location(2) uv: vec2<f32>,
     @location(3) brush: vec4<f32>,    // center px (xy), radius px, hardness
     @location(4) color: vec4<f32>,    // linear rgb
-    @location(5) values: vec4<f32>,   // metallic, roughness, opacity
-    @location(6) enables: vec4<f32>,  // base, metallic, roughness (0 or 1)
+    @location(5) values: vec4<f32>,   // metallic, roughness, opacity, height
+    @location(6) enables: vec4<f32>,  // base, metallic, roughness, height (0 or 1)
 };
 
 struct VsOut {
@@ -53,6 +53,7 @@ struct FsOut {
     @location(0) base: vec4<f32>,    // premultiplied rgb + coverage
     @location(1) metal: vec4<f32>,   // (value * coverage, coverage)
     @location(2) rough: vec4<f32>,
+    @location(3) height: vec4<f32>,
 };
 
 fn linear_depth(z: f32) -> f32 {
@@ -98,10 +99,12 @@ fn fs_main(i: VsOut) -> FsOut {
     let ab = a * i.enables.x;
     let am = a * i.enables.y;
     let ar = a * i.enables.z;
+    let ah = a * i.enables.w;
     var o: FsOut;
     o.base = vec4<f32>(i.color.rgb * ab, ab);
     o.metal = vec4<f32>(i.values.x * am, am, 0.0, am);
     o.rough = vec4<f32>(i.values.y * ar, ar, 0.0, ar);
+    o.height = vec4<f32>(i.values.w * ah, ah, 0.0, ah);
     return o;
 }
 

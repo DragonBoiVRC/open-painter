@@ -442,8 +442,7 @@ mod tests {
         let mut d = op_core::Document::default();
         let kind = NodeKind::Fill(FillParams {
             base: color,
-            metallic: None,
-            roughness: None,
+            ..Default::default()
         });
         let id = d.add(None, None, name, kind);
         let node: Node = d.find(id).unwrap().clone();
@@ -482,8 +481,7 @@ mod tests {
             "f",
             NodeKind::Fill(FillParams {
                 base: Some([1.0, 0.0, 0.0]),
-                metallic: None,
-                roughness: None,
+                ..Default::default()
             }),
         );
         assert_eq!(first_fill_color(&d.nodes), Some([255, 0, 0]));

@@ -6,6 +6,7 @@
 //! reads: final = output.rgb + fallback * (1 - output.a).
 
 use crate::composite::Compositor;
+use crate::normal_gpu::NormalPass;
 use eframe::egui_wgpu::wgpu;
 use op_core::{Document, Node, NodeId, NodeKind};
 use op_mesh::Vertex;
@@ -93,16 +94,21 @@ pub enum PaintOp {
     /// Copy each (source, destination) node's paint and mask pixels (layer duplication). The
     /// destinations already exist in the document; missing sources are skipped.
     CopyLayers(Vec<(NodeId, NodeId)>),
+    /// The baked tangent-space normal map of this set as RGBA8 (`None` removes it). It is combined
+    /// with painted height in the viewport's normal map. Ignored if `size` is not the set's.
+    SetBakedNormal { size: u32, rgba8: Option<Vec<u8>> },
     /// Like `Reset`, then restore saved texture contents (opening a project).
     Load { size: u32, blobs: Vec<TextureBlob> },
 }
 
-/// The three paintable channels of a layer (and the compositor's working buffers).
+/// The four paintable channels of a layer (and the compositor's working buffers).
 pub struct Layer {
     pub size: u32,
     pub base: wgpu::Texture,
     pub metal: wgpu::Texture,
     pub rough: wgpu::Texture,
+    /// (height * coverage, coverage); 0.5 is flat.
+    pub height: wgpu::Texture,
 }
 
 fn texture(device: &wgpu::Device, label: &str, size: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -153,26 +159,27 @@ impl Layer {
             base: texture(device, "paint_base", size, BASE_FORMAT),
             metal: texture(device, "paint_metal", size, VALUE_FORMAT),
             rough: texture(device, "paint_rough", size, VALUE_FORMAT),
+            height: texture(device, "paint_height", size, VALUE_FORMAT),
         }
     }
 
     fn bytes(size: u32) -> u64 {
-        size as u64 * size as u64 * (8 + 2 + 2)
+        size as u64 * size as u64 * (8 + 2 + 2 + 2)
     }
 
-    pub fn views(&self) -> [wgpu::TextureView; 3] {
-        [&self.base, &self.metal, &self.rough].map(|t| t.create_view(&Default::default()))
+    pub fn views(&self) -> [wgpu::TextureView; 4] {
+        [&self.base, &self.metal, &self.rough, &self.height].map(|t| t.create_view(&Default::default()))
     }
 
     pub fn copy_from(&self, encoder: &mut wgpu::CommandEncoder, src: &Layer) {
-        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough)] {
+        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough), (&src.height, &self.height)] {
             copy_tex(encoder, s, d, self.size);
         }
     }
 
     pub fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
         let v = self.views();
-        clear_textures(encoder, &[&v[0], &v[1], &v[2]], wgpu::Color::TRANSPARENT);
+        clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3]], wgpu::Color::TRANSPARENT);
     }
 }
 
@@ -217,6 +224,7 @@ pub struct PaintGpu {
     /// Composited result of the whole layer stack; what the viewport samples.
     pub output: Layer,
     material_bind: wgpu::BindGroup,
+    pub(crate) normal: NormalPass,
     compositor: Compositor,
     last_doc: Option<Document>,
     undo: Vec<StrokeSnap>,
@@ -266,6 +274,7 @@ impl PaintGpu {
                 tex_entry(0),
                 tex_entry(1),
                 tex_entry(2),
+                tex_entry(4),
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -336,7 +345,7 @@ impl PaintGpu {
             })
         };
         let pipeline_content =
-            make("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
+            make("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_mask = make("fs_mask", &[target(MASK_FORMAT, straight)]);
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -360,7 +369,8 @@ impl PaintGpu {
         });
 
         let output = Layer::new(device, size);
-        let material_bind = Self::make_material_bind(device, &material_layout, &sampler, &output);
+        let normal = NormalPass::new(device, size);
+        let material_bind = Self::make_material_bind(device, &material_layout, &sampler, &output, &normal);
         Self {
             pipeline_content,
             pipeline_mask,
@@ -374,6 +384,7 @@ impl PaintGpu {
             store: HashMap::new(),
             output,
             material_bind,
+            normal,
             compositor: Compositor::new(device, size),
             last_doc: None,
             undo: Vec::new(),
@@ -386,8 +397,10 @@ impl PaintGpu {
         layout: &wgpu::BindGroupLayout,
         sampler: &wgpu::Sampler,
         layer: &Layer,
+        normal: &NormalPass,
     ) -> wgpu::BindGroup {
-        let [b, m, r] = layer.views();
+        let [b, m, r, _] = layer.views();
+        let n = normal.target.create_view(&Default::default());
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("paint_material_bind"),
             layout,
@@ -396,6 +409,7 @@ impl PaintGpu {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&m) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&r) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&n) },
             ],
         })
     }
@@ -492,7 +506,8 @@ impl PaintGpu {
         self.redo.clear();
         self.output = Layer::new(device, size);
         self.output.clear(encoder);
-        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output);
+        self.normal.resize(device, size);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal);
         self.compositor.set_size(size);
         self.last_doc = None;
         self.ensure_store(device, encoder, doc);
@@ -504,6 +519,7 @@ impl PaintGpu {
             BlobKind::Base => g.content.as_ref().map(|c| &c.base),
             BlobKind::Metal => g.content.as_ref().map(|c| &c.metal),
             BlobKind::Rough => g.content.as_ref().map(|c| &c.rough),
+            BlobKind::Height => g.content.as_ref().map(|c| &c.height),
             BlobKind::Mask => g.mask.as_ref(),
         }
     }
@@ -526,6 +542,7 @@ impl PaintGpu {
         let mut enc = device.create_command_encoder(&Default::default());
         self.reset(device, &mut enc, doc, size);
         self.compositor.render(device, &mut enc, doc, &self.store, &self.output);
+        self.normal.run(device, &mut enc, &self.output.height, doc.height_strength);
         self.last_doc = Some(doc.clone());
         queue.submit([enc.finish()]);
     }
@@ -537,7 +554,7 @@ impl PaintGpu {
             let Some(node) = doc.find(id) else { continue };
             let mut kinds = Vec::new();
             if matches!(node.kind, NodeKind::Paint) {
-                kinds.extend([BlobKind::Base, BlobKind::Metal, BlobKind::Rough]);
+                kinds.extend([BlobKind::Base, BlobKind::Metal, BlobKind::Rough, BlobKind::Height]);
             }
             if node.mask.is_some() {
                 kinds.push(BlobKind::Mask);
@@ -552,13 +569,14 @@ impl PaintGpu {
         out
     }
 
-    /// Read back the composited result: (base RGBA16F, metal RG8, rough RG8).
-    pub fn capture_output(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> [Vec<u8>; 3] {
+    /// Read back the composited result: (base RGBA16F, metal RG8, rough RG8, height RG8).
+    pub fn capture_output(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> [Vec<u8>; 4] {
         let s = self.size;
         [
             crate::gpu_io::read_texture(device, queue, &self.output.base, s, 8),
             crate::gpu_io::read_texture(device, queue, &self.output.metal, s, 2),
             crate::gpu_io::read_texture(device, queue, &self.output.rough, s, 2),
+            crate::gpu_io::read_texture(device, queue, &self.output.height, s, 2),
         ]
     }
 
@@ -661,6 +679,12 @@ impl PaintGpu {
                     }
                     dirty = true;
                 }
+                PaintOp::SetBakedNormal { size, rgba8 } => {
+                    if *size == self.size {
+                        self.normal.set_baked(device, queue, rgba8.as_deref());
+                        dirty = true;
+                    }
+                }
                 PaintOp::DropRedo => self.redo.clear(),
                 PaintOp::Gc(keep) => self.gc(doc, keep),
                 PaintOp::Reset(size) => {
@@ -743,6 +767,7 @@ impl PaintGpu {
 
         if dirty || self.last_doc.as_ref() != Some(doc) {
             self.compositor.render(device, encoder, doc, &self.store, &self.output);
+            self.normal.run(device, encoder, &self.output.height, doc.height_strength);
             self.last_doc = Some(doc.clone());
         }
     }

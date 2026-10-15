@@ -120,6 +120,7 @@ fn classify(ch: &SpexpChannel, version0: bool, w: &mut Warnings) -> Source {
             };
             match index {
                 0 => Source::Color(ColorMap::Base),
+                1 => Source::Gray(ChannelSrc::Height),
                 2 => {
                     w.add("Specular color is derived from base color and metallic (this project has no painted specular channel).".into());
                     Source::Color(ColorMap::Specular)
@@ -338,7 +339,7 @@ mod tests {
                 Ch { src: 4, id: variant_u64(1 << 13), ty: 1 },  // metallic: exact
                 Ch { src: 4, id: variant_str("Glossiness"), ty: 2 },
                 Ch { src: 4, id: variant_u64(1 << 14), ty: 1 },  // not identified
-                Ch { src: 4, id: variant_u64(1 << 1), ty: 1 },   // height: known but unsupported
+                Ch { src: 4, id: variant_u64(1 << 25), ty: 1 },  // specular level: known but unsupported
             ],
         )];
         let got = import(&maps, true).unwrap();
@@ -347,7 +348,11 @@ mod tests {
         assert_eq!((c[2], c[3]), (ChannelSrc::Constant(0.0), ChannelSrc::Constant(0.0)));
         let joined = got.warnings.join("\n");
         assert!(joined.contains("channel B") && joined.contains("#14"), "{joined}");
-        assert!(joined.contains("channel A") && joined.contains("Height"), "{joined}");
+        assert!(joined.contains("channel A") && joined.contains("Specular level"), "{joined}");
+        // Height, on the other hand, is a real channel now.
+        let h = import(&[map("h", "png", 0, vec![Ch { src: 4, id: variant_u64(1 << 1), ty: 1 }])], true).unwrap();
+        assert_eq!(h.preset.maps[0].channels[0], ChannelSrc::Height);
+        assert!(h.warnings.is_empty(), "{:?}", h.warnings);
     }
 
     #[test]
@@ -427,6 +432,8 @@ mod tests {
             metallic: vec![0.25; n],
             roughness: vec![0.75; n],
             baked: Default::default(),
+            height: Vec::new(),
+            normal: None,
         };
         let out = export(&got.preset, &data, &ExportContext { project: "p", texture_set: "body", mesh: "m", out_dir: dir.path() });
         // The packed map has a 3-channel layout: R metallic, G smoothness, B constant white.

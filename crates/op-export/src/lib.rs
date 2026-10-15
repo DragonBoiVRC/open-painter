@@ -39,6 +39,11 @@ pub struct TextureSetData {
     pub roughness: Vec<f32>,
     /// Baked mesh maps, each exactly `size` x `size`.
     pub baked: HashMap<MeshMap, BakedMap>,
+    /// Painted height, 0..1 with 0.5 flat. Empty when the document has no height channel data.
+    pub height: Vec<f32>,
+    /// Tangent-space normal derived from the height and the baked normal. `None` until
+    /// [`TextureSetData::compute_normal`] ran and there was something to derive it from.
+    pub normal: Option<Vec<[f32; 3]>>,
 }
 
 impl TextureSetData {
@@ -74,7 +79,45 @@ impl TextureSetData {
             metallic: resolve(metal_rg8, FALLBACK_METALLIC),
             roughness: resolve(rough_rg8, FALLBACK_ROUGHNESS),
             baked: HashMap::new(),
+            height: Vec::new(),
+            normal: None,
         })
+    }
+
+    /// Attach the composited height channel: `(height * coverage, coverage)` bytes. Uncovered texels
+    /// are flat (0.5).
+    pub fn set_height(&mut self, height_rg8: &[u8]) -> Result<(), ExportError> {
+        let n = (self.size as usize).pow(2);
+        if height_rg8.len() != n * 2 {
+            return Err(ExportError::Data(format!("height has {} bytes, expected {}", height_rg8.len(), n * 2)));
+        }
+        self.height = height_rg8
+            .chunks_exact(2)
+            .map(|p| (p[0] as f32 / 255.0 + 0.5 * (1.0 - p[1] as f32 / 255.0)).clamp(0.0, 1.0))
+            .collect();
+        Ok(())
+    }
+
+    /// Derive the normal map from the height (if any was painted) and the baked normal (if baked).
+    /// `strength` is the document's height strength. With neither, no normal is produced and the
+    /// `Normal` source falls back to the baked map or a flat default.
+    pub fn compute_normal(&mut self, strength: f32) {
+        let painted = self.height.iter().any(|h| (*h - 0.5).abs() > 1e-4);
+        let baked = self.baked.get(&MeshMap::NormalBase);
+        if !painted && baked.is_none() {
+            self.normal = None;
+            return;
+        }
+        let n = (self.size as usize).pow(2);
+        let flat;
+        let height: &[f32] = if self.height.len() == n {
+            &self.height
+        } else {
+            flat = vec![0.5; n];
+            &flat
+        };
+        let base: Option<Vec<[f32; 3]>> = baked.map(|b| (0..n).map(|i| op_core::normal::unpack(b.texel(i))).collect());
+        self.normal = Some(op_core::normal::height_to_normal(height, self.size, strength, base.as_deref()));
     }
 
     /// Attach a baked map. Rejected if its size does not match the texture set.
@@ -140,6 +183,14 @@ impl TextureSetData {
                         self.base[i] = avg3(&self.base);
                         self.metallic[i] = avg1(&self.metallic);
                         self.roughness[i] = avg1(&self.roughness);
+                        if self.height.len() == self.base.len() {
+                            self.height[i] = avg1(&self.height);
+                        }
+                        if let Some(nm) = &mut self.normal {
+                            let a = avg3(nm);
+                            let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-6);
+                            nm[i] = [a[0] / len, a[1] / len, a[2] / len];
+                        }
                         for map in self.baked.values_mut() {
                             let mut a = [0.0f32; 3];
                             for &j in &nbrs[..n] {
@@ -221,8 +272,12 @@ fn sample(src: ChannelSrc, i: usize, data: &TextureSetData, encode: bool, missin
         ChannelSrc::Roughness => data.roughness[i],
         ChannelSrc::Smoothness => 1.0 - data.roughness[i],
         ChannelSrc::Mesh { map, comp } => comp_of(baked(map), if map.is_scalar() { Comp::R } else { comp }),
+        ChannelSrc::Height => if data.height.len() == data.base.len() { data.height[i] } else { 0.5 },
         ChannelSrc::Normal { directx, comp } => {
-            let mut n = baked(MeshMap::NormalBase);
+            let mut n = match &data.normal {
+                Some(nm) => op_core::normal::pack(nm[i]),
+                None => baked(MeshMap::NormalBase),
+            };
             if directx {
                 n[1] = 1.0 - n[1];
             }
@@ -349,6 +404,8 @@ mod tests {
             metallic: vec![metallic; n],
             roughness: vec![roughness; n],
             baked: HashMap::new(),
+            height: Vec::new(),
+            normal: None,
         }
     }
 
@@ -572,5 +629,60 @@ mod tests {
             let back: ExportPreset = serde_json::from_str(&json).unwrap();
             assert_eq!(back, p);
         }
+    }
+
+    /// Painted height becomes a tangent-space normal map, and the Height source writes it as is.
+    #[test]
+    fn height_and_normal_maps_are_exported() {
+        let size = 8u32;
+        let n = (size * size) as usize;
+        // A ramp rising to the right, as the compositor would store it: (height * coverage, coverage).
+        let ramp: Vec<u8> = (0..n).flat_map(|i| [(((i as u32 % size) * 255 / (size - 1)) as u8), 255]).collect();
+        let mut d = data(size, [0.5; 3], 0.0, 0.5);
+        d.set_height(&ramp).unwrap();
+        assert!(d.height[0] < 0.01 && d.height[7] > 0.99);
+        d.compute_normal(50.0);
+        let nm = d.normal.as_ref().expect("a painted ramp produces a normal map");
+        assert!(nm[3 * 8 + 4][0] < -0.05, "the surface faces left of a rise to the right: {:?}", nm[3 * 8 + 4]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let spec = |file: &str, channels: Vec<ChannelSrc>| MapSpec {
+            file: file.into(),
+            channels,
+            format: FileFormat::Png,
+            bit_depth: BitDepth::U8,
+            srgb: false,
+        };
+        let preset = ExportPreset {
+            name: "t".into(),
+            maps: vec![
+                spec("n", vec![ChannelSrc::Normal { directx: false, comp: Comp::R }, ChannelSrc::Normal { directx: false, comp: Comp::G }, ChannelSrc::Normal { directx: false, comp: Comp::B }]),
+                spec("nd", vec![ChannelSrc::Normal { directx: true, comp: Comp::G }]),
+                spec("h", vec![ChannelSrc::Height]),
+            ],
+        };
+        let out = export(&preset, &d, &ExportContext { project: "p", texture_set: "s", mesh: "m", out_dir: dir.path() }).unwrap();
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        let normal = image::open(dir.path().join("n.png")).unwrap().to_rgb8();
+        let px = normal.get_pixel(4, 3).0;
+        assert!(px[0] < 120 && px[2] > 200, "tilted left, mostly facing out: {px:?}");
+        let (gl, dx) = (normal.get_pixel(4, 3).0[1], image::open(dir.path().join("nd.png")).unwrap().to_luma8().get_pixel(4, 3).0[0]);
+        assert!((gl as i32 + dx as i32 - 255).abs() <= 1, "DirectX flips green: {gl} {dx}");
+        let height = image::open(dir.path().join("h.png")).unwrap().to_luma8();
+        assert!(height.get_pixel(0, 0).0[0] < 5 && height.get_pixel(7, 0).0[0] > 250);
+    }
+
+    #[test]
+    fn with_nothing_painted_there_is_no_normal_and_the_baked_one_is_used() {
+        let mut d = data(2, [0.5; 3], 0.0, 0.5);
+        d.set_height(&[0, 0, 0, 0, 0, 0, 0, 0]).unwrap(); // coverage 0 everywhere: flat
+        d.compute_normal(1.0);
+        assert!(d.normal.is_none(), "nothing painted and nothing baked");
+        let tilted = BakedMap::new(2, 3, [0.8f32, 0.5, 0.9].iter().cycle().take(12).map(|v| (v * 65535.0) as u16).collect()).unwrap();
+        d.set_baked(MeshMap::NormalBase, tilted).unwrap();
+        d.compute_normal(1.0);
+        let n = d.normal.as_ref().unwrap()[0];
+        assert!(n[0] > 0.2 && (n.iter().map(|c| c * c).sum::<f32>() - 1.0).abs() < 1e-4, "{n:?}");
+        assert!(d.set_height(&[0; 3]).is_err(), "wrong size is refused");
     }
 }

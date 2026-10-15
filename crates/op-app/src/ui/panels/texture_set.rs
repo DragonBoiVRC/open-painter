@@ -1,6 +1,6 @@
 //! "Texture Set Settings": the resolution of the texture set.
 
-use super::{hint, section};
+use super::{hint, section, slider_row};
 use crate::paint::PaintOp;
 use crate::{App, TEXTURE_SIZES};
 
@@ -28,6 +28,17 @@ impl App {
                 }
             });
             hint(ui, "Changing the resolution clears all paint, history and baked maps.");
+        });
+        section(ui, "Normal map", |ui| {
+            hint(ui, "Painted height becomes a tangent-space normal map, combined with the baked normal map.");
+            let before = self.doc.clone();
+            let mut strength = self.doc.height_strength;
+            if slider_row(ui, "Height strength", &mut strength, 0.0..=8.0).on_hover_text("How strongly painted height bends the normal map").changed() {
+                if self.gesture_before.is_none() {
+                    self.gesture_before = Some(before);
+                }
+                self.doc.height_strength = strength;
+            }
         });
         section(ui, "Model", |ui| {
             let ranges = self.mesh.set_ranges();

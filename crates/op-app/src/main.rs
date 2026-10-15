@@ -3,6 +3,7 @@ mod composite;
 mod files;
 mod gpu_io;
 mod paint;
+mod normal_gpu;
 mod picker;
 mod procgen;
 mod sets;
@@ -53,6 +54,10 @@ struct PaintChannels {
     base_color: [f32; 3],
     metallic: f32,
     roughness: f32,
+    /// Paint height (which becomes the normal map)?
+    height: bool,
+    /// 0 digs, 0.5 is flat, 1 raises.
+    height_value: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -101,7 +106,9 @@ struct PathDialog {
 struct ExportJob {
     name: String,
     size: u32,
-    planes: [Vec<u8>; 3],
+    planes: [Vec<u8>; 4],
+    /// The set's height strength, for deriving its normal map.
+    height_strength: f32,
     mesh: Mesh,
     baked: Arc<HashMap<MeshMap, op_core::BakedMap>>,
 }
@@ -129,6 +136,8 @@ enum View {
     Shaded,
     /// Shaded, with the baked ambient occlusion darkening the ambient light.
     ShadedAo,
+    /// The normal map made from painted height and the baked normal, shown as colour.
+    PaintedNormal,
     /// A baked map, shown as-is.
     Map(MeshMap),
 }
@@ -322,6 +331,8 @@ impl App {
                 base_color: [0.15, 0.35, 0.85],
                 metallic: 1.0,
                 roughness: 0.2,
+                height: false,
+                height_value: 0.8,
             },
             stroke: Stroke::default(),
             tex_size: DEFAULT_TEXTURE_SIZE,
@@ -618,6 +629,7 @@ impl App {
                     name,
                     size: paint.size(),
                     planes: paint.capture_output(&self.render_state.device, &self.render_state.queue),
+                    height_strength: if i == self.active { self.doc.height_strength } else { self.parked[i].as_ref().map_or(1.0, |s| s.doc.height_strength) },
                     mesh,
                     baked,
                 });
@@ -638,7 +650,7 @@ impl App {
             let result = (|| -> Result<ExportOutcome, String> {
                 let mut total = ExportOutcome::default();
                 for job in jobs {
-                    let [base, metal, rough] = &job.planes;
+                    let [base, metal, rough, height] = &job.planes;
                     let size = job.size;
                     let mut data = TextureSetData::from_composite(size, base, metal, rough).map_err(|e| e.to_string())?;
                     let mut notes = Vec::new();
@@ -654,6 +666,8 @@ impl App {
                             ));
                         }
                     }
+                    data.set_height(height).map_err(|e| e.to_string())?;
+                    data.compute_normal(job.height_strength);
                     if padding > 0 {
                         data.dilate(&op_export::uv_coverage(&job.mesh, size), padding);
                     }
@@ -671,6 +685,7 @@ impl App {
     // ---- baking -----------------------------------------------------------------------
 
     fn clear_baked(&mut self) {
+        self.pending.push(PaintOp::SetBakedNormal { size: self.tex_size, rgba8: None });
         if !self.baked.is_empty() {
             self.baked = Arc::new(HashMap::new());
             self.bake_rev += 1;
@@ -681,12 +696,12 @@ impl App {
     /// Switch what the viewport shows, uploading the baked map it needs.
     fn set_view(&mut self, view: View) {
         let source = match view {
-            View::Shaded => None,
+            View::Shaded | View::PaintedNormal => None,
             View::ShadedAo => self.baked.get(&MeshMap::AmbientOcclusion),
             View::Map(m) => self.baked.get(&m),
         };
         // A view whose map is no longer baked falls back to the normal shaded view.
-        let view = if source.is_none() { View::Shaded } else { view };
+        let view = if source.is_none() && view != View::PaintedNormal { View::Shaded } else { view };
         let image = source.map(|b| {
             let mut rgba = Vec::with_capacity(b.texels() * 4);
             for i in 0..b.texels() {
@@ -764,13 +779,23 @@ impl App {
                 let n = result.maps.len();
                 let covered = result.covered;
                 // The bake belongs to the set it was started for, which may no longer be the active one.
-                self.with_set(set, |st| {
+                let normal = self.with_set(set, |st| {
                     let mut maps = (*st.baked).clone();
                     maps.retain(|_, b| b.size == result.size); // older bakes at another resolution are stale
                     maps.extend(result.maps);
+                    let op = sets::baked_normal_op(&maps, result.size);
                     st.baked = Arc::new(maps);
                     st.bake_rev += 1;
+                    (op, st.doc.clone(), st.materialized)
                 });
+                // The normal map the viewport uses changes with the bake.
+                if let Some((op, doc, materialized)) = normal {
+                    if set == self.active {
+                        self.pending.push(op);
+                    } else if materialized {
+                        self.enqueue_batch(viewport::SetBatch { set, doc, ops: vec![op] });
+                    }
+                }
                 self.bake.job = None;
                 self.modified = true;
                 if set == self.active {
@@ -1081,15 +1106,15 @@ impl App {
                 brush,
                 color: [0.0; 4],
                 values: [0.0, 0.0, self.brush.opacity, 0.0],
-                enables: [1.0, 1.0, 1.0, 0.0],
+                enables: [1.0, 1.0, 1.0, 1.0],
             },
             Target::Content => {
                 let lin = c.base_color.map(srgb_to_linear);
                 Stamp {
                     brush,
                     color: [lin[0], lin[1], lin[2], 0.0],
-                    values: [c.metallic, c.roughness, self.brush.opacity, 0.0],
-                    enables: [flag(c.base), flag(c.metal), flag(c.rough), 0.0],
+                    values: [c.metallic, c.roughness, self.brush.opacity, c.height_value],
+                    enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
                 }
             }
         }

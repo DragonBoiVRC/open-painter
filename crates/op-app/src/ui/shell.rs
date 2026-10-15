@@ -151,6 +151,7 @@ impl App {
                     let current = self.view;
                     let mut view = current;
                     ui.selectable_value(&mut view, crate::View::Shaded, "Shaded");
+                    ui.selectable_value(&mut view, crate::View::PaintedNormal, "Normal map");
                     if self.baked.contains_key(&MeshMap::AmbientOcclusion) {
                         ui.selectable_value(&mut view, crate::View::ShadedAo, "Shaded + baked AO");
                     }

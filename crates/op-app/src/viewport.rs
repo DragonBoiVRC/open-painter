@@ -622,7 +622,7 @@ mod tests {
     }
 
     fn fill(base: Option<[f32; 3]>, metallic: Option<f32>, roughness: Option<f32>) -> NodeKind {
-        NodeKind::Fill(FillParams { base, metallic, roughness })
+        NodeKind::Fill(FillParams { base, metallic, roughness, height: None })
     }
 
     #[test]
@@ -849,7 +849,7 @@ mod tests {
         assert!(!rig.gpu.paint().store.contains_key(&p), "unreferenced node was kept");
     }
 
-    fn output_bytes(rig: &Rig) -> [Vec<u8>; 3] {
+    fn output_bytes(rig: &Rig) -> [Vec<u8>; 4] {
         rig.gpu.paint().capture_output(&rig.device, &rig.queue)
     }
 
@@ -880,7 +880,7 @@ mod tests {
         assert_ne!(before[2], blank[2], "painting did not change the composited roughness");
 
         let blobs = rig.gpu.paint().capture_blobs(&rig.device, &rig.queue, &doc);
-        assert_eq!(blobs.len(), 4, "base, metal, rough and mask of the paint layer");
+        assert_eq!(blobs.len(), 5, "base, metal, rough, height and mask of the paint layer");
         let project = op_project::Project {
             mesh_name: "sphere".into(),
             mesh: Mesh::uv_sphere(1.0, 96, 48),
@@ -910,6 +910,99 @@ mod tests {
         }
     }
 
+    fn fill_h(base: Option<[f32; 3]>, height: Option<f32>) -> NodeKind {
+        NodeKind::Fill(FillParams { base, height, ..Default::default() })
+    }
+
+    /// The height channel composites exactly like the others, including blend modes and opacity.
+    #[test]
+    fn height_compositing_matches_the_cpu_reference() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        for mode in BlendMode::ALL {
+            let mut doc = Document::default();
+            doc.add(None, None, "bg", fill_h(Some([0.5; 3]), Some(0.7)));
+            let top = doc.add(None, None, "top", fill_h(None, Some(0.35)));
+            doc.find_mut(top).unwrap().blend = mode;
+            doc.find_mut(top).unwrap().opacity = 0.6;
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            let want = op_core::blend::eval_fill_only(&doc).height;
+            let h = rig.read(&rig.gpu.paint().output.height, 2);
+            let i = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;
+            let got = [h[i] as f32 / 255.0, h[i + 1] as f32 / 255.0];
+            assert!((got[0] - want[0]).abs() < 3.0 / 255.0 && (got[1] - want[1]).abs() < 3.0 / 255.0, "{mode:?}: gpu {got:?} cpu {want:?}");
+        }
+    }
+
+    /// A brush stamp with the height channel enabled writes height and nothing else.
+    #[test]
+    fn a_height_stamp_writes_only_the_height_channel() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let stamp = Stamp {
+            brush: [SIZE as f32 / 2.0, SIZE as f32 / 2.0, 20.0, 1.0],
+            color: [0.0; 4],
+            values: [0.0, 0.0, 1.0, 0.9],
+            enables: [0.0, 0.0, 0.0, 1.0],
+        };
+        rig.run(&doc, &[PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let uv = sphere_uv(rig.front);
+        let (hv, hc) = texel_rg(&rig.read(&rig.gpu.paint().output.height, 2), uv);
+        assert!(hc > 240 && (hv as f32 / hc as f32 - 0.9).abs() < 0.02, "height {hv} coverage {hc}");
+        assert!(rig.metal().chunks_exact(2).all(|t| t[1] == 0), "metallic must be untouched");
+        // Painting raises the surface: the normal map is no longer flat anywhere near the edge of the dab.
+        let normal = rig.read(&rig.gpu.paint().normal.target, 4);
+        let tilted = normal.chunks_exact(4).filter(|p| (p[0] as i32 - 128).abs() > 8 || (p[1] as i32 - 128).abs() > 8).count();
+        assert!(tilted > 50, "only {tilted} texels tilted");
+    }
+
+    /// The normal-map shader agrees with the CPU derivation, with and without baked detail.
+    #[test]
+    fn gpu_normal_map_matches_the_cpu_derivation() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        doc.height_strength = 3.0;
+        // A height field with slopes in both directions, stored as the compositor would: (h * cov, cov).
+        let n = (SIZE * SIZE) as usize;
+        let h: Vec<f32> = (0..n)
+            .map(|i| {
+                let (x, y) = ((i as u32 % SIZE) as f32 / SIZE as f32, (i as u32 / SIZE) as f32 / SIZE as f32);
+                0.5 + 0.3 * (x * 6.0).sin() * (y * 4.0).cos()
+            })
+            .collect();
+        let bytes: Vec<u8> = h.iter().flat_map(|v| [(v * 255.0).round() as u8, 255]).collect();
+        let blob = op_project::TextureBlob { node: layer, kind: op_project::BlobKind::Height, bytes };
+        rig.run(&doc, &[PaintOp::Load { size: SIZE, blobs: vec![blob] }]);
+
+        // The stored height is quantised to 8 bits; the CPU side must use the same values.
+        let hq: Vec<f32> = h.iter().map(|v| (v * 255.0).round() / 255.0).collect();
+        let check = |rig: &Rig, base: Option<&[[f32; 3]]>, what: &str| {
+            let want = op_core::normal::height_to_normal(&hq, SIZE, doc.height_strength, base);
+            let got = rig.read(&rig.gpu.paint().normal.target, 4);
+            let mut worst = 0.0f32;
+            for (i, w) in want.iter().enumerate() {
+                let g = op_core::normal::unpack([got[i * 4] as f32 / 255.0, got[i * 4 + 1] as f32 / 255.0, got[i * 4 + 2] as f32 / 255.0]);
+                worst = worst.max((0..3).map(|c| (g[c] - w[c]).abs()).fold(0.0, f32::max));
+            }
+            assert!(worst < 0.03, "{what}: worst component error {worst}");
+        };
+        check(&rig, None, "painted height only");
+
+        // Add baked detail: a constant tilt.
+        let tilt = op_core::normal::unpack([0.7, 0.45, 0.9]);
+        let packed: Vec<u8> = (0..n).flat_map(|_| [178u8, 115, 230, 255]).collect();
+        let base: Vec<[f32; 3]> = (0..n).map(|_| op_core::normal::unpack([178.0 / 255.0, 115.0 / 255.0, 230.0 / 255.0])).collect();
+        let _ = tilt;
+        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: Some(packed) }]);
+        check(&rig, Some(&base), "painted height over a baked normal");
+
+        // Removing it restores the plain result.
+        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: None }]);
+        check(&rig, None, "after removing the baked normal");
+    }
+
     /// Paint in two texture sets survives a save and reload, each set keeping its own textures.
     #[test]
     fn two_sets_of_paint_survive_a_project_round_trip() {
@@ -934,6 +1027,7 @@ mod tests {
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Base, bytes: (0..n * 8).map(|i| (i % 251) as u8).collect() },
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Metal, bytes: (0..n * 2).map(|i| (i % 13) as u8).collect() },
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Rough, bytes: (0..n * 2).map(|i| (i % 7) as u8).collect() },
+            op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Height, bytes: (0..n * 2).map(|i| (i % 5) as u8).collect() },
         ];
         let load_b = SetBatch { set: 1, doc: b.clone(), ops: vec![PaintOp::Load { size: SIZE, blobs: blobs_b.clone() }] };
         rig.run_sets(&[stroke, load_b]);
@@ -978,7 +1072,7 @@ mod tests {
         let mut doc = Document::default();
         doc.add(None, None, "fill", fill(Some([0.8, 0.55, 0.30]), Some(0.25), Some(0.6)));
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
-        let [base, metal, rough] = output_bytes(&rig);
+        let [base, metal, rough, _] = output_bytes(&rig);
         let data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
         let preset = op_export::builtin_presets().remove(0);
         let dir = tempfile::tempdir().unwrap();

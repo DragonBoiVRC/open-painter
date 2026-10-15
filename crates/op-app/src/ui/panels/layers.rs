@@ -146,8 +146,7 @@ impl App {
             if icon_button(ui, ph::PAINT_BUCKET, "Add fill layer", true).clicked() {
                 let fill = FillParams {
                     base: Some([0.5, 0.5, 0.5]),
-                    metallic: None,
-                    roughness: None,
+                    ..Default::default()
                 };
                 self.add_node("Fill layer", NodeKind::Fill(fill));
             }
@@ -487,10 +486,10 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str, enabled: bool) -> egui:
 }
 
 /// Which of the three channels a layer writes, as (label, active).
-fn channels(node: &Node) -> Option<[(&'static str, bool); 3]> {
+fn channels(node: &Node) -> Option<[(&'static str, bool); 4]> {
     match &node.kind {
-        NodeKind::Paint => Some([("C", true), ("M", true), ("R", true)]),
-        NodeKind::Fill(f) => Some([("C", f.base.is_some()), ("M", f.metallic.is_some()), ("R", f.roughness.is_some())]),
+        NodeKind::Paint => Some([("C", true), ("M", true), ("R", true), ("H", true)]),
+        NodeKind::Fill(f) => Some([("C", f.base.is_some()), ("M", f.metallic.is_some()), ("R", f.roughness.is_some()), ("H", f.height.is_some())]),
         NodeKind::Group { .. } => None,
     }
 }
@@ -504,7 +503,7 @@ fn paint_channel_bars(p: &egui::Painter, rect: egui::Rect, node: &Node) {
     let Some(ch) = channels(node) else { return };
     let x = rect.right() - 20.0;
     for (i, (label, on)) in ch.into_iter().enumerate() {
-        let y = rect.top() + 6.0 + i as f32 * 9.0;
+        let y = rect.top() + 3.5 + i as f32 * 8.5;
         let bar = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(5.0, 6.0));
         p.rect_filled(bar, 1.0, if on { theme::ORANGE } else { egui::Color32::from_gray(0x44) });
         p.text(

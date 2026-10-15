@@ -46,6 +46,8 @@ pub struct PixelSet {
     /// (value * coverage, coverage)
     pub metal: [f32; 2],
     pub rough: [f32; 2],
+    /// (value * coverage, coverage); the value is a height in 0..1 where 0.5 is flat.
+    pub height: [f32; 2],
 }
 
 fn over_scalar(mode: BlendMode, backdrop: [f32; 2], value: f32, a_s: f32) -> [f32; 2] {
@@ -61,6 +63,7 @@ fn apply_layer(mode: BlendMode, k: f32, bk: PixelSet, src: PixelSet) -> PixelSet
         base: over(mode, bk.base, base_c, src.base[3] * k),
         metal: over_scalar(mode, bk.metal, straight(src.metal[0], src.metal[1]), src.metal[1] * k),
         rough: over_scalar(mode, bk.rough, straight(src.rough[0], src.rough[1]), src.rough[1] * k),
+        height: over_scalar(mode, bk.height, straight(src.height[0], src.height[1]), src.height[1] * k),
     }
 }
 
@@ -75,6 +78,9 @@ fn fill_pixel(f: &FillParams) -> PixelSet {
     }
     if let Some(r) = f.roughness {
         p.rough = [r, 1.0];
+    }
+    if let Some(h) = f.height {
+        p.height = [h, 1.0];
     }
     p
 }
@@ -104,7 +110,7 @@ mod tests {
     use crate::NodeKind;
 
     fn fill_m(v: f32) -> NodeKind {
-        NodeKind::Fill(FillParams { base: None, metallic: Some(v), roughness: None })
+        NodeKind::Fill(FillParams { metallic: Some(v), ..Default::default() })
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 pub mod blend;
 pub mod graph;
+pub mod normal;
 pub mod smart;
 
 use graph::Graph;
@@ -199,12 +200,15 @@ impl BlendMode {
 }
 
 /// A fill layer writes constants. `None` leaves that channel untouched.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FillParams {
     /// sRGB color.
     pub base: Option<[f32; 3]>,
     pub metallic: Option<f32>,
     pub roughness: Option<f32>,
+    /// Height in 0..1 where 0.5 is flat; the normal map is derived from the composited height.
+    #[serde(default)]
+    pub height: Option<f32>,
 }
 
 /// A procedural source for a mask. The template's parameters live in `params` by name;
@@ -315,11 +319,18 @@ pub struct Node {
 pub struct Document {
     pub nodes: Vec<Node>,
     next_id: NodeId,
+    /// How strongly painted height bends the normal map (1.0 is the default look).
+    #[serde(default = "default_height_strength")]
+    pub height_strength: f32,
+}
+
+fn default_height_strength() -> f32 {
+    1.0
 }
 
 impl Default for Document {
     fn default() -> Self {
-        Self { nodes: Vec::new(), next_id: 1 }
+        Self { nodes: Vec::new(), next_id: 1, height_strength: 1.0 }
     }
 }
 
@@ -403,7 +414,7 @@ impl Document {
             None,
             None,
             "Base material",
-            NodeKind::Fill(FillParams { base: Some([0.80, 0.55, 0.30]), metallic: Some(0.0), roughness: Some(0.45) }),
+            NodeKind::Fill(FillParams { base: Some([0.80, 0.55, 0.30]), metallic: Some(0.0), roughness: Some(0.45), height: None }),
         );
         d
     }
@@ -775,7 +786,7 @@ mod tests {
         let base = d.add(None, None, "base", NodeKind::Paint);
         let g = d.add(None, None, "grp", NodeKind::Group { children: vec![] });
         let x = d.add(Some(g), None, "x", NodeKind::Paint);
-        let y = d.add(Some(g), None, "y", NodeKind::Fill(FillParams { base: Some([0.1, 0.2, 0.3]), metallic: None, roughness: None }));
+        let y = d.add(Some(g), None, "y", NodeKind::Fill(FillParams { base: Some([0.1, 0.2, 0.3]), ..Default::default() }));
         d.find_mut(y).unwrap().mask = Some(Mask::generated(Generator::new(GeneratorKind::EdgeWear).with("amount", 0.9)));
         let (copy, pairs) = d.duplicate(g).unwrap();
         assert_eq!(d.locate(copy), Some((None, 2)), "directly above the original");

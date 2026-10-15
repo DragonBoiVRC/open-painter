@@ -55,7 +55,7 @@ impl Compositor {
             },
             count: None,
         }];
-        entries.extend((1..=7).map(tex));
+        entries.extend((1..=9).map(tex));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite_layout"),
             entries: &entries,
@@ -80,7 +80,7 @@ impl Compositor {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT)],
+                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT)],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -169,17 +169,20 @@ impl Compositor {
         node: &Node,
         mask: Option<&wgpu::Texture>,
     ) {
-        let (is_fill, color, metal, rough, bits) = match &src {
+        let (is_fill, color, metal, rough, height, bits) = match &src {
             Src::Fill(f) => {
                 let c = f.base.map(|c| c.map(srgb_to_linear)).unwrap_or([0.0; 3]);
-                let bits = f.base.is_some() as u32 | (f.metallic.is_some() as u32) << 1 | (f.roughness.is_some() as u32) << 2;
-                (1, c, f.metallic.unwrap_or(0.0), f.roughness.unwrap_or(0.0), bits)
+                let bits = f.base.is_some() as u32
+                    | (f.metallic.is_some() as u32) << 1
+                    | (f.roughness.is_some() as u32) << 2
+                    | (f.height.is_some() as u32) << 3;
+                (1, c, f.metallic.unwrap_or(0.0), f.roughness.unwrap_or(0.0), f.height.unwrap_or(0.0), bits)
             }
-            Src::Tex(_) => (0, [0.0; 3], 0.0, 0.0, 0),
+            Src::Tex(_) => (0, [0.0; 3], 0.0, 0.0, 0.0, 0),
         };
         let params = Params {
             color: [color[0], color[1], color[2], 0.0],
-            vals: [node.opacity, metal, rough, 0.0],
+            vals: [node.opacity, metal, rough, height],
             mode: [is_fill, mask.is_some() as u32, node.blend.index(), bits],
         };
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -205,6 +208,8 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&sv[1]) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sv[2]) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&mv) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&bk[3]) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&sv[3]) },
             ],
         });
         let dv = dst.views();

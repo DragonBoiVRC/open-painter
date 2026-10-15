@@ -41,7 +41,8 @@ fn check_node(n: &Node, depth: usize, count: &mut usize) -> Result<(), String> {
             let unit = |v: f32| v.is_finite() && (0.0..=1.0).contains(&v);
             let ok = f.base.is_none_or(|c| c.iter().all(|v| unit(*v)))
                 && f.metallic.is_none_or(unit)
-                && f.roughness.is_none_or(unit);
+                && f.roughness.is_none_or(unit)
+                && f.height.is_none_or(unit);
             if !ok {
                 return Err(format!("layer '{}' has fill values outside 0..=1", n.name));
             }
@@ -87,7 +88,7 @@ fn layer(name: &str, base: [f32; 3], metallic: Option<f32>, roughness: Option<f3
         opacity: 1.0,
         blend: BlendMode::Normal,
         mask: None,
-        kind: NodeKind::Fill(FillParams { base: Some(base), metallic, roughness }),
+        kind: NodeKind::Fill(FillParams { base: Some(base), metallic, roughness, height: None }),
     }
 }
 
@@ -281,12 +282,12 @@ mod tests {
         assert!(bad.validate().unwrap_err().contains("opacity"));
         let mut bad = ok.clone();
         if let NodeKind::Group { children } = &mut bad.nodes[0].kind {
-            children[0].kind = NodeKind::Fill(FillParams { base: Some([2.0, 0.0, 0.0]), metallic: None, roughness: None });
+            children[0].kind = NodeKind::Fill(FillParams { base: Some([2.0, 0.0, 0.0]), ..Default::default() });
         }
         assert!(bad.validate().unwrap_err().contains("fill values"));
         let mut bad = ok.clone();
         if let NodeKind::Group { children } = &mut bad.nodes[0].kind {
-            children[0].kind = NodeKind::Fill(FillParams { base: None, metallic: Some(f32::NAN), roughness: None });
+            children[0].kind = NodeKind::Fill(FillParams { metallic: Some(f32::NAN), ..Default::default() });
         }
         assert!(bad.validate().is_err());
         // nesting depth and node count

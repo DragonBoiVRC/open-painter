@@ -57,6 +57,8 @@ pub enum BlobKind {
     /// RG8: (value * coverage, coverage).
     Metal,
     Rough,
+    /// RG8 like the others: (height * coverage, coverage); 0.5 is flat.
+    Height,
     /// R8 mask.
     Mask,
 }
@@ -65,7 +67,7 @@ impl BlobKind {
     pub fn bytes_per_texel(self) -> usize {
         match self {
             BlobKind::Base => 8,
-            BlobKind::Metal | BlobKind::Rough => 2,
+            BlobKind::Metal | BlobKind::Rough | BlobKind::Height => 2,
             BlobKind::Mask => 1,
         }
     }
@@ -75,6 +77,7 @@ impl BlobKind {
             BlobKind::Base => "base",
             BlobKind::Metal => "metal",
             BlobKind::Rough => "rough",
+            BlobKind::Height => "height",
             BlobKind::Mask => "mask",
         }
     }
@@ -436,7 +439,7 @@ mod tests {
         let paint = doc.add(None, None, "Paint", NodeKind::Paint);
         doc.find_mut(paint).unwrap().mask = Some(Mask::new(false));
         let g = doc.add(None, None, "Group", NodeKind::Group { children: vec![] });
-        doc.add(Some(g), None, "inner", NodeKind::Fill(FillParams { base: None, metallic: Some(0.5), roughness: None }));
+        doc.add(Some(g), None, "inner", NodeKind::Fill(FillParams { metallic: Some(0.5), ..Default::default() }));
         let pattern = |len: usize, seed: u8| (0..len).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect::<Vec<u8>>();
         let blobs = vec![
             TextureBlob { node: paint, kind: BlobKind::Base, bytes: pattern(expected_len(SIZE, BlobKind::Base), 1) },

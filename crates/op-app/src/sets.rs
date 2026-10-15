@@ -53,6 +53,20 @@ impl SetState {
     }
 }
 
+/// The op that gives a set's paint store its baked normal map (or removes it).
+pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32) -> PaintOp {
+    let rgba8 = baked.get(&MeshMap::NormalBase).filter(|b| b.size == size && b.channels == 3).map(|b| {
+        let mut out = Vec::with_capacity(b.texels() * 4);
+        for i in 0..b.texels() {
+            let t = b.texel(i);
+            out.extend(t.map(|v| (v * 255.0 + 0.5) as u8));
+            out.push(255);
+        }
+        out
+    });
+    PaintOp::SetBakedNormal { size, rgba8 }
+}
+
 impl App {
     pub(crate) fn set_ranges_len(&self) -> usize {
         self.mesh.set_ranges().len()
@@ -128,6 +142,10 @@ impl App {
         self.proc_info.clear();
     }
 
+    pub(crate) fn enqueue_batch(&self, batch: SetBatch) {
+        self.enqueue(batch);
+    }
+
     fn enqueue(&self, batch: SetBatch) {
         if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
             gpu.enqueue(batch);
@@ -191,7 +209,11 @@ impl App {
                 st.materialized = false;
                 self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
             } else {
-                self.enqueue(SetBatch { set, doc: st.doc.clone(), ops: vec![PaintOp::Load { size, blobs }] });
+                let mut ops = vec![PaintOp::Load { size, blobs }];
+                if st.baked.contains_key(&MeshMap::NormalBase) {
+                    ops.push(baked_normal_op(&st.baked, size));
+                }
+                self.enqueue(SetBatch { set, doc: st.doc.clone(), ops });
             }
         }
         self.parked = states.into_iter().map(Some).collect();
@@ -260,6 +282,10 @@ impl App {
         }
         let (doc, size) = (st.doc.clone(), st.tex_size);
         self.gpu_rebuild(set, &doc, size);
+        let op = self.parked[set].as_ref().map(|st| baked_normal_op(&st.baked, size));
+        if let (Some(op), true) = (op, self.parked[set].as_ref().is_some_and(|st| st.baked.contains_key(&MeshMap::NormalBase))) {
+            self.enqueue(SetBatch { set, doc, ops: vec![op] });
+        }
         if let Some(Some(st)) = self.parked.get_mut(set) {
             st.materialized = true;
         }

@@ -49,6 +49,14 @@ impl App {
                 if let Some(v) = &mut f.roughness {
                     changed |= ui.add(egui::Slider::new(v, 0.0..=1.0)).changed();
                 }
+                let mut on = f.height.is_some();
+                if ui.checkbox(&mut on, "Height (normal map)").changed() {
+                    f.height = on.then(|| f.height.unwrap_or(0.5));
+                    changed = true;
+                }
+                if let Some(v) = &mut f.height {
+                    changed |= ui.add(egui::Slider::new(v, 0.0..=1.0)).on_hover_text("0 digs in, 0.5 is flat, 1 raises").changed();
+                }
             }
 
             ui.separator();

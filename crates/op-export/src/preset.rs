@@ -45,8 +45,11 @@ pub enum ChannelSrc {
     Smoothness,
     /// A baked mesh map. Scalar maps ignore the component.
     Mesh { map: MeshMap, comp: Comp },
-    /// Tangent-space normal map (baked). `directx` flips the green channel.
+    /// Tangent-space normal map: painted height combined with the baked normal map when there
+    /// is one. `directx` flips the green channel.
     Normal { directx: bool, comp: Comp },
+    /// The painted height channel (0.5 where nothing is painted).
+    Height,
     /// Ambient occlusion. There is no painted AO channel yet, so this is the baked AO.
     AoMixed,
     /// A fixed value, e.g. a white placeholder or an unsupported source replaced by black.
