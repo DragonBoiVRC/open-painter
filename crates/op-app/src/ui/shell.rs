@@ -70,6 +70,7 @@ impl App {
         match tab {
             Tab::Viewport => self.viewport_ui(ui),
             Tab::Brush => self.brush_panel(ui),
+            Tab::Sets => self.sets_panel(ui),
             Tab::Layers => self.layers_panel(ui),
             Tab::Properties => self.properties_panel(ui),
             Tab::TextureSet => self.texture_set_panel(ui),

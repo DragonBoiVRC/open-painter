@@ -1,7 +1,7 @@
 //! The 3D viewport tab: navigation, painting, overlays and the axis gizmo.
 
 use super::theme;
-use crate::viewport::{Globals, ViewportCallback};
+use crate::viewport::{Globals, SetBatch, ViewportCallback};
 use crate::{srgb_for_display, App, PaintOp, View};
 use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, UiBuilder};
@@ -92,6 +92,7 @@ impl App {
         if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
             ops.push(PaintOp::Stamps { layer, target, stamps });
         }
+        let batches = vec![SetBatch { set: self.active, doc: self.doc.clone(), ops }];
 
         let size_px = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
         let cam = self.camera.position();
@@ -116,7 +117,7 @@ impl App {
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ViewportCallback { globals, size_px, doc: self.doc.clone(), ops },
+            ViewportCallback { globals, size_px, batches, active: self.active },
         ));
 
         // Brush outline: dark under light so it reads on any surface.

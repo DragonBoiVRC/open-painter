@@ -66,8 +66,18 @@ pub struct ViewportGpu {
     vbuf: Option<wgpu::Buffer>,
     ibuf: Option<wgpu::Buffer>,
     index_count: u32,
+    /// Draw ranges (first index, index count) of each texture set, in set order.
+    ranges: Vec<(u32, u32)>,
+    /// A copy of the globals with the baked-map preview switched off, for sets that are not being viewed.
+    plain_buf: wgpu::Buffer,
+    plain_bind: wgpu::BindGroup,
     offscreen: Option<Offscreen>,
-    pub paint: PaintGpu,
+    /// One paint store per texture set.
+    pub sets: Vec<PaintGpu>,
+    /// The set being edited and previewed.
+    pub active: usize,
+    /// Batches waiting for the next rendered frame (set up by the app outside of frames).
+    queued: Vec<SetBatch>,
     preview_layout: wgpu::BindGroupLayout,
     preview_sampler: wgpu::Sampler,
     preview_bind: wgpu::BindGroup,
@@ -101,6 +111,17 @@ impl ViewportGpu {
         });
 
         let paint = PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE);
+        let plain_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("globals_plain"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let plain_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("globals_plain_bind"),
+            layout: &globals_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: plain_buf.as_entire_binding() }],
+        });
         let preview_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("preview_layout"),
             entries: &[
@@ -245,8 +266,13 @@ impl ViewportGpu {
             vbuf: None,
             ibuf: None,
             index_count: 0,
+            ranges: Vec::new(),
+            plain_buf,
+            plain_bind,
             offscreen: None,
-            paint,
+            sets: vec![paint],
+            active: 0,
+            queued: Vec::new(),
             preview_layout,
             preview_sampler,
             preview_bind,
@@ -284,6 +310,29 @@ impl ViewportGpu {
             usage: wgpu::BufferUsages::INDEX,
         }));
         self.index_count = mesh.indices.len() as u32;
+        self.ranges = mesh.set_ranges().iter().map(|s| (s.first_index, s.index_count)).collect();
+        // One paint store per texture set. Extra stores are dropped; new ones start at the default size
+        // and are given their real size by a `Reset`/`Load` op.
+        self.sets.truncate(self.ranges.len().max(1));
+        while self.sets.len() < self.ranges.len() {
+            self.sets.push(PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE));
+        }
+        self.active = self.active.min(self.sets.len() - 1);
+    }
+
+    /// Hold `batch` until the next frame is rendered; queued batches run before that frame's own.
+    pub fn enqueue(&mut self, batch: SetBatch) {
+        self.queued.push(batch);
+    }
+
+    /// Forget queued batches (they belong to a mesh that was replaced).
+    pub fn clear_queue(&mut self) {
+        self.queued.clear();
+    }
+
+    /// The paint store of the set being edited.
+    pub fn paint(&self) -> &PaintGpu {
+        &self.sets[self.active]
     }
 
     fn ensure_offscreen(&mut self, device: &wgpu::Device, size: [u32; 2]) {
@@ -326,33 +375,50 @@ impl ViewportGpu {
     }
 
 
+    /// Single-set convenience used by tests: apply `ops` to set 0 and draw.
+    #[cfg(test)]
     pub fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, globals: &Globals, size: [u32; 2], doc: &Document, ops: &[PaintOp]) {
+        let batch = [SetBatch { set: 0, doc: doc.clone(), ops: ops.to_vec() }];
+        self.render_sets(device, queue, encoder, globals, size, &batch);
+    }
+
+    /// Apply each batch to its set's paint store, then draw every set with its own material.
+    pub fn render_sets(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, globals: &Globals, size: [u32; 2], batches: &[SetBatch]) {
         self.ensure_offscreen(device, size);
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(globals));
+        let mut plain = *globals;
+        plain.light_dir[3] = 0.0;
+        queue.write_buffer(&self.plain_buf, 0, bytemuck::bytes_of(&plain));
         let off = self.offscreen.as_ref().unwrap();
 
         // Paint first, using last frame's depth (the camera is static while painting),
         // so this frame's scene pass already shows the new strokes.
-        let mesh = match (&self.vbuf, &self.ibuf) {
-            (Some(v), Some(i)) => Some(MeshBuffers { vertices: v, indices: i, index_count: self.index_count }),
-            _ => None,
-        };
         let depth = off.depth_view.clone();
-        self.paint.apply(
-            device,
-            queue,
-            encoder,
-            doc,
-            ops,
-            mesh,
-            &StampView {
-                view_proj: globals.view_proj,
-                camera_pos: globals.camera_pos,
-                size_px: size,
-                near_far: [globals.params[2], globals.params[3]],
-                depth: &depth,
-            },
-        );
+        let queued = std::mem::take(&mut self.queued);
+        for b in queued.iter().chain(batches) {
+            let (Some(paint), Some(&(first_index, index_count))) = (self.sets.get_mut(b.set), self.ranges.get(b.set).or(self.ranges.first())) else {
+                continue;
+            };
+            let mesh = match (&self.vbuf, &self.ibuf) {
+                (Some(v), Some(i)) => Some(MeshBuffers { vertices: v, indices: i, first_index, index_count }),
+                _ => None,
+            };
+            paint.apply(
+                device,
+                queue,
+                encoder,
+                &b.doc,
+                &b.ops,
+                mesh,
+                &StampView {
+                    view_proj: globals.view_proj,
+                    camera_pos: globals.camera_pos,
+                    size_px: size,
+                    near_far: [globals.params[2], globals.params[3]],
+                    depth: &depth,
+                },
+            );
+        }
 
         let color_view = off.color.create_view(&Default::default());
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -377,22 +443,36 @@ impl ViewportGpu {
         });
         if let (Some(v), Some(i)) = (&self.vbuf, &self.ibuf) {
             pass.set_pipeline(&self.pbr);
-            pass.set_bind_group(0, &self.globals_bind, &[]);
-            pass.set_bind_group(1, self.paint.material_bind(), &[]);
             pass.set_bind_group(2, &self.preview_bind, &[]);
             pass.set_vertex_buffer(0, v.slice(..));
             pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.index_count, 0, 0..1);
+            for (set, paint) in self.sets.iter().enumerate() {
+                let Some(&(first, count)) = self.ranges.get(set) else { continue };
+                // The baked-map preview belongs to the set being edited; the others are shaded normally.
+                let globals = if set == self.active { &self.globals_bind } else { &self.plain_bind };
+                pass.set_bind_group(0, globals, &[]);
+                pass.set_bind_group(1, paint.material_bind(), &[]);
+                pass.draw_indexed(first..first + count, 0, 0..1);
+            }
         }
     }
+}
+
+/// Paint operations for one texture set, with that set's document as of when they were issued.
+#[derive(Clone)]
+pub struct SetBatch {
+    pub set: usize,
+    pub doc: Document,
+    pub ops: Vec<PaintOp>,
 }
 
 /// Per-frame paint callback handed to egui.
 pub struct ViewportCallback {
     pub globals: Globals,
     pub size_px: [u32; 2],
-    pub doc: Document,
-    pub ops: Vec<PaintOp>,
+    pub batches: Vec<SetBatch>,
+    /// The set shown with the baked-map preview.
+    pub active: usize,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -405,7 +485,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(gpu) = resources.get_mut::<ViewportGpu>() {
-            gpu.render(device, queue, encoder, &self.globals, self.size_px, &self.doc, &self.ops);
+            gpu.active = self.active.min(gpu.sets.len().saturating_sub(1));
+            gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
         }
         Vec::new()
     }
@@ -480,7 +561,7 @@ mod tests {
         }
 
         fn metal(&self) -> Vec<u8> {
-            self.read(&self.gpu.paint.output.metal, 2)
+            self.read(&self.gpu.paint().output.metal, 2)
         }
     }
 
@@ -544,14 +625,78 @@ mod tests {
         assert_eq!(texel_rg(&metal, sphere_uv(-front)).1, 0, "back-facing texel must not be painted");
         let painted = metal.chunks_exact(2).filter(|t| t[1] > 0).count();
         assert!(painted > 0 && painted < (SIZE * SIZE) as usize / 10, "implausible painted area: {painted}");
-        let rough = rig.read(&rig.gpu.paint.output.rough, 2);
+        let rough = rig.read(&rig.gpu.paint().output.rough, 2);
         assert!(rough.iter().all(|&b| b == 0), "roughness written while disabled");
 
         rig.run(&doc, &[PaintOp::UndoStroke]);
         assert_eq!(texel_rg(&rig.metal(), sphere_uv(front)).1, 0, "undo did not clear the stroke");
-        assert_eq!(rig.gpu.paint.undo_depth(), (0, 1));
+        assert_eq!(rig.gpu.paint().undo_depth(), (0, 1));
         rig.run(&doc, &[PaintOp::RedoStroke]);
         assert!(texel_rg(&rig.metal(), sphere_uv(front)).1 > 240, "redo did not restore the stroke");
+    }
+
+    /// A sphere cut into a northern set (first half of the indices) and a southern one.
+    fn two_set_sphere() -> Mesh {
+        let mut m = Mesh::uv_sphere(1.0, 96, 48);
+        let half = (m.indices.len() / 6 * 3) as u32;
+        let total = m.indices.len() as u32;
+        m.sets = vec![
+            op_mesh::SetRange { name: "North".into(), first_index: 0, index_count: half },
+            op_mesh::SetRange { name: "South".into(), first_index: half, index_count: total - half },
+        ];
+        m
+    }
+
+    impl Rig {
+        fn run_sets(&mut self, batches: &[SetBatch]) {
+            let mut enc = self.device.create_command_encoder(&Default::default());
+            self.gpu.render_sets(&self.device, &self.queue, &mut enc, &self.globals, [SIZE, SIZE], batches);
+            self.queue.submit([enc.finish()]);
+        }
+
+        fn set_metal(&self, set: usize) -> Vec<u8> {
+            self.read(&self.gpu.sets[set].output.metal, 2)
+        }
+    }
+
+    /// Each texture set has its own paint store and material, and a stroke only lands on the
+    /// triangles of the set it was made in.
+    #[test]
+    fn texture_sets_keep_separate_paint_and_only_stamp_their_own_triangles() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        rig.gpu.set_mesh(&rig.device, &two_set_sphere());
+        assert_eq!(rig.gpu.sets.len(), 2);
+        let (mut a, mut b) = (Document::default(), Document::default());
+        a.add(None, None, "metal", fill(None, Some(1.0), None));
+        b.add(None, None, "metal half", fill(None, Some(0.5), None));
+        let layer_b = b.add(None, None, "paint", NodeKind::Paint);
+        let reset = |set, doc: &Document| SetBatch { set, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
+        rig.run_sets(&[reset(0, &a), reset(1, &b)]);
+
+        // The camera looks at the northern half: set 0's fill is everywhere in set 0's texture, and
+        // set 1's texture is still empty.
+        let front = rig.front;
+        assert!(front.y > 0.0, "the test needs the camera above the equator");
+        let uv = sphere_uv(front);
+        assert!(texel_rg(&rig.set_metal(0), uv).1 > 240, "set 0 should hold its own fill");
+        let (m1, c1) = texel_rg(&rig.set_metal(1), uv);
+        assert!(c1 > 240 && (m1 as i32 - 128).abs() < 4, "set 1 should hold its own, different fill: {m1} {c1}");
+
+        // A stroke in set 1 aimed at northern geometry paints nothing: its triangles are not drawn.
+        let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        let stroke = |set, doc: &Document, layer| SetBatch {
+            set,
+            doc: doc.clone(),
+            ops: vec![
+                PaintOp::BeginStroke { layer, target: Target::Content },
+                PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] },
+            ],
+        };
+        rig.run_sets(&[stroke(1, &b, layer_b)]);
+        assert!(
+            rig.set_metal(1).chunks_exact(2).all(|t| t[0] == 128 || t[0] == 127),
+            "a stroke leaked into another set's triangles"
+        );
     }
 
     /// The GPU compositor must agree with the CPU reference in op-core, including
@@ -578,7 +723,7 @@ mod tests {
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
         let expect = op_core::blend::eval_fill_only(&doc);
 
-        let base = rig.read(&rig.gpu.paint.output.base, 8);
+        let base = rig.read(&rig.gpu.paint().output.base, 8);
         let i = ((SIZE / 2 * SIZE + SIZE / 2) * 8) as usize;
         let got_base: Vec<f32> =
             (0..4).map(|c| f16_to_f32(u16::from_le_bytes([base[i + c * 2], base[i + c * 2 + 1]]))).collect();
@@ -586,7 +731,7 @@ mod tests {
             assert!((got_base[c] - expect.base[c]).abs() < 2e-3, "base[{c}] gpu {} cpu {}", got_base[c], expect.base[c]);
         }
         let m = rig.metal();
-        let r = rig.read(&rig.gpu.paint.output.rough, 2);
+        let r = rig.read(&rig.gpu.paint().output.rough, 2);
         let j = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;
         for (name, bytes, want) in [("metal", &m, expect.metal), ("rough", &r, expect.rough)] {
             for c in 0..2 {
@@ -611,13 +756,13 @@ mod tests {
 
             rig.run(&doc, &[PaintOp::Reset(SIZE)]);
             let expect = op_core::blend::eval_fill_only(&doc);
-            let base = rig.read(&rig.gpu.paint.output.base, 8);
+            let base = rig.read(&rig.gpu.paint().output.base, 8);
             let i = ((SIZE / 2 * SIZE + SIZE / 2) * 8) as usize;
             for c in 0..3 {
                 let got = f16_to_f32(u16::from_le_bytes([base[i + c * 2], base[i + c * 2 + 1]]));
                 assert!((got - expect.base[c]).abs() < 2e-3, "{mode:?} base[{c}] gpu {got} cpu {}", expect.base[c]);
             }
-            let (m, r) = (rig.metal(), rig.read(&rig.gpu.paint.output.rough, 2));
+            let (m, r) = (rig.metal(), rig.read(&rig.gpu.paint().output.rough, 2));
             let j = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;
             let (gm, gr) = (m[j] as f32 / 255.0, r[j] as f32 / 255.0);
             assert!((gm - expect.metal[0]).abs() < 3.0 / 255.0, "{mode:?} metal gpu {gm} cpu {}", expect.metal[0]);
@@ -671,18 +816,18 @@ mod tests {
         let mut doc = Document::default();
         let p = doc.add(None, None, "p", NodeKind::Paint);
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
-        assert!(rig.gpu.paint.store.contains_key(&p));
+        assert!(rig.gpu.paint().store.contains_key(&p));
 
         let mut gone = doc.clone();
         gone.remove(p);
         rig.run(&gone, &[PaintOp::Gc(vec![p])]); // history still references it
-        assert!(rig.gpu.paint.store.contains_key(&p), "referenced node was freed");
+        assert!(rig.gpu.paint().store.contains_key(&p), "referenced node was freed");
         rig.run(&gone, &[PaintOp::Gc(vec![])]);
-        assert!(!rig.gpu.paint.store.contains_key(&p), "unreferenced node was kept");
+        assert!(!rig.gpu.paint().store.contains_key(&p), "unreferenced node was kept");
     }
 
     fn output_bytes(rig: &Rig) -> [Vec<u8>; 3] {
-        rig.gpu.paint.capture_output(&rig.device, &rig.queue)
+        rig.gpu.paint().capture_output(&rig.device, &rig.queue)
     }
 
     /// Paint, save to disk, load into a fresh GPU context: the composited result and
@@ -711,7 +856,7 @@ mod tests {
         assert_ne!(before[0], blank[0], "painting did not change the composited base color");
         assert_ne!(before[2], blank[2], "painting did not change the composited roughness");
 
-        let blobs = rig.gpu.paint.capture_blobs(&rig.device, &rig.queue, &doc);
+        let blobs = rig.gpu.paint().capture_blobs(&rig.device, &rig.queue, &doc);
         assert_eq!(blobs.len(), 4, "base, metal, rough and mask of the paint layer");
         let project = op_project::Project {
             texture_size: SIZE,
@@ -730,7 +875,7 @@ mod tests {
         let mut fresh = Rig::new().unwrap();
         fresh.run(&loaded.document, &[PaintOp::Load { size: loaded.texture_size, blobs: loaded.blobs }]);
         // Compare piecewise so a failure says which texture differs, not a wall of bytes.
-        let recaptured = fresh.gpu.paint.capture_blobs(&fresh.device, &fresh.queue, &loaded.document);
+        let recaptured = fresh.gpu.paint().capture_blobs(&fresh.device, &fresh.queue, &loaded.document);
         assert_eq!(recaptured.len(), blobs.len());
         for (a, b) in recaptured.iter().zip(&blobs) {
             let diff = a.bytes.iter().zip(&b.bytes).filter(|(x, y)| x != y).count();

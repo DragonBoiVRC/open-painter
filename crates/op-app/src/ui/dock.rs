@@ -11,6 +11,8 @@ pub enum Tab {
     Viewport,
     /// Brush and paint settings ("Properties - Paint").
     Brush,
+    /// The materials of the model; each is edited on its own.
+    Sets,
     Layers,
     /// Properties of the selected layer.
     Properties,
@@ -21,13 +23,14 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] =
-        [Tab::Viewport, Tab::Brush, Tab::Layers, Tab::Properties, Tab::TextureSet, Tab::Bake, Tab::Display, Tab::Shelf];
+    pub const ALL: [Tab; 9] =
+        [Tab::Viewport, Tab::Brush, Tab::Sets, Tab::Layers, Tab::Properties, Tab::TextureSet, Tab::Bake, Tab::Display, Tab::Shelf];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Viewport => "Viewport",
             Tab::Brush => "Properties - Paint",
+            Tab::Sets => "Texture Sets",
             Tab::Layers => "Layers",
             Tab::Properties => "Properties - Layer",
             Tab::TextureSet => "Texture Set Settings",
@@ -52,6 +55,7 @@ impl Tab {
         match self {
             Tab::Viewport => ph::CUBE,
             Tab::Brush => ph::PAINT_BRUSH,
+            Tab::Sets => ph::SQUARES_FOUR,
             Tab::Layers => ph::STACK,
             Tab::Properties => ph::SLIDERS,
             Tab::TextureSet => ph::IMAGE,
@@ -74,7 +78,8 @@ pub fn default_layout() -> DockState<Tab> {
     let tree = dock.main_surface_mut();
     let [center, _left] = tree.split_left(NodeIndex::root(), 0.19, vec![Tab::Brush]);
     let [center, right] = tree.split_right(center, 0.76, vec![Tab::Layers]);
-    tree.split_below(right, 0.46, vec![Tab::Properties, Tab::TextureSet, Tab::Bake, Tab::Display]);
+    let [right, _sets] = tree.split_above(right, 0.2, vec![Tab::Sets]);
+    tree.split_below(right, 0.5, vec![Tab::Properties, Tab::TextureSet, Tab::Bake, Tab::Display]);
     tree.split_below(center, 0.74, vec![Tab::Shelf]);
     dock
 }

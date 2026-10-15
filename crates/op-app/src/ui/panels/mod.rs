@@ -6,6 +6,7 @@ mod display;
 mod layer_dnd;
 mod layers;
 mod properties;
+mod sets;
 mod shelf;
 mod texture_set;
 

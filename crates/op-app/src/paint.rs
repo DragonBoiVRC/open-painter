@@ -60,6 +60,8 @@ pub struct StampView<'a> {
 pub struct MeshBuffers<'a> {
     pub vertices: &'a wgpu::Buffer,
     pub indices: &'a wgpu::Buffer,
+    /// The triangles to draw: `index_count` indices starting at `first_index` (one texture set).
+    pub first_index: u32,
     pub index_count: u32,
 }
 
@@ -722,7 +724,7 @@ impl PaintGpu {
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     pass.set_vertex_buffer(1, self.instance_buf.slice(offset..offset + n as u64 * stride));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..n as u32);
+                    pass.draw_indexed(mesh.first_index..mesh.first_index + mesh.index_count, 0, 0..n as u32);
                     self.cursor += n;
                     dirty = true;
                 }

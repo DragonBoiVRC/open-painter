@@ -4,6 +4,7 @@ mod files;
 mod gpu_io;
 mod paint;
 mod procgen;
+mod sets;
 mod ui;
 mod viewport;
 
@@ -154,6 +155,8 @@ fn builtin_kinds() -> [GeneratorKind; 5] {
 }
 
 struct BakeJob {
+    /// The texture set being baked.
+    set: usize,
     rx: Receiver<Result<op_bake::BakeResult, String>>,
     progress: Arc<BakeProgress>,
     started: Instant,
@@ -178,6 +181,9 @@ struct App {
     mesh: Mesh,
     mesh_name: String,
     selected: Option<NodeId>,
+    /// Texture sets other than the active one (the active set's slot is `None`; its state is in the fields above).
+    parked: Vec<Option<sets::SetState>>,
+    active: usize,
     shelf: ui::panels::ShelfState,
     /// Groups folded shut in the layers panel.
     collapsed: std::collections::HashSet<NodeId>,
@@ -275,6 +281,8 @@ impl App {
             mesh: Mesh::default(),
             mesh_name: "sphere".into(),
             selected,
+            parked: Vec::new(),
+            active: 0,
             shelf: Default::default(),
             collapsed: Default::default(),
             renaming: None,
@@ -295,7 +303,7 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             gesture_before: None,
-            status: String::from("Select a layer and paint. Orbit: Alt+left or middle. Drop a .glb/.gltf or .opproj to open."),
+            status: String::from("Select a layer and paint. Orbit: Alt+left or middle. Drop a .fbx, .glb/.gltf or .opproj to open."),
             render_state: rs,
             project_path: None,
             modified: false,
@@ -349,7 +357,7 @@ impl App {
             show_shortcuts: false,
         };
         app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
-        app.pending.push(PaintOp::Reset(app.tex_size));
+        app.init_sets();
         if let Some(p) = initial {
             if is_project(&p) {
                 app.open_path(&p);
@@ -382,36 +390,30 @@ impl App {
             .unwrap_or_else(|| "untitled".into())
     }
 
-    fn reset_document(&mut self) {
-        self.doc = Document::with_default_material();
-        self.selected = self.doc.nodes.last().map(|n| n.id);
-        self.undo.clear();
-        self.redo.clear();
-        self.gesture_before = None;
-        self.stroke.active = false;
-        self.pending.clear();
-        self.pending.push(PaintOp::Reset(self.tex_size));
-        self.proc.invalidate();
-        self.proc_info.clear();
-    }
-
     fn new_project(&mut self) {
-        self.reset_document();
-        self.clear_baked();
+        self.init_sets();
+        self.set_view(View::Shaded);
         self.project_path = None;
         self.modified = false;
         self.status = "New project.".into();
     }
 
     fn load_mesh_file(&mut self, path: &Path) {
-        match Mesh::load_gltf(path) {
+        let is_fbx = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fbx"));
+        let loaded = if is_fbx { Mesh::load_fbx(path) } else { Mesh::load_gltf(path) };
+        match loaded {
             Ok(mesh) => {
                 let tris = mesh.indices.len() / 3;
+                let sets = mesh.set_ranges().len();
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "mesh".into());
                 self.set_mesh(mesh, name);
                 // Paint belongs to the old mesh's UVs: start a fresh project.
                 self.new_project();
-                self.status = format!("Loaded {} ({tris} tris)", path.display());
+                self.status = if sets > 1 {
+                    format!("Loaded {} ({tris} tris, {sets} texture sets)", path.display())
+                } else {
+                    format!("Loaded {} ({tris} tris)", path.display())
+                };
             }
             Err(e) => self.status = format!("Failed to load {}: {e}", path.display()),
         }
@@ -419,6 +421,7 @@ impl App {
 
     fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {
         self.set_mesh(p.mesh, p.mesh_name);
+        self.init_sets();
         self.doc = p.document;
         self.tex_size = p.texture_size;
         self.selected = self.doc.nodes.last().map(|n| n.id);
@@ -430,8 +433,6 @@ impl App {
         self.pending.push(PaintOp::Load { size: p.texture_size, blobs: p.blobs });
         self.baked = Arc::new(p.baked);
         self.bake_rev += 1;
-        self.proc.invalidate();
-        self.proc_info.clear();
         self.set_view(View::Shaded);
         self.project_path = path;
         self.modified = modified;
@@ -486,9 +487,9 @@ impl App {
     fn capture_project(&self) -> Result<Project, String> {
         let renderer = self.render_state.renderer.read();
         let gpu = renderer.callback_resources.get::<ViewportGpu>().ok_or("viewport not ready")?;
-        let blobs = gpu.paint.capture_blobs(&self.render_state.device, &self.render_state.queue, &self.doc);
+        let blobs = gpu.paint().capture_blobs(&self.render_state.device, &self.render_state.queue, &self.doc);
         Ok(Project {
-            texture_size: gpu.paint.size(),
+            texture_size: gpu.paint().size(),
             document: self.doc.clone(),
             mesh_name: self.mesh_name.clone(),
             mesh: self.mesh.clone(),
@@ -551,7 +552,7 @@ impl App {
         let (size, [base, metal, rough]) = {
             let renderer = self.render_state.renderer.read();
             let Some(gpu) = renderer.callback_resources.get::<ViewportGpu>() else { return };
-            (gpu.paint.size(), gpu.paint.capture_output(&self.render_state.device, &self.render_state.queue))
+            (gpu.paint().size(), gpu.paint().capture_output(&self.render_state.device, &self.render_state.queue))
         };
         let dir = PathBuf::from(&self.export.dir);
         let (project, set, padding) = (self.project_name(), self.export.set_name.clone(), self.export.padding);
@@ -669,26 +670,33 @@ impl App {
             let result = op_bake::bake(&low, high.as_deref(), &settings, &worker_progress).map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
-        self.bake.job = Some(BakeJob { rx, progress, started: Instant::now() });
+        self.bake.job = Some(BakeJob { set: self.active, rx, progress, started: Instant::now() });
         self.status = format!("Baking {} map(s) at {}x{}...", self.bake.maps.len(), self.tex_size, self.tex_size);
     }
 
     fn poll_bake(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.bake.job else { return };
+        let (set, started) = (job.set, job.started);
         match job.rx.try_recv() {
             Ok(Ok(result)) => {
-                let secs = job.started.elapsed().as_secs_f32();
-                let mut maps = (*self.baked).clone();
-                maps.retain(|_, b| b.size == result.size); // older bakes at another resolution are stale
+                let secs = started.elapsed().as_secs_f32();
                 let n = result.maps.len();
-                maps.extend(result.maps);
-                self.baked = Arc::new(maps);
-                self.bake_rev += 1;
+                let covered = result.covered;
+                // The bake belongs to the set it was started for, which may no longer be the active one.
+                self.with_set(set, |st| {
+                    let mut maps = (*st.baked).clone();
+                    maps.retain(|_, b| b.size == result.size); // older bakes at another resolution are stale
+                    maps.extend(result.maps);
+                    st.baked = Arc::new(maps);
+                    st.bake_rev += 1;
+                });
                 self.bake.job = None;
                 self.modified = true;
-                let view = self.view;
-                self.set_view(view);
-                self.status = format!("Baked {n} map(s) in {secs:.1} s ({} texels shaded).", result.covered);
+                if set == self.active {
+                    let view = self.view;
+                    self.set_view(view);
+                }
+                self.status = format!("Baked {n} map(s) for '{}' in {secs:.1} s ({covered} texels shaded).", self.set_name(set));
             }
             Ok(Err(e)) => {
                 self.bake.job = None;

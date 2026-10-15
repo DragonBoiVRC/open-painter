@@ -31,7 +31,12 @@ impl App {
             hint(ui, "Changing the resolution clears all paint, history and baked maps.");
         });
         section(ui, "Model", |ui| {
+            let ranges = self.mesh.set_ranges();
+            let set = &ranges[self.active.min(ranges.len() - 1)];
             hint(ui, &format!("{}  ({} triangles)", self.mesh_name, self.mesh.indices.len() / 3));
+            if ranges.len() > 1 {
+                hint(ui, &format!("Texture set '{}': {} triangles", set.name, set.index_count / 3));
+            }
         });
     }
 }
