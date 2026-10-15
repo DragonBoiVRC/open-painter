@@ -8,6 +8,11 @@ struct Params {
     color: vec4<f32>,   // fill base color, linear rgb
     vals: vec4<f32>,    // opacity, fill metallic, fill roughness, fill height
     mode: vec4<u32>,    // x: source is fill, y: has mask, z: blend mode, w: fill enable bits (1 base, 2 metal, 4 rough, 8 height)
+    tex: vec4<u32>,     // x: channels read from an image (1 base, 2 metal, 4 rough, 8 height, 16 normal),
+                        // y: inverted scalar channels (same bits), z: bit 0 flips the normal map's green channel
+    xf: vec4<f32>,      // texture tiling x, y and offset x, y
+    xf2: vec4<f32>,     // cos and sin of the texture rotation, then the UV offset of this tile (u, v)
+    dims: vec4<f32>,    // texture size in pixels
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -20,11 +25,30 @@ struct Params {
 @group(0) @binding(7) var mask_tex: texture_2d<f32>;
 @group(0) @binding(8) var bk_height: texture_2d<f32>;
 @group(0) @binding(9) var src_height: texture_2d<f32>;
+@group(0) @binding(10) var bk_normal: texture_2d<f32>;
+@group(0) @binding(11) var src_normal: texture_2d<f32>;
+// Images feeding a fill layer's channels (sampled with mipmaps; base colour through an sRGB view).
+@group(0) @binding(12) var img_base: texture_2d<f32>;
+@group(0) @binding(13) var img_metal: texture_2d<f32>;
+@group(0) @binding(14) var img_rough: texture_2d<f32>;
+@group(0) @binding(15) var img_height: texture_2d<f32>;
+@group(0) @binding(16) var img_normal: texture_2d<f32>;
+@group(0) @binding(17) var img_samp: sampler;
+
+struct FsIn {
+    @builtin(position) pos: vec4<f32>,
+    // The pixel's position, as a plain varying so that texture coordinates made from it are affine.
+    @location(0) pos_xy: vec2<f32>,
+};
 
 @vertex
-fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+fn vs_main(@builtin(vertex_index) i: u32) -> FsIn {
     let q = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
-    return vec4<f32>(q * 2.0 - 1.0, 0.0, 1.0);
+    var o: FsIn;
+    o.pos = vec4<f32>(q * 2.0 - 1.0, 0.0, 1.0);
+    // Pixel coordinates with the origin at the top left, matching the framebuffer.
+    o.pos_xy = vec2<f32>(q.x, 1.0 - q.y) * p.dims.x;
+    return o;
 }
 
 fn blend_mode(cb: vec3<f32>, cs: vec3<f32>, mode: u32) -> vec3<f32> {
@@ -61,13 +85,31 @@ struct Out {
     @location(1) metal: vec4<f32>,
     @location(2) rough: vec4<f32>,
     @location(3) height: vec4<f32>,
+    @location(4) normal: vec4<f32>,
 };
 
+// The texture coordinate of this pixel: UV position (with the tile offset), turned about the middle
+// of the texture, tiled and shifted.
+fn tex_uv(frag: vec2<f32>) -> vec2<f32> {
+    let uv = frag / p.dims.x + p.xf2.zw;
+    let c = uv - vec2<f32>(0.5);
+    let r = vec2<f32>(c.x * p.xf2.x - c.y * p.xf2.y, c.x * p.xf2.y + c.y * p.xf2.x);
+    return (r + vec2<f32>(0.5)) * p.xf.xy + p.xf.zw;
+}
+
+fn decode_normal(v: vec3<f32>, flip_green: bool) -> vec3<f32> {
+    var n = v * 2.0 - vec3<f32>(1.0);
+    if (flip_green) { n.y = -n.y; }
+    return normalize(n);
+}
+
 @fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
-    let xy = vec2<i32>(i32(pos.x), i32(pos.y));
+fn fs_main(i: FsIn) -> Out {
+    let xy = vec2<i32>(i32(i.pos.x), i32(i.pos.y));
 
     var cov = vec4<f32>(0.0);          // coverage of base, metal, rough, height
+    var src_n = vec3<f32>(0.0, 0.0, 1.0);   // the source's normal
+    var n_cov = 0.0;                   // its coverage
     var color = vec3<f32>(0.0);        // straight base color
     var metal = 0.0;
     var rough = 0.0;
@@ -78,6 +120,34 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         rough = p.vals.z;
         height = p.vals.w;
         cov = vec4<f32>(f32(p.mode.w & 1u), f32((p.mode.w >> 1u) & 1u), f32((p.mode.w >> 2u) & 1u), f32((p.mode.w >> 3u) & 1u));
+        if (p.tex.x != 0u) {
+            let t = tex_uv(i.pos_xy);
+            if ((p.tex.x & 1u) != 0u) {
+                let s = textureSample(img_base, img_samp, t);
+                color = s.rgb;
+                cov.x = s.a;
+            }
+            if ((p.tex.x & 2u) != 0u) {
+                let v = textureSample(img_metal, img_samp, t).r;
+                metal = select(v, 1.0 - v, (p.tex.y & 2u) != 0u);
+                cov.y = 1.0;
+            }
+            if ((p.tex.x & 4u) != 0u) {
+                let v = textureSample(img_rough, img_samp, t).r;
+                rough = select(v, 1.0 - v, (p.tex.y & 4u) != 0u);
+                cov.z = 1.0;
+            }
+            if ((p.tex.x & 8u) != 0u) {
+                let v = textureSample(img_height, img_samp, t).r;
+                height = select(v, 1.0 - v, (p.tex.y & 8u) != 0u);
+                cov.w = 1.0;
+            }
+            if ((p.tex.x & 16u) != 0u) {
+                let s = textureSample(img_normal, img_samp, t);
+                src_n = decode_normal(s.rgb, (p.tex.z & 1u) != 0u);
+                n_cov = 1.0;
+            }
+        }
     } else {
         let sb = textureLoad(src_base, xy, 0);
         let sm = textureLoad(src_metal, xy, 0);
@@ -85,6 +155,9 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         let sh = textureLoad(src_height, xy, 0);
         cov = vec4<f32>(sb.a, sm.g, sr.g, sh.g);
         height = unpremul(sh.r, sh.g);
+        let sn = textureLoad(src_normal, xy, 0);
+        src_n = decode_normal(sn.rgb, false);
+        n_cov = sn.a;
         color = select(vec3<f32>(0.0), sb.rgb / sb.a, sb.a > 0.0);
         metal = unpremul(sm.r, sm.g);
         rough = unpremul(sr.r, sr.g);
@@ -109,5 +182,17 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
     o.metal = vec4<f32>(m.x, m.a, 0.0, 1.0);
     o.rough = vec4<f32>(r.x, r.a, 0.0, 1.0);
     o.height = vec4<f32>(h.x, h.a, 0.0, 1.0);
+
+    // Normals combine by replacing: where the source covers, its normal takes over in proportion to its
+    // coverage and the layer's opacity.
+    let bn = textureLoad(bk_normal, xy, 0);
+    let a_n = n_cov * k;
+    let cov_out = a_n + bn.a * (1.0 - a_n);
+    var n_out = vec3<f32>(0.0, 0.0, 1.0);
+    if (cov_out > 0.0) {
+        let mixed = src_n * a_n + (bn.rgb * 2.0 - vec3<f32>(1.0)) * bn.a * (1.0 - a_n);
+        n_out = normalize(mixed / cov_out);
+    }
+    o.normal = vec4<f32>(n_out * 0.5 + vec3<f32>(0.5), cov_out);
     return o;
 }

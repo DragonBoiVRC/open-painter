@@ -46,6 +46,12 @@ fn check_node(n: &Node, depth: usize, count: &mut usize) -> Result<(), String> {
             if !ok {
                 return Err(format!("layer '{}' has fill values outside 0..=1", n.name));
             }
+            if f.maps.iter().any(|(_, t)| !crate::is_valid_texture_id(&t.id)) {
+                return Err(format!("layer '{}' names a texture in an unknown form", n.name));
+            }
+            if !f.uv.is_sane() {
+                return Err(format!("layer '{}' has an unusable texture placement", n.name));
+            }
         }
         NodeKind::Group { children } => {
             for c in children {
@@ -88,7 +94,7 @@ fn layer(name: &str, base: [f32; 3], metallic: Option<f32>, roughness: Option<f3
         opacity: 1.0,
         blend: BlendMode::Normal,
         mask: None,
-        kind: NodeKind::Fill(FillParams { base: Some(base), metallic, roughness, height: None }),
+        kind: NodeKind::Fill(FillParams { base: Some(base), metallic, roughness, ..Default::default() }),
     }
 }
 

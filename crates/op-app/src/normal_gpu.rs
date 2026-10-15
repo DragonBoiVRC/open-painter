@@ -82,6 +82,7 @@ impl NormalPass {
                 },
                 tex(1),
                 tex(2),
+                tex(3),
             ],
         });
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/normal.wgsl"));
@@ -144,7 +145,7 @@ impl NormalPass {
     }
 
     /// Record the pass: `height` is the composited (value * coverage, coverage) texture.
-    pub fn run(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, height: &wgpu::Texture, strength: f32) {
+    pub fn run(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, height: &wgpu::Texture, layer_normal: &wgpu::Texture, strength: f32) {
         let params = Params { strength, size: self.size as f32, has_baked: self.has_baked as u32, pad: 0.0 };
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("normal_params"),
@@ -152,6 +153,7 @@ impl NormalPass {
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let (hv, bv) = (height.create_view(&Default::default()), self.baked.create_view(&Default::default()));
+        let lv = layer_normal.create_view(&Default::default());
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("normal_bind"),
             layout: &self.layout,
@@ -159,6 +161,7 @@ impl NormalPass {
                 wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&hv) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&bv) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&lv) },
             ],
         });
         let view = self.target.create_view(&Default::default());

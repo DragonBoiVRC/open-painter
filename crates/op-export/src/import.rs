@@ -433,6 +433,7 @@ mod tests {
             roughness: vec![0.75; n],
             baked: Default::default(),
             height: Vec::new(),
+            layer_normal: Vec::new(),
             normal: None,
         };
         let out = export(&got.preset, &data, &ExportContext { project: "p", texture_set: "body", mesh: "m", out_dir: dir.path(), udim: None });

@@ -2,6 +2,7 @@ mod camera;
 mod composite;
 mod files;
 mod gpu_io;
+mod images;
 mod paint;
 mod normal_gpu;
 mod picker;
@@ -111,7 +112,7 @@ struct ExportJob {
     /// UDIM number of the tile, when the set has UV tiles.
     udim: Option<u32>,
     size: u32,
-    planes: [Vec<u8>; 4],
+    planes: [Vec<u8>; 5],
     /// The set's height strength, for deriving its normal map.
     height_strength: f32,
     mesh: Mesh,
@@ -726,7 +727,7 @@ impl App {
             let result = (|| -> Result<ExportOutcome, String> {
                 let mut total = ExportOutcome::default();
                 for job in jobs {
-                    let [base, metal, rough, height] = &job.planes;
+                    let [base, metal, rough, height, layer_normal] = &job.planes;
                     let size = job.size;
                     let mut data = TextureSetData::from_composite(size, base, metal, rough).map_err(|e| e.to_string())?;
                     let mut notes = Vec::new();
@@ -743,6 +744,7 @@ impl App {
                         }
                     }
                     data.set_height(height).map_err(|e| e.to_string())?;
+                    data.set_layer_normal(layer_normal).map_err(|e| e.to_string())?;
                     data.compute_normal(job.height_strength);
                     if padding > 0 {
                         data.dilate(&op_export::uv_coverage(&job.mesh, size), padding);

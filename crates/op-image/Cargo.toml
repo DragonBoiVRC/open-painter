@@ -1,0 +1,10 @@
+[package]
+name = "op-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "tga", "bmp", "tiff", "webp", "exr"] }
+op-core = { version = "0.0.1", path = "../op-core" }
+thiserror = "2.0.21"

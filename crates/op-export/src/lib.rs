@@ -41,6 +41,8 @@ pub struct TextureSetData {
     pub baked: HashMap<MeshMap, BakedMap>,
     /// Painted height, 0..1 with 0.5 flat. Empty when the document has no height channel data.
     pub height: Vec<f32>,
+    /// Normal maps of fill layers, composited: unit xyz and coverage per texel. Empty when no layer has one.
+    pub layer_normal: Vec<[f32; 4]>,
     /// Tangent-space normal derived from the height and the baked normal. `None` until
     /// [`TextureSetData::compute_normal`] ran and there was something to derive it from.
     pub normal: Option<Vec<[f32; 3]>>,
@@ -80,8 +82,25 @@ impl TextureSetData {
             roughness: resolve(rough_rg8, FALLBACK_ROUGHNESS),
             baked: HashMap::new(),
             height: Vec::new(),
+            layer_normal: Vec::new(),
             normal: None,
         })
+    }
+
+    /// Attach the composited fill-layer normals: RGBA8 with the packed normal in rgb and the coverage in alpha.
+    pub fn set_layer_normal(&mut self, rgba8: &[u8]) -> Result<(), ExportError> {
+        let n = (self.size as usize).pow(2);
+        if rgba8.len() != n * 4 {
+            return Err(ExportError::Data(format!("layer normal has {} bytes, expected {}", rgba8.len(), n * 4)));
+        }
+        self.layer_normal = rgba8
+            .chunks_exact(4)
+            .map(|p| {
+                let c = op_core::normal::unpack([p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]);
+                [c[0], c[1], c[2], p[3] as f32 / 255.0]
+            })
+            .collect();
+        Ok(())
     }
 
     /// Attach the composited height channel: `(height * coverage, coverage)` bytes. Uncovered texels
@@ -103,8 +122,9 @@ impl TextureSetData {
     /// `Normal` source falls back to the baked map or a flat default.
     pub fn compute_normal(&mut self, strength: f32) {
         let painted = self.height.iter().any(|h| (*h - 0.5).abs() > 1e-4);
+        let layered = self.layer_normal.iter().any(|l| l[3] > 0.0);
         let baked = self.baked.get(&MeshMap::NormalBase);
-        if !painted && baked.is_none() {
+        if !painted && !layered && baked.is_none() {
             self.normal = None;
             return;
         }
@@ -117,7 +137,8 @@ impl TextureSetData {
             &flat
         };
         let base: Option<Vec<[f32; 3]>> = baked.map(|b| (0..n).map(|i| op_core::normal::unpack(b.texel(i))).collect());
-        self.normal = Some(op_core::normal::height_to_normal(height, self.size, strength, base.as_deref()));
+        let layer = (layered && self.layer_normal.len() == n).then_some(self.layer_normal.as_slice());
+        self.normal = Some(op_core::normal::height_to_normal(height, self.size, strength, base.as_deref(), layer));
     }
 
     /// Attach a baked map. Rejected if its size does not match the texture set.
@@ -407,6 +428,7 @@ mod tests {
             roughness: vec![roughness; n],
             baked: HashMap::new(),
             height: Vec::new(),
+            layer_normal: Vec::new(),
             normal: None,
         }
     }
@@ -672,6 +694,25 @@ mod tests {
         assert!((gl as i32 + dx as i32 - 255).abs() <= 1, "DirectX flips green: {gl} {dx}");
         let height = image::open(dir.path().join("h.png")).unwrap().to_luma8();
         assert!(height.get_pixel(0, 0).0[0] < 5 && height.get_pixel(7, 0).0[0] > 250);
+    }
+
+    #[test]
+    fn a_fill_layer_normal_map_reaches_the_exported_normal() {
+        let mut d = data(2, [0.5; 3], 0.0, 0.5);
+        d.set_height(&[0; 8]).unwrap();
+        // Every texel: a normal tilted towards +x (packed), fully covered.
+        let tilt = op_core::normal::pack([0.6, 0.0, 0.8]).map(|c| (c * 255.0).round() as u8);
+        let px = [tilt[0], tilt[1], tilt[2], 255];
+        d.set_layer_normal(&px.repeat(4)).unwrap();
+        d.compute_normal(1.0);
+        let n = d.normal.as_ref().expect("a layer normal map alone is enough").clone();
+        assert!(n[0][0] > 0.3 && n[0][1].abs() < 0.02, "{:?}", n[0]);
+        assert!(d.set_layer_normal(&[0; 3]).is_err(), "wrong size is refused");
+        // Nothing covered: no normal map is made.
+        let mut e = data(2, [0.5; 3], 0.0, 0.5);
+        e.set_layer_normal(&[128, 128, 255, 0].repeat(4)).unwrap();
+        e.compute_normal(1.0);
+        assert!(e.normal.is_none());
     }
 
     #[test]

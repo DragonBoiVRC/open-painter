@@ -199,9 +199,147 @@ impl BlendMode {
     }
 }
 
-/// A fill layer writes constants. `None` leaves that channel untouched.
+/// A texture used as the source of one channel of a fill layer. `id` names an image in the
+/// project's texture library (a content hash); the flags adjust how its pixels are read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TexRef {
+    pub id: String,
+    /// Use `1 - value` (for scalar channels).
+    #[serde(default)]
+    pub invert: bool,
+    /// The normal map's green channel points down (DirectX convention) and must be flipped.
+    #[serde(default)]
+    pub flip_green: bool,
+}
+
+/// True for ids of the form the texture library makes (32 lowercase hex digits). A project file may
+/// only name textures like this, so it can never smuggle in a path.
+pub fn is_valid_texture_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+impl TexRef {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into(), invert: false, flip_green: false }
+    }
+}
+
+/// The channels of a fill layer that read a texture instead of a constant. A channel with a texture
+/// is active; the texture's pixels replace the constant.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FillMaps {
+    #[serde(default)]
+    pub base: Option<TexRef>,
+    #[serde(default)]
+    pub metallic: Option<TexRef>,
+    #[serde(default)]
+    pub roughness: Option<TexRef>,
+    #[serde(default)]
+    pub height: Option<TexRef>,
+    /// Tangent-space normal map; combined with painted height and the baked normal map.
+    #[serde(default)]
+    pub normal: Option<TexRef>,
+}
+
+/// The channels a texture can feed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Slot {
+    BaseColor,
+    Metallic,
+    Roughness,
+    Height,
+    Normal,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 5] = [Slot::BaseColor, Slot::Metallic, Slot::Roughness, Slot::Height, Slot::Normal];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Slot::BaseColor => "Base color",
+            Slot::Metallic => "Metallic",
+            Slot::Roughness => "Roughness",
+            Slot::Height => "Height",
+            Slot::Normal => "Normal",
+        }
+    }
+}
+
+impl FillMaps {
+    pub fn get(&self, slot: Slot) -> Option<&TexRef> {
+        match slot {
+            Slot::BaseColor => self.base.as_ref(),
+            Slot::Metallic => self.metallic.as_ref(),
+            Slot::Roughness => self.roughness.as_ref(),
+            Slot::Height => self.height.as_ref(),
+            Slot::Normal => self.normal.as_ref(),
+        }
+    }
+
+    pub fn set(&mut self, slot: Slot, tex: Option<TexRef>) {
+        match slot {
+            Slot::BaseColor => self.base = tex,
+            Slot::Metallic => self.metallic = tex,
+            Slot::Roughness => self.roughness = tex,
+            Slot::Height => self.height = tex,
+            Slot::Normal => self.normal = tex,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Slot, &TexRef)> {
+        Slot::ALL.into_iter().filter_map(|s| self.get(s).map(|t| (s, t)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.iter().next().is_none()
+    }
+}
+
+/// How a fill layer's textures are laid over the UV layout: scaled, shifted and turned.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UvTransform {
+    /// How many times the texture repeats across the UV square.
+    pub tiling: [f32; 2],
+    pub offset: [f32; 2],
+    /// Counter-clockwise, in degrees, around the middle of the texture.
+    pub rotation: f32,
+}
+
+impl Default for UvTransform {
+    fn default() -> Self {
+        Self { tiling: [1.0, 1.0], offset: [0.0, 0.0], rotation: 0.0 }
+    }
+}
+
+impl UvTransform {
+    /// Tiling between 1/1000 and 1000 times, finite offset and rotation.
+    pub fn is_sane(&self) -> bool {
+        let ok = |v: f32, lo: f32, hi: f32| v.is_finite() && (lo..=hi).contains(&v);
+        self.tiling.iter().all(|t| ok(t.abs(), 0.001, 1000.0)) && self.offset.iter().all(|o| ok(*o, -1000.0, 1000.0)) && ok(self.rotation, -3600.0, 3600.0)
+    }
+
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The texture coordinate for a UV position: turn around the centre, scale, then shift.
+    pub fn apply(&self, uv: [f32; 2]) -> [f32; 2] {
+        let (s, c) = self.rotation.to_radians().sin_cos();
+        let (x, y) = (uv[0] - 0.5, uv[1] - 0.5);
+        let (rx, ry) = (x * c - y * s, x * s + y * c);
+        [(rx + 0.5) * self.tiling[0] + self.offset[0], (ry + 0.5) * self.tiling[1] + self.offset[1]]
+    }
+}
+
+/// A fill layer writes constants or textures. `None` leaves that channel untouched.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FillParams {
+    /// Textures that replace the constants below, channel by channel.
+    #[serde(default)]
+    pub maps: FillMaps,
+    /// Placement of those textures.
+    #[serde(default)]
+    pub uv: UvTransform,
     /// sRGB color.
     pub base: Option<[f32; 3]>,
     pub metallic: Option<f32>,
@@ -414,7 +552,7 @@ impl Document {
             None,
             None,
             "Base material",
-            NodeKind::Fill(FillParams { base: Some([0.80, 0.55, 0.30]), metallic: Some(0.0), roughness: Some(0.45), height: None }),
+            NodeKind::Fill(FillParams { base: Some([0.80, 0.55, 0.30]), metallic: Some(0.0), roughness: Some(0.45), ..Default::default() }),
         );
         d
     }
@@ -425,6 +563,28 @@ impl Document {
 
     pub fn find_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         find_in_mut(&mut self.nodes, id)
+    }
+
+    /// Ids of every texture any fill layer uses, without repeats, in layer order.
+    pub fn texture_ids(&self) -> Vec<String> {
+        fn walk(nodes: &[Node], out: &mut Vec<String>) {
+            for n in nodes {
+                match &n.kind {
+                    NodeKind::Fill(f) => {
+                        for (_, t) in f.maps.iter() {
+                            if !out.contains(&t.id) {
+                                out.push(t.id.clone());
+                            }
+                        }
+                    }
+                    NodeKind::Group { children } => walk(children, out),
+                    NodeKind::Paint => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.nodes, &mut out);
+        out
     }
 
     pub fn ids(&self) -> Vec<NodeId> {
@@ -825,6 +985,66 @@ mod tests {
         assert_eq!(d.locate(b), Some((Some(g), 0)));
         assert_eq!(order(&d), ["a", "Group", "c", "d"]);
         assert!(d.wrap_in_group(999).is_none());
+    }
+
+    #[test]
+    fn uv_transforms_scale_shift_and_turn_around_the_middle() {
+        let id = UvTransform::default();
+        assert!(id.is_identity() && id.is_sane());
+        assert_eq!(id.apply([0.25, 0.75]), [0.25, 0.75]);
+        let tiled = UvTransform { tiling: [4.0, 2.0], offset: [0.5, 0.0], rotation: 0.0 };
+        assert_eq!(tiled.apply([0.5, 0.5]), [2.5, 1.0]);
+        // A quarter turn about the centre sends the point right of centre to above it.
+        let quarter = UvTransform { rotation: 90.0, ..Default::default() };
+        let p = quarter.apply([1.0, 0.5]);
+        assert!((p[0] - 0.5).abs() < 1e-5 && (p[1] - 1.0).abs() < 1e-5, "{p:?}");
+        // The centre never moves under rotation alone.
+        assert!({ let c = quarter.apply([0.5, 0.5]); (c[0] - 0.5).abs() < 1e-6 && (c[1] - 0.5).abs() < 1e-6 });
+        for bad in [
+            UvTransform { tiling: [0.0, 1.0], ..Default::default() },
+            UvTransform { tiling: [f32::NAN, 1.0], ..Default::default() },
+            UvTransform { offset: [1e9, 0.0], ..Default::default() },
+            UvTransform { rotation: f32::INFINITY, ..Default::default() },
+        ] {
+            assert!(!bad.is_sane(), "{bad:?}");
+        }
+        assert!(UvTransform { tiling: [-2.0, 3.0], ..Default::default() }.is_sane(), "negative tiling mirrors");
+    }
+
+    #[test]
+    fn documents_without_textures_still_load_and_texture_ids_are_listed_once() {
+        // A fill layer written before textures existed has no `maps` or `uv`.
+        let old = r#"{"base":[0.5,0.5,0.5],"metallic":null,"roughness":0.4}"#;
+        let f: FillParams = serde_json::from_str(old).unwrap();
+        assert!(f.maps.is_empty() && f.uv.is_identity());
+        let mut d = Document::default();
+        let id = "0123456789abcdef0123456789abcdef";
+        let mut a = FillParams::default();
+        a.maps.base = Some(TexRef::new(id));
+        a.maps.normal = Some(TexRef { flip_green: true, ..TexRef::new("ffffffffffffffffffffffffffffffff") });
+        d.add(None, None, "a", NodeKind::Fill(a.clone()));
+        let g = d.add(None, None, "g", NodeKind::Group { children: vec![] });
+        d.add(Some(g), None, "b", NodeKind::Fill(a));
+        d.add(None, None, "p", NodeKind::Paint);
+        assert_eq!(d.texture_ids(), [id, "ffffffffffffffffffffffffffffffff"]);
+        assert!(is_valid_texture_id(id) && !is_valid_texture_id("../x") && !is_valid_texture_id(&id.to_uppercase()));
+        // The whole thing survives a round trip.
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn slots_map_to_their_texture() {
+        let mut m = FillMaps::default();
+        for (i, slot) in Slot::ALL.into_iter().enumerate() {
+            assert!(m.get(slot).is_none());
+            m.set(slot, Some(TexRef::new(format!("{i:032x}"))));
+        }
+        assert_eq!(m.iter().count(), 5);
+        assert_eq!(m.get(Slot::Height).unwrap().id, format!("{:032x}", 3));
+        m.set(Slot::Height, None);
+        assert_eq!(m.iter().count(), 4);
+        assert!(!m.is_empty());
     }
 
     #[test]

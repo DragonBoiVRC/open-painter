@@ -113,6 +113,9 @@ pub struct Layer {
     pub rough: wgpu::Texture,
     /// (height * coverage, coverage); 0.5 is flat.
     pub height: wgpu::Texture,
+    /// Tangent-space normal (xyz packed to 0..1) with coverage in alpha; only fill layers with a
+    /// normal map put anything here.
+    pub normal: wgpu::Texture,
 }
 
 fn texture(device: &wgpu::Device, label: &str, size: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -164,26 +167,27 @@ impl Layer {
             metal: texture(device, "paint_metal", size, VALUE_FORMAT),
             rough: texture(device, "paint_rough", size, VALUE_FORMAT),
             height: texture(device, "paint_height", size, VALUE_FORMAT),
+            normal: texture(device, "paint_normal_layer", size, crate::normal_gpu::NORMAL_FORMAT),
         }
     }
 
     fn bytes(size: u32) -> u64 {
-        size as u64 * size as u64 * (8 + 2 + 2 + 2)
+        size as u64 * size as u64 * (8 + 2 + 2 + 2 + 4)
     }
 
-    pub fn views(&self) -> [wgpu::TextureView; 4] {
-        [&self.base, &self.metal, &self.rough, &self.height].map(|t| t.create_view(&Default::default()))
+    pub fn views(&self) -> [wgpu::TextureView; 5] {
+        [&self.base, &self.metal, &self.rough, &self.height, &self.normal].map(|t| t.create_view(&Default::default()))
     }
 
     pub fn copy_from(&self, encoder: &mut wgpu::CommandEncoder, src: &Layer) {
-        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough), (&src.height, &self.height)] {
+        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough), (&src.height, &self.height), (&src.normal, &self.normal)] {
             copy_tex(encoder, s, d, self.size);
         }
     }
 
     pub fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
         let v = self.views();
-        clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3]], wgpu::Color::TRANSPARENT);
+        clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3], &v[4]], wgpu::Color::TRANSPARENT);
     }
 }
 
@@ -449,7 +453,7 @@ impl PaintGpu {
         normal: &NormalPass,
         tile_buf: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        let [b, m, r, _] = layer.views();
+        let [b, m, r, _, _] = layer.views();
         let n = normal.target.create_view(&Default::default());
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("paint_material_bind"),
@@ -479,6 +483,7 @@ impl PaintGpu {
             return;
         }
         self.tile = tile;
+        self.compositor.set_tile([tile.u as f32, tile.v as f32]);
         self.tile_buf = Self::tile_buffer(device, tile);
         self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
     }
@@ -605,13 +610,18 @@ impl PaintGpu {
         self.size
     }
 
+    /// Let fill layers read from the shared image library.
+    pub fn set_images(&mut self, images: crate::images::SharedImages) {
+        self.compositor.set_images(images);
+    }
+
     /// Reallocate at `size` and composite `doc` right away (no paint is kept). Used to grow a set
     /// that was held at a placeholder size, or to shrink one that has not been touched.
     pub fn rebuild(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document, size: u32) {
         let mut enc = device.create_command_encoder(&Default::default());
         self.reset(device, &mut enc, doc, size);
         self.compositor.render(device, &mut enc, doc, &self.store, &self.output);
-        self.normal.run(device, &mut enc, &self.output.height, doc.height_strength);
+        self.normal.run(device, &mut enc, &self.output.height, &self.output.normal, doc.height_strength);
         self.last_doc = Some(doc.clone());
         queue.submit([enc.finish()]);
     }
@@ -638,14 +648,15 @@ impl PaintGpu {
         out
     }
 
-    /// Read back the composited result: (base RGBA16F, metal RG8, rough RG8, height RG8).
-    pub fn capture_output(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> [Vec<u8>; 4] {
+    /// Read back the composited result: (base RGBA16F, metal RG8, rough RG8, height RG8, layer normal RGBA8).
+    pub fn capture_output(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> [Vec<u8>; 5] {
         let s = self.size;
         [
             crate::gpu_io::read_texture(device, queue, &self.output.base, s, 8),
             crate::gpu_io::read_texture(device, queue, &self.output.metal, s, 2),
             crate::gpu_io::read_texture(device, queue, &self.output.rough, s, 2),
             crate::gpu_io::read_texture(device, queue, &self.output.height, s, 2),
+            crate::gpu_io::read_texture(device, queue, &self.output.normal, s, 4),
         ]
     }
 
@@ -775,7 +786,7 @@ impl PaintGpu {
                     }
                     let (views, pipeline): (Vec<wgpu::TextureView>, _) = match target {
                         Target::Content => match &g.content {
-                            Some(c) => (c.views().into(), &self.pipeline_content_2d),
+                            Some(c) => (c.views()[..4].to_vec(), &self.pipeline_content_2d),
                             None => continue,
                         },
                         Target::Mask => match &g.mask {
@@ -814,7 +825,7 @@ impl PaintGpu {
                     }
                     let (views, pipeline): (Vec<wgpu::TextureView>, _) = match target {
                         Target::Content => match &g.content {
-                            Some(c) => (c.views().into(), &self.pipeline_content),
+                            Some(c) => (c.views()[..4].to_vec(), &self.pipeline_content),
                             None => continue,
                         },
                         Target::Mask => match &g.mask {
@@ -875,7 +886,7 @@ impl PaintGpu {
 
         if dirty || self.last_doc.as_ref() != Some(doc) {
             self.compositor.render(device, encoder, doc, &self.store, &self.output);
-            self.normal.run(device, encoder, &self.output.height, doc.height_strength);
+            self.normal.run(device, encoder, &self.output.height, &self.output.normal, doc.height_strength);
             self.last_doc = Some(doc.clone());
         }
     }

@@ -154,6 +154,8 @@ pub struct ViewportGpu {
     pub(crate) queued: Vec<SetBatch>,
     thumbnailer: crate::thumbs::Thumbnailer,
     pub(crate) uv: crate::uvview::UvGpu,
+    /// Textures that fill layers read, shared by every paint store.
+    pub(crate) images: crate::images::SharedImages,
     /// CPU copy of the mesh indices, for building the UV wireframe of a set.
     pub(crate) cpu_indices: Vec<u32>,
     /// A 1x1 depth texture for applying paint when the 3D view is not drawn.
@@ -193,7 +195,9 @@ impl ViewportGpu {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() }],
         });
 
-        let paint = PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE);
+        let images = crate::images::SharedImages::default();
+        let mut paint = PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE);
+        paint.set_images(images.clone());
         let paint_layout = paint.material_layout.clone();
         let plain_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals_plain"),
@@ -360,6 +364,7 @@ impl ViewportGpu {
             queued: Vec::new(),
             thumbnailer: crate::thumbs::Thumbnailer::new(device),
             uv: crate::uvview::UvGpu::new(device, target_format, &paint_layout),
+            images,
             cpu_indices: Vec::new(),
             dummy_depth: device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("dummy_depth"),
@@ -443,6 +448,7 @@ impl ViewportGpu {
             let mut tiles = Vec::new();
             for r in &wanted {
                 let mut paint = have.pop().unwrap_or_else(|| PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE));
+                paint.set_images(self.images.clone());
                 paint.set_tile(device, r.tile);
                 tiles.push(paint);
             }
@@ -472,6 +478,18 @@ impl ViewportGpu {
                 p.rebuild(device, queue, doc, size);
             }
         }
+    }
+
+    /// Make `image` available to fill layers under `id`. Uploading the same id again keeps the first.
+    pub fn upload_image(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, id: &str, image: &op_image::Decoded) {
+        let mut lib = self.images.lock().expect("image library lock");
+        if !lib.contains(id) {
+            lib.insert(id, crate::images::upload_image(device, queue, image));
+        }
+    }
+
+    pub fn has_image(&self, id: &str) -> bool {
+        self.images.lock().expect("image library lock").contains(id)
     }
 
     /// Hold `batch` until the next frame is rendered; queued batches run before that frame's own.
@@ -757,7 +775,7 @@ mod tests {
     }
 
     fn fill(base: Option<[f32; 3]>, metallic: Option<f32>, roughness: Option<f32>) -> NodeKind {
-        NodeKind::Fill(FillParams { base, metallic, roughness, height: None })
+        NodeKind::Fill(FillParams { base, metallic, roughness, ..Default::default() })
     }
 
     #[test]
@@ -985,7 +1003,7 @@ mod tests {
         assert!(!rig.gpu.paint().store.contains_key(&p), "unreferenced node was kept");
     }
 
-    fn output_bytes(rig: &Rig) -> [Vec<u8>; 4] {
+    fn output_bytes(rig: &Rig) -> [Vec<u8>; 5] {
         rig.gpu.paint().capture_output(&rig.device, &rig.queue)
     }
 
@@ -1121,7 +1139,7 @@ mod tests {
         // The stored height is quantised to 8 bits; the CPU side must use the same values.
         let hq: Vec<f32> = h.iter().map(|v| (v * 255.0).round() / 255.0).collect();
         let check = |rig: &Rig, base: Option<&[[f32; 3]]>, what: &str| {
-            let want = op_core::normal::height_to_normal(&hq, SIZE, doc.height_strength, base);
+            let want = op_core::normal::height_to_normal(&hq, SIZE, doc.height_strength, base, None);
             let got = rig.read(&rig.gpu.paint().normal.target, 4);
             let mut worst = 0.0f32;
             for (i, w) in want.iter().enumerate() {
@@ -1284,6 +1302,208 @@ mod tests {
         assert_eq!(center_pixel(&rig), shown, "nothing hidden again");
     }
 
+    const TEX_ID: &str = "00112233445566778899aabbccddeeff";
+
+    /// A 2x2 test image: red and green on top, blue and white below.
+    fn quad_image() -> op_image::Decoded {
+        op_image::Decoded {
+            width: 2,
+            height: 2,
+            rgba8: vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255],
+        }
+    }
+
+    fn textured(slot: op_core::Slot, tex: op_core::TexRef, uv: op_core::UvTransform) -> Document {
+        let mut f = FillParams { uv, ..Default::default() };
+        f.maps.set(slot, Some(tex));
+        let mut doc = Document::default();
+        doc.add(None, None, "textured", NodeKind::Fill(f));
+        doc
+    }
+
+    /// Linear RGB (as stored) of the base output at a UV position.
+    fn base_at(rig: &Rig, uv: (f32, f32)) -> [f32; 4] {
+        let base = rig.read(&rig.gpu.paint().output.base, 8);
+        let (x, y) = (((uv.0 * SIZE as f32) as u32).min(SIZE - 1), ((uv.1 * SIZE as f32) as u32).min(SIZE - 1));
+        let i = ((y * SIZE + x) * 8) as usize;
+        [0, 1, 2, 3].map(|c| f16_to_f32(u16::from_le_bytes([base[i + c * 2], base[i + c * 2 + 1]])))
+    }
+
+    fn near(a: [f32; 4], want: [f32; 3]) -> bool {
+        (0..3).all(|c| (a[c] - want[c]).abs() < 0.02)
+    }
+
+    /// A base colour texture lands on the UV square the right way up, with sRGB decoding.
+    #[test]
+    fn a_base_colour_texture_is_laid_over_uv_space_the_right_way_up() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        rig.gpu.upload_image(&rig.device, &rig.queue, TEX_ID, &quad_image());
+        let doc = textured(op_core::Slot::BaseColor, op_core::TexRef::new(TEX_ID), Default::default());
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        assert!(near(base_at(&rig, (0.25, 0.25)), [1.0, 0.0, 0.0]), "top left is red: {:?}", base_at(&rig, (0.25, 0.25)));
+        assert!(near(base_at(&rig, (0.75, 0.25)), [0.0, 1.0, 0.0]), "top right is green");
+        assert!(near(base_at(&rig, (0.25, 0.75)), [0.0, 0.0, 1.0]), "bottom left is blue");
+        assert!(near(base_at(&rig, (0.75, 0.75)), [1.0, 1.0, 1.0]), "bottom right is white");
+        assert!(base_at(&rig, (0.25, 0.25))[3] > 0.99, "an opaque image covers");
+
+        // sRGB: a mid-grey texel (128) is about 0.216 in linear light, not 0.5.
+        let grey = op_image::Decoded { width: 1, height: 1, rgba8: vec![128, 128, 128, 255] };
+        let grey_id = "ffeeddccbbaa99887766554433221100";
+        rig.gpu.upload_image(&rig.device, &rig.queue, grey_id, &grey);
+        let doc = textured(op_core::Slot::BaseColor, op_core::TexRef::new(grey_id), Default::default());
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let c = base_at(&rig, (0.5, 0.5));
+        assert!((c[0] - 0.216).abs() < 0.01, "colour textures are decoded from sRGB: {c:?}");
+    }
+
+    /// Tiling and rotation place the texture exactly as `UvTransform::apply` says.
+    #[test]
+    fn texture_tiling_and_rotation_follow_the_uv_transform() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        rig.gpu.upload_image(&rig.device, &rig.queue, TEX_ID, &quad_image());
+        let colour = |t: [f32; 2]| {
+            // Which quadrant of the repeating image a texture coordinate is in.
+            let (fu, fv) = (t[0].rem_euclid(1.0), t[1].rem_euclid(1.0));
+            match (fu < 0.5, fv < 0.5) {
+                (true, true) => [1.0, 0.0, 0.0],
+                (false, true) => [0.0, 1.0, 0.0],
+                (true, false) => [0.0, 0.0, 1.0],
+                (false, false) => [1.0, 1.0, 1.0],
+            }
+        };
+        for xf in [
+            op_core::UvTransform { tiling: [2.0, 2.0], ..Default::default() },
+            op_core::UvTransform { tiling: [1.0, 1.0], offset: [0.5, 0.0], rotation: 0.0 },
+            op_core::UvTransform { rotation: 90.0, ..Default::default() },
+            op_core::UvTransform { tiling: [3.0, 1.0], offset: [0.0, 0.25], rotation: 180.0 },
+            op_core::UvTransform { tiling: [-1.0, 1.0], ..Default::default() },
+        ] {
+            let doc = textured(op_core::Slot::BaseColor, op_core::TexRef::new(TEX_ID), xf);
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            // Only the exact centre of an image texel is a pure colour once the image is filtered, so test the
+            // pixels whose texture coordinate falls (almost) on one. Read the output once for all of them.
+            let out = rig.read(&rig.gpu.paint().output.base, 8);
+            let pixel = |x: u32, y: u32| {
+                let i = ((y * SIZE + x) * 8) as usize;
+                [0, 1, 2, 3].map(|c| f16_to_f32(u16::from_le_bytes([out[i + c * 2], out[i + c * 2 + 1]])))
+            };
+            let mut tested = 0;
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let uv = [(x as f32 + 0.5) / SIZE as f32, (y as f32 + 0.5) / SIZE as f32];
+                    let t = xf.apply(uv);
+                    let on_centre = |v: f32| {
+                        let f = v.rem_euclid(1.0);
+                        (f - 0.25).abs() < 0.006 || (f - 0.75).abs() < 0.006
+                    };
+                    if !(on_centre(t[0]) && on_centre(t[1])) {
+                        continue;
+                    }
+                    tested += 1;
+                    let got = pixel(x, y);
+                    // A little blend with the neighbouring texel is expected this close to a centre.
+                    assert!((0..3).all(|c| (got[c] - colour(t)[c]).abs() < 0.05), "{xf:?} at {uv:?}: got {got:?}, expected {:?}", colour(t));
+                }
+            }
+            assert!(tested >= 4, "{xf:?}: only {tested} points were checkable");
+        }
+    }
+
+    /// Scalar channels read the red channel as data (no sRGB decoding) and can be inverted.
+    #[test]
+    fn scalar_textures_feed_roughness_metallic_and_height() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let img = op_image::Decoded { width: 1, height: 1, rgba8: vec![64, 0, 0, 255] };
+        rig.gpu.upload_image(&rig.device, &rig.queue, TEX_ID, &img);
+        let value = |rig: &Rig, tex: &wgpu::Texture| {
+            let d = rig.read(tex, 2);
+            let i = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;
+            (d[i] as f32 / 255.0, d[i + 1] as f32 / 255.0)
+        };
+        for (slot, invert, want) in [
+            (op_core::Slot::Roughness, false, 0.251),
+            (op_core::Slot::Roughness, true, 0.749),
+            (op_core::Slot::Metallic, false, 0.251),
+            (op_core::Slot::Height, false, 0.251),
+            (op_core::Slot::Height, true, 0.749),
+        ] {
+            let tex = op_core::TexRef { invert, ..op_core::TexRef::new(TEX_ID) };
+            rig.run(&textured(slot, tex, Default::default()), &[PaintOp::Reset(SIZE)]);
+            let out = &rig.gpu.paint().output;
+            let (v, cov) = value(
+                &rig,
+                match slot {
+                    op_core::Slot::Roughness => &out.rough,
+                    op_core::Slot::Metallic => &out.metal,
+                    _ => &out.height,
+                },
+            );
+            assert!((v - want).abs() < 0.01 && cov > 0.99, "{slot:?} invert={invert}: value {v}, coverage {cov}");
+        }
+    }
+
+    /// A normal map from a fill layer reaches the final normal, and `flip_green` mirrors its y.
+    #[test]
+    fn a_normal_map_texture_tilts_the_surface_and_flip_green_mirrors_it() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        // Tilted towards +x and +y (OpenGL packing).
+        let img = op_image::Decoded { width: 1, height: 1, rgba8: vec![200, 190, 220, 255] };
+        rig.gpu.upload_image(&rig.device, &rig.queue, TEX_ID, &img);
+        let layer_normal = |rig: &Rig| {
+            let d = rig.read(&rig.gpu.paint().output.normal, 4);
+            let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+            op_core::normal::unpack([d[i] as f32 / 255.0, d[i + 1] as f32 / 255.0, d[i + 2] as f32 / 255.0])
+        };
+        let final_normal = |rig: &Rig| {
+            let d = rig.read(&rig.gpu.paint().normal.target, 4);
+            let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+            op_core::normal::unpack([d[i] as f32 / 255.0, d[i + 1] as f32 / 255.0, d[i + 2] as f32 / 255.0])
+        };
+        rig.run(&textured(op_core::Slot::Normal, op_core::TexRef::new(TEX_ID), Default::default()), &[PaintOp::Reset(SIZE)]);
+        let (l, f) = (layer_normal(&rig), final_normal(&rig));
+        assert!(l[0] > 0.3 && l[1] > 0.2 && l[2] > 0.0, "decoded from the packed texel: {l:?}");
+        assert!(f[0] > 0.2 && f[1] > 0.1, "the shaded normal is tilted the same way: {f:?}");
+
+        let flipped = op_core::TexRef { flip_green: true, ..op_core::TexRef::new(TEX_ID) };
+        rig.run(&textured(op_core::Slot::Normal, flipped, Default::default()), &[PaintOp::Reset(SIZE)]);
+        let (lf, ff) = (layer_normal(&rig), final_normal(&rig));
+        assert!((lf[0] - l[0]).abs() < 0.02 && (lf[1] + l[1]).abs() < 0.02, "green is mirrored: {l:?} vs {lf:?}");
+        assert!(ff[1] < 0.0 && ff[0] > 0.2, "the surface now tilts down: {ff:?}");
+    }
+
+    /// A texture the library does not have is ignored: the channel falls back to its constant.
+    #[test]
+    fn a_missing_texture_falls_back_to_the_constant() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut f = FillParams { base: Some([1.0, 0.0, 0.0]), ..Default::default() };
+        f.maps.base = Some(op_core::TexRef::new("deadbeefdeadbeefdeadbeefdeadbeef"));
+        let mut doc = Document::default();
+        doc.add(None, None, "x", NodeKind::Fill(f));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        assert!(near(base_at(&rig, (0.5, 0.5)), [1.0, 0.0, 0.0]), "{:?}", base_at(&rig, (0.5, 0.5)));
+    }
+
+    /// Textures continue across UV tiles instead of restarting in each.
+    #[test]
+    fn textures_run_on_across_uv_tiles() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        rig.gpu.set_mesh_tiles(&rig.device, &two_tile_sphere(), true);
+        rig.gpu.upload_image(&rig.device, &rig.queue, TEX_ID, &quad_image());
+        // Tiling 0.5 stretches the image over two tiles: tile 1001 shows its left half, tile 1002 its right half.
+        let uv = op_core::UvTransform { tiling: [0.5, 1.0], ..Default::default() };
+        let doc = textured(op_core::Slot::BaseColor, op_core::TexRef::new(TEX_ID), uv);
+        rig.run_sets(&[SetBatch { tile: None, set: 0, doc, ops: vec![PaintOp::Reset(SIZE)] }]);
+        let at = |t: usize| {
+            let base = rig.read(&rig.gpu.sets[0].tiles[t].output.base, 8);
+            let i = (((SIZE / 4) * SIZE + SIZE / 2) * 8) as usize; // u = 0.5, v = 0.25
+            [0, 1, 2].map(|c| f16_to_f32(u16::from_le_bytes([base[i + c * 2], base[i + c * 2 + 1]])))
+        };
+        // Texture coordinate u = 0.25 (tile 1001, u = 0.5) -> left half, red; tile 1002 -> u = 0.75 -> right half, green.
+        let (a, b) = (at(0), at(1));
+        assert!(a[0] > 0.9 && a[1] < 0.1, "tile 1001 is red at its middle: {a:?}");
+        assert!(b[1] > 0.9 && b[0] < 0.1, "tile 1002 continues with green: {b:?}");
+    }
+
     /// Paint in two texture sets survives a save and reload, each set keeping its own textures.
     #[test]
     fn two_sets_of_paint_survive_a_project_round_trip() {
@@ -1356,7 +1576,7 @@ mod tests {
         let mut doc = Document::default();
         doc.add(None, None, "fill", fill(Some([0.8, 0.55, 0.30]), Some(0.25), Some(0.6)));
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
-        let [base, metal, rough, _] = output_bytes(&rig);
+        let [base, metal, rough, _, _] = output_bytes(&rig);
         let data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
         let preset = op_export::builtin_presets().remove(0);
         let dir = tempfile::tempdir().unwrap();

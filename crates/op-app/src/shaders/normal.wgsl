@@ -11,6 +11,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var height_tex: texture_2d<f32>;   // (height * coverage, coverage)
 @group(0) @binding(2) var baked_tex: texture_2d<f32>;    // packed tangent-space normal, RGBA8
+@group(0) @binding(3) var layer_normal: texture_2d<f32>;   // composited fill-layer normals: packed xyz, coverage in alpha
 
 const SLOPE_PER_UV: f32 = 0.01;
 
@@ -41,6 +42,9 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let nb = b / max(length(b), 1e-6);
         base = vec3<f32>(nb.xy, max(nb.z, 1e-3));
     }
-    let n = normalize(vec3<f32>(base.xy + slope, base.z));
+    // Normal maps from fill layers add their tilt, in proportion to their coverage.
+    let ln = textureLoad(layer_normal, xy, 0);
+    let layer_xy = (ln.rg * 2.0 - vec2<f32>(1.0)) * ln.a;
+    let n = normalize(vec3<f32>(base.xy + slope + layer_xy, base.z));
     return vec4<f32>(n * 0.5 + 0.5, 1.0);
 }
