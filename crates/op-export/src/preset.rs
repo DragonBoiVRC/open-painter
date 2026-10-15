@@ -144,6 +144,12 @@ impl ExportPreset {
         }
         self.maps.iter().try_for_each(MapSpec::validate)
     }
+
+    /// True if every file name contains `$textureSet`, so exporting several texture sets writes
+    /// separate files instead of each set overwriting the last.
+    pub fn separates_texture_sets(&self) -> bool {
+        self.maps.iter().all(|m| m.file.contains("$textureSet"))
+    }
 }
 
 fn map(file: &str, channels: &[ChannelSrc], format: FileFormat, bit_depth: BitDepth, srgb: bool) -> MapSpec {
@@ -209,4 +215,17 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
             ],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn built_in_presets_keep_texture_sets_apart_and_a_bare_name_does_not() {
+        for preset in crate::builtin_presets() {
+            assert!(preset.separates_texture_sets(), "{} would overwrite files between sets", preset.name);
+        }
+        let mut p = crate::builtin_presets().remove(0);
+        p.maps[0].file = "diffuse".into();
+        assert!(!p.separates_texture_sets());
+    }
 }

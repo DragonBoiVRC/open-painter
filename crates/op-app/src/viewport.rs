@@ -331,6 +331,7 @@ impl ViewportGpu {
     }
 
     /// The paint store of the set being edited.
+    #[cfg(test)]
     pub fn paint(&self) -> &PaintGpu {
         &self.sets[self.active]
     }

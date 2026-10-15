@@ -94,12 +94,24 @@ struct PathDialog {
     path: String,
 }
 
+/// One texture set's pixels, read back and ready for the export thread.
+struct ExportJob {
+    name: String,
+    size: u32,
+    planes: [Vec<u8>; 3],
+    mesh: Mesh,
+    baked: Arc<HashMap<MeshMap, op_core::BakedMap>>,
+}
+
 struct ExportUi {
     open: bool,
     preset: usize,
     dir: String,
     padding: u32,
+    /// Name used for a model that has a single texture set; several sets use their material names.
     set_name: String,
+    /// Texture sets left out of the export (all are exported by default).
+    skip_sets: std::collections::HashSet<usize>,
     running: Option<Receiver<Result<ExportOutcome, String>>>,
     /// Path typed into the "import a Painter preset" field, and what the last import did.
     import_path: String,
@@ -324,6 +336,7 @@ impl App {
                 dir: String::new(),
                 padding: DEFAULT_PADDING,
                 set_name: "default".into(),
+                skip_sets: Default::default(),
                 running: None,
                 import_path: String::new(),
                 report: Vec::new(),
@@ -551,43 +564,71 @@ impl App {
             return;
         }
         let Some(preset) = self.presets.get(self.export.preset).cloned() else { return };
-        let (size, [base, metal, rough]) = {
+        let ranges = self.mesh.set_ranges();
+        let chosen: Vec<usize> = (0..ranges.len()).filter(|i| !self.export.skip_sets.contains(i)).collect();
+        if chosen.is_empty() {
+            self.status = "Select at least one texture set to export.".into();
+            return;
+        }
+        if chosen.len() > 1 && !preset.separates_texture_sets() {
+            self.status = "This preset's file names lack $textureSet, so the sets would overwrite each other.".into();
+            return;
+        }
+        // Read every chosen set's textures back now; the CPU work happens off the UI thread.
+        let mut jobs = Vec::new();
+        {
             let renderer = self.render_state.renderer.read();
             let Some(gpu) = renderer.callback_resources.get::<ViewportGpu>() else { return };
-            (gpu.paint().size(), gpu.paint().capture_output(&self.render_state.device, &self.render_state.queue))
-        };
+            for &i in &chosen {
+                let (Some(paint), Some(mesh)) = (gpu.sets.get(i), self.mesh.extract_set(i)) else { continue };
+                let baked = if i == self.active { self.baked.clone() } else { self.parked[i].as_ref().map_or_else(Default::default, |s| s.baked.clone()) };
+                let name = if ranges.len() > 1 { ranges[i].name.clone() } else { self.export.set_name.clone() };
+                jobs.push(ExportJob {
+                    name,
+                    size: paint.size(),
+                    planes: paint.capture_output(&self.render_state.device, &self.render_state.queue),
+                    mesh,
+                    baked,
+                });
+            }
+        }
         let dir = PathBuf::from(&self.export.dir);
-        let (project, set, padding) = (self.project_name(), self.export.set_name.clone(), self.export.padding);
-        let mesh = self.mesh.clone();
+        let (project, padding) = (self.project_name(), self.export.padding);
         let mesh_name = self.mesh_name.clone();
-        let baked = self.baked.clone();
         let (tx, rx) = mpsc::channel();
         self.export.running = Some(rx);
-        self.status = format!("Exporting '{}' to {} ...", preset.name, dir.display());
+        let what = if jobs.len() > 1 { format!("{} texture sets", jobs.len()) } else { "textures".to_string() };
+        self.status = format!("Exporting {what} with '{}' to {} ...", preset.name, dir.display());
         // Padding and encoding are CPU-heavy; keep them off the UI thread.
         std::thread::spawn(move || {
             let result = (|| -> Result<ExportOutcome, String> {
-                let mut data = TextureSetData::from_composite(size, &base, &metal, &rough).map_err(|e| e.to_string())?;
-                let mut stale = Vec::new();
-                for (map, b) in baked.iter() {
-                    if b.size == size {
-                        data.set_baked(*map, b.clone()).map_err(|e| e.to_string())?;
-                    } else {
-                        stale.push(format!(
-                            "{} was baked at {}x{}, not {size}x{size}: bake it again to use it.",
-                            map.label(),
-                            b.size,
-                            b.size
-                        ));
+                let mut total = ExportOutcome::default();
+                for job in jobs {
+                    let [base, metal, rough] = &job.planes;
+                    let size = job.size;
+                    let mut data = TextureSetData::from_composite(size, base, metal, rough).map_err(|e| e.to_string())?;
+                    let mut notes = Vec::new();
+                    for (map, b) in job.baked.iter() {
+                        if b.size == size {
+                            data.set_baked(*map, b.clone()).map_err(|e| e.to_string())?;
+                        } else {
+                            notes.push(format!(
+                                "{} was baked at {}x{}, not {size}x{size}: bake it again to use it.",
+                                map.label(),
+                                b.size,
+                                b.size
+                            ));
+                        }
                     }
+                    if padding > 0 {
+                        data.dilate(&op_export::uv_coverage(&job.mesh, size), padding);
+                    }
+                    let ctx = ExportContext { project: &project, texture_set: &job.name, mesh: &mesh_name, out_dir: &dir };
+                    let outcome = op_export::export(&preset, &data, &ctx).map_err(|e| format!("{}: {e}", job.name))?;
+                    total.files.extend(outcome.files);
+                    total.notes.extend(outcome.notes.into_iter().chain(notes).map(|n| format!("{}: {n}", job.name)));
                 }
-                if padding > 0 {
-                    data.dilate(&op_export::uv_coverage(&mesh, size), padding);
-                }
-                let ctx = ExportContext { project: &project, texture_set: &set, mesh: &mesh_name, out_dir: &dir };
-                let mut outcome = op_export::export(&preset, &data, &ctx).map_err(|e| e.to_string())?;
-                outcome.notes.extend(stale);
-                Ok(outcome)
+                Ok(total)
             })();
             let _ = tx.send(result);
         });
@@ -1288,13 +1329,46 @@ impl App {
                 }
                 ui.label("Folder:");
                 ui.add(egui::TextEdit::singleline(&mut self.export.dir).desired_width(420.0));
-                ui.horizontal(|ui| {
-                    ui.label("Texture set name:");
-                    ui.text_edit_singleline(&mut self.export.set_name);
-                });
+                let ranges = self.mesh.set_ranges();
+                if ranges.len() > 1 {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Texture sets:");
+                        if ui.small_button("All").clicked() {
+                            self.export.skip_sets.clear();
+                        }
+                        if ui.small_button("None").clicked() {
+                            self.export.skip_sets = (0..ranges.len()).collect();
+                        }
+                    });
+                    egui::ScrollArea::vertical().id_salt("export_sets").max_height(140.0).show(ui, |ui| {
+                        for (i, r) in ranges.iter().enumerate() {
+                            let mut on = !self.export.skip_sets.contains(&i);
+                            if ui.checkbox(&mut on, format!("{}  ({} tris)", r.name, r.index_count / 3)).changed() {
+                                if on {
+                                    self.export.skip_sets.remove(&i);
+                                } else {
+                                    self.export.skip_sets.insert(i);
+                                }
+                            }
+                        }
+                    });
+                    if !self.presets[idx].separates_texture_sets() {
+                        ui.colored_label(egui::Color32::YELLOW, "This preset's file names have no $textureSet: only one set can be exported at a time.");
+                    }
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("Texture set name:");
+                        ui.text_edit_singleline(&mut self.export.set_name);
+                    });
+                }
                 ui.add(egui::Slider::new(&mut self.export.padding, 0..=64).text("Edge padding (texels)"));
                 let busy = self.export.running.is_some();
-                if ui.add_enabled(!busy && !self.export.dir.trim().is_empty(), egui::Button::new("Export")).clicked() {
+                let chosen = (0..ranges.len()).filter(|i| !self.export.skip_sets.contains(i)).count();
+                let collides = chosen > 1 && !self.presets[idx].separates_texture_sets();
+                let ready = !busy && !self.export.dir.trim().is_empty() && chosen > 0 && !collides;
+                let label = if ranges.len() > 1 { format!("Export {chosen} texture set(s)") } else { "Export".to_string() };
+                if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
                     self.todo.push(Todo::Export);
                     ctx.request_repaint();
                 }
