@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=open-painter
+GenericName=3D Texture Painter
+Comment=Paint PBR textures directly on 3D models
+Exec=@EXEC@ %F
+Icon=open-painter
+Terminal=false
+Categories=Graphics;3DGraphics;
+StartupWMClass=open-painter
+MimeType=application/x-open-painter-project;model/gltf-binary;model/gltf+json;model/obj;

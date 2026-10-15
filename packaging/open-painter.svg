@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <radialGradient id="bg" cx="35%" cy="25%" r="90%">
+      <stop offset="0" stop-color="#4a4a4e"/>
+      <stop offset="1" stop-color="#1d1d20"/>
+    </radialGradient>
+    <radialGradient id="ball" cx="35%" cy="30%" r="75%">
+      <stop offset="0" stop-color="#f3b36b"/>
+      <stop offset="0.55" stop-color="#d98a3f"/>
+      <stop offset="1" stop-color="#7a4620"/>
+    </radialGradient>
+    <linearGradient id="stroke" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5aa9ff"/>
+      <stop offset="1" stop-color="#1f5fd0"/>
+    </linearGradient>
+    <clipPath id="clip"><circle cx="128" cy="132" r="84"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <circle cx="128" cy="132" r="84" fill="url(#ball)"/>
+  <g clip-path="url(#clip)">
+    <path d="M62 170 C 96 120, 140 150, 196 96" fill="none" stroke="url(#stroke)" stroke-width="30" stroke-linecap="round"/>
+    <ellipse cx="100" cy="92" rx="34" ry="20" fill="#ffffff" opacity="0.22" transform="rotate(-28 100 92)"/>
+  </g>
+  <circle cx="128" cy="132" r="84" fill="none" stroke="#00000055" stroke-width="3"/>
+</svg>

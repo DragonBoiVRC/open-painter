@@ -1796,7 +1796,12 @@ impl eframe::App for App {
 fn main() -> eframe::Result {
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 850.0]).with_title("open-painter"),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1400.0, 850.0])
+            .with_title("open-painter")
+            // Lets the desktop match the window to the launcher entry (taskbar icon, grouping).
+            .with_app_id("open-painter")
+            .with_icon(egui::IconData { rgba: include_bytes!("icon.rgba").to_vec(), width: 64, height: 64 }),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

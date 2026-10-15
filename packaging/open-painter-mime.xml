@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-open-painter-project">
+    <comment>open-painter project</comment>
+    <glob pattern="*.opproj"/>
+    <icon name="open-painter"/>
+  </mime-type>
+</mime-info>
