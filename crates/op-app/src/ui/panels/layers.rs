@@ -2,6 +2,7 @@
 //! toolbar, context menu, in-place rename and drag-and-drop reordering.
 
 use super::layer_dnd::{self, Drop, Indicator, Row};
+use super::shelf::Asset;
 use crate::ui::theme;
 use crate::{App, PaintOp};
 use egui_phosphor::regular as ph;
@@ -38,6 +39,8 @@ impl App {
         let rows = layer_dnd::rows(&self.doc.nodes, &|id| self.collapsed.contains(&id));
         let dragging: Option<NodeId> = egui::DragAndDrop::payload::<NodeId>(ui.ctx()).map(|p| *p);
         let mut hover_drop: Option<(NodeId, Drop)> = None;
+        let mut rects: Vec<(NodeId, egui::Rect)> = Vec::new();
+        let asset: Option<Asset> = egui::DragAndDrop::payload::<Asset>(ui.ctx()).map(|a| (*a).clone());
 
         egui::Frame::NONE
             .fill(theme::LIST)
@@ -57,7 +60,17 @@ impl App {
                         }
                         for row in &rows {
                             let Some(node) = self.doc.find(row.id) else { continue };
-                            let drop = layer_row(ui, &self.doc, self.selected, &mut self.renaming, node, row, dragging, &mut acts);
+                            let drop = layer_row(
+                                ui,
+                                &self.doc,
+                                self.selected,
+                                &mut self.renaming,
+                                node,
+                                row,
+                                dragging,
+                                &mut acts,
+                                &mut rects,
+                            );
                             if let Some(d) = drop {
                                 hover_drop = Some((row.id, d));
                             }
@@ -75,6 +88,27 @@ impl App {
         }
         if dragging.is_some() && ui.ctx().input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ui.ctx());
+        }
+
+        // A shelf asset dropped on the stack: masks go to the layer under the pointer, materials on top
+        // of it.
+        if let Some(asset) = asset {
+            let pointer = ui.ctx().pointer_hover_pos();
+            let over = pointer.and_then(|p| rects.iter().find(|(_, r)| r.contains(p)).map(|(id, r)| (*id, *r)));
+            if let Some((_, r)) = over {
+                ui.painter()
+                    .rect_stroke(r.shrink(1.0), 2.0, egui::Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
+            }
+            if ui.ctx().input(|i| i.pointer.any_released()) {
+                let in_list = pointer.is_some_and(|p| ui.min_rect().contains(p));
+                if in_list && !matches!(asset, Asset::Brush(_)) {
+                    if let Some((id, _)) = over {
+                        self.selected = Some(id);
+                    }
+                    self.use_asset(asset);
+                }
+                egui::DragAndDrop::clear_payload(ui.ctx());
+            }
         }
 
         for a in acts {
@@ -221,10 +255,12 @@ fn layer_row(
     row: &Row,
     dragging: Option<NodeId>,
     acts: &mut Vec<LayerAct>,
+    rects: &mut Vec<(NodeId, egui::Rect)>,
 ) -> Option<Drop> {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::click_and_drag());
     let selected = selected == Some(node.id);
+    rects.push((node.id, rect));
     let p = ui.painter_at(rect);
 
     let fill = if selected {
@@ -479,10 +515,12 @@ fn paint_thumb(p: &egui::Painter, rect: egui::Rect, node: &Node, dim: bool) {
     let fade = |c: egui::Color32| if dim { c.gamma_multiply(0.45) } else { c };
     match &node.kind {
         NodeKind::Fill(f) => {
-            // The fill color is stored in linear light; the swatch is drawn in sRGB.
-            let srgb = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8;
-            let [r, g, b] = f.base.unwrap_or(op_core::FALLBACK_BASE);
-            p.rect_filled(rect, 2.0, fade(egui::Color32::from_rgb(srgb(r), srgb(g), srgb(b))));
+            // Fill colors are stored as sRGB, so they can be shown as they are.
+            let [r, g, b] = f
+                .base
+                .unwrap_or(op_core::FALLBACK_BASE)
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            p.rect_filled(rect, 2.0, fade(egui::Color32::from_rgb(r, g, b)));
         }
         NodeKind::Group { .. } => {
             p.rect_filled(rect, 2.0, fade(theme::CONTROL));

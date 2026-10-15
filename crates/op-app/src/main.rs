@@ -145,7 +145,6 @@ enum GenAction {
 
 #[derive(Default)]
 struct SmartUi {
-    pick: usize,
     save_name: String,
     message: String,
 }
@@ -179,6 +178,7 @@ struct App {
     mesh: Mesh,
     mesh_name: String,
     selected: Option<NodeId>,
+    shelf: ui::panels::ShelfState,
     /// Groups folded shut in the layers panel.
     collapsed: std::collections::HashSet<NodeId>,
     /// Layer being renamed in place, with its draft name.
@@ -275,6 +275,7 @@ impl App {
             mesh: Mesh::default(),
             mesh_name: "sphere".into(),
             selected,
+            shelf: Default::default(),
             collapsed: Default::default(),
             renaming: None,
             target: Target::Content,
@@ -1135,32 +1136,6 @@ impl App {
                 self.smart_ui.message = format!("Saved '{name}' to {} (paint layers are saved empty).", file.display());
             }
             Err(e) => self.smart_ui.message = format!("Could not save: {e}"),
-        }
-    }
-
-    fn smart_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Smart materials");
-        let current = self.smart_materials.get(self.smart_ui.pick).map_or("(none)", |m| m.name.as_str()).to_string();
-        egui::ComboBox::from_id_salt("smart_pick").selected_text(current).show_ui(ui, |ui| {
-            for (i, m) in self.smart_materials.iter().enumerate() {
-                ui.selectable_value(&mut self.smart_ui.pick, i, &m.name);
-            }
-        });
-        if ui.button("Add to layer stack").clicked() {
-            self.add_smart_material(self.smart_ui.pick);
-        }
-        ui.small("Smart materials use masks generated from the baked maps (Bake...).");
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.smart_ui.save_name).hint_text("name").desired_width(120.0));
-            if ui.add_enabled(!self.smart_ui.save_name.trim().is_empty(), egui::Button::new("Save selection")).clicked() {
-                self.save_smart_material();
-            }
-        });
-        if !self.smart_ui.message.is_empty() {
-            ui.small(&self.smart_ui.message);
-        }
-        for w in &self.definition_warnings {
-            ui.colored_label(egui::Color32::YELLOW, format!("Skipped: {w}"));
         }
     }
 

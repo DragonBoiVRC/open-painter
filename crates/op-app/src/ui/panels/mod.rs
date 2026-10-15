@@ -9,6 +9,7 @@ mod properties;
 mod shelf;
 mod texture_set;
 
+pub use shelf::ShelfState;
 use crate::ui::theme;
 use std::ops::RangeInclusive;
 
