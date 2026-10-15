@@ -1,7 +1,7 @@
 //! The 3D viewport tab: navigation, painting, overlays and the axis gizmo.
 
 use super::theme;
-use crate::viewport::{Globals, SetBatch, ViewportCallback};
+use crate::viewport::{Globals, ViewportCallback};
 use crate::{srgb_for_display, App, PaintOp, View};
 use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, UiBuilder};
@@ -28,11 +28,11 @@ impl App {
         egui::ComboBox::from_id_salt("viewport_shading").selected_text(label(self.view)).width(150.0).show_ui(ui, |ui| {
             ui.selectable_value(&mut view, View::Shaded, "Shaded");
             ui.selectable_value(&mut view, View::PaintedNormal, "Normal map");
-            if self.baked.contains_key(&MeshMap::AmbientOcclusion) {
+            if self.baked0().contains_key(&MeshMap::AmbientOcclusion) {
                 ui.selectable_value(&mut view, View::ShadedAo, "Shaded + baked AO");
             }
             for m in MeshMap::ALL {
-                if self.baked.contains_key(&m) {
+                if self.baked0().contains_key(&m) {
                     ui.selectable_value(&mut view, View::Map(m), m.label());
                 }
             }
@@ -94,14 +94,14 @@ impl App {
             _ => self.stroke.active = false,
         }
 
-        let mut ops = std::mem::take(&mut self.pending);
+        let mut ops = Vec::new();
         if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
             ops.push(PaintOp::Stamps { layer, target, stamps });
         }
-        if !ops.is_empty() {
+        let batches = self.take_batches(ops);
+        if batches.iter().any(|b| !b.ops.is_empty()) {
             self.thumbs_dirty();
         }
-        let batches = vec![SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
 
         let size_px = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
         let cam = self.camera.position();

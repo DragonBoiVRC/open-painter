@@ -60,6 +60,7 @@ impl Scheduler {
 
     /// Forget what has been generated: the mask textures were recreated (new project, resolution
     /// change, project load), so everything must be generated again.
+    #[allow(dead_code)]
     pub fn invalidate(&mut self) {
         for e in self.entries.values_mut() {
             e.done = None;

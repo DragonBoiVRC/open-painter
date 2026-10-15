@@ -435,7 +435,7 @@ mod tests {
             height: Vec::new(),
             normal: None,
         };
-        let out = export(&got.preset, &data, &ExportContext { project: "p", texture_set: "body", mesh: "m", out_dir: dir.path() });
+        let out = export(&got.preset, &data, &ExportContext { project: "p", texture_set: "body", mesh: "m", out_dir: dir.path(), udim: None });
         // The packed map has a 3-channel layout: R metallic, G smoothness, B constant white.
         let out = out.unwrap();
         assert_eq!(out.files.len(), 2);

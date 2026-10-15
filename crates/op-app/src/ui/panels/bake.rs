@@ -13,6 +13,9 @@ impl App {
             if self.set_ranges_len() > 1 {
                 ui.label(egui::RichText::new(format!("Texture set: {}", self.set_name(self.active))).color(theme::TEXT_STRONG));
             }
+            if self.bakes.len() > 1 {
+                hint(ui, &format!("{} UV tiles, baked one after the other", self.bakes.len()));
+            }
             hint(ui, &format!("{0} x {0} (set in Texture Set Settings)", self.tex_size));
         });
 
@@ -20,8 +23,8 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 for m in MeshMap::ALL {
                     let mut on = self.bake.maps.contains(&m);
-                    let done = self.baked.contains_key(&m);
-                    let label = if done { format!("{} \u{2713}", m.label()) } else { m.label().to_string() };
+                    let done = self.baked0().contains_key(&m);
+                    let label = if done { format!("{} {}", m.label(), egui_phosphor::regular::CHECK) } else { m.label().to_string() };
                     if ui.add_enabled(!busy, egui::Checkbox::new(&mut on, label)).on_hover_text(if done { "Already baked" } else { "Not baked yet" }).changed() {
                         if on {
                             self.bake.maps.push(m);
@@ -81,7 +84,7 @@ impl App {
         ui.add_space(4.0);
         match &self.bake.job {
             Some(job) => {
-                ui.add(egui::ProgressBar::new(job.progress.fraction()).show_percentage());
+                ui.add(egui::ProgressBar::new(job.fraction()).show_percentage());
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(format!("{:.0} s elapsed", job.started.elapsed().as_secs_f32())).color(theme::TEXT_DIM));
                     if ui.button("Cancel").clicked() {

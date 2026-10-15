@@ -219,6 +219,8 @@ pub struct ExportContext<'a> {
     pub texture_set: &'a str,
     pub mesh: &'a str,
     pub out_dir: &'a Path,
+    /// The UDIM number of the tile being exported, when the set has UV tiles; fills `$udim`.
+    pub udim: Option<u32>,
 }
 
 /// What an export wrote, and anything the user should know about how it was produced.
@@ -365,7 +367,7 @@ pub fn export(preset: &ExportPreset, data: &TextureSetData, ctx: &ExportContext)
         return Err(ExportError::Data("channel lengths do not match size".into()));
     }
     // Expand every file name first so a bad template fails before anything is written.
-    let vars = Vars { project: ctx.project, texture_set: ctx.texture_set, mesh: ctx.mesh };
+    let vars = Vars { project: ctx.project, texture_set: ctx.texture_set, mesh: ctx.mesh, udim: ctx.udim };
     let mut names = Vec::new();
     for spec in &preset.maps {
         let stem = expand_template(&spec.file, &vars).map_err(ExportError::Preset)?;
@@ -410,7 +412,7 @@ mod tests {
     }
 
     fn ctx<'a>(dir: &'a Path) -> ExportContext<'a> {
-        ExportContext { project: "proj", texture_set: "set", mesh: "mesh", out_dir: dir }
+        ExportContext { project: "proj", texture_set: "set", mesh: "mesh", out_dir: dir, udim: None }
     }
 
     fn preset(name: &str) -> ExportPreset {
@@ -538,7 +540,7 @@ mod tests {
     fn project_names_cannot_escape_the_output_directory() {
         let dir = tempfile::tempdir().unwrap();
         let inner = dir.path().join("out");
-        let evil = ExportContext { project: "../../evil/..\\x", texture_set: "a/b", mesh: "m", out_dir: &inner };
+        let evil = ExportContext { project: "../../evil/..\\x", texture_set: "a/b", mesh: "m", out_dir: &inner, udim: None };
         let out = export(&preset("PBR Metallic Roughness"), &data(2, [0.5; 3], 0.5, 0.5), &evil).unwrap();
         for f in out.files {
             assert_eq!(f.parent().unwrap(), inner, "{f:?} escaped");
@@ -661,7 +663,7 @@ mod tests {
                 spec("h", vec![ChannelSrc::Height]),
             ],
         };
-        let out = export(&preset, &d, &ExportContext { project: "p", texture_set: "s", mesh: "m", out_dir: dir.path() }).unwrap();
+        let out = export(&preset, &d, &ExportContext { project: "p", texture_set: "s", mesh: "m", out_dir: dir.path(), udim: None }).unwrap();
         assert!(out.notes.is_empty(), "{:?}", out.notes);
         let normal = image::open(dir.path().join("n.png")).unwrap().to_rgb8();
         let px = normal.get_pixel(4, 3).0;

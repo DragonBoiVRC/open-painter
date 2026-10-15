@@ -29,12 +29,14 @@ impl App {
                     }
                     let text = if active { theme::TEXT_STRONG } else { theme::TEXT };
                     p.text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, ph::CUBE, egui::FontId::proportional(14.0), text);
-                    let name_rect = egui::Rect::from_min_max(rect.min + egui::vec2(32.0, 0.0), rect.max - egui::vec2(64.0, 0.0));
+                    let tiles = self.tile_count(i);
+                    let name_rect = egui::Rect::from_min_max(rect.min + egui::vec2(32.0, 0.0), rect.max - egui::vec2(if tiles > 1 { 112.0 } else { 64.0 }, 0.0));
                     p.with_clip_rect(name_rect).text(name_rect.left_center(), egui::Align2::LEFT_CENTER, &r.name, egui::FontId::proportional(12.5), text);
+                    let count = if tiles > 1 { format!("{tiles} tiles  {}", tri_label(r.index_count / 3)) } else { tri_label(r.index_count / 3) };
                     p.text(
                         rect.right_center() - egui::vec2(8.0, 0.0),
                         egui::Align2::RIGHT_CENTER,
-                        format!("{}", tri_label(r.index_count / 3)),
+                        count,
                         egui::FontId::proportional(10.5),
                         theme::TEXT_DIM,
                     );

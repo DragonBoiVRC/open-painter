@@ -12,18 +12,22 @@ pub struct Vars<'a> {
     pub project: &'a str,
     pub texture_set: &'a str,
     pub mesh: &'a str,
+    /// The UDIM number of the tile being written (1001...), if UV tiles are in use.
+    pub udim: Option<u32>,
 }
 
 /// Variable names a template may use. Anything else is reported at import time.
 pub const KNOWN_VARS: [&str; 5] = ["project", "textureSet", "mesh", "colorSpace", "udim"];
 
-fn value<'a>(name: &str, v: &Vars<'a>) -> &'a str {
+fn value<'a>(name: &str, v: &Vars<'a>) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
     match name {
-        "project" => v.project,
-        "textureSet" => v.texture_set,
-        "mesh" => v.mesh,
-        // We export a single texture set without UDIM tiles and do not tag the color space.
-        _ => "",
+        "project" => Cow::Borrowed(v.project),
+        "textureSet" => Cow::Borrowed(v.texture_set),
+        "mesh" => Cow::Borrowed(v.mesh),
+        "udim" => v.udim.map_or(Cow::Borrowed(""), |n| Cow::Owned(n.to_string())),
+        // We do not tag the color space.
+        _ => Cow::Borrowed(""),
     }
 }
 
@@ -115,7 +119,7 @@ fn expand_segment(seg: &str, vars: &Vars<'_>) -> (String, bool) {
             if val.is_empty() {
                 all_present = false;
             }
-            out.push_str(&sanitize(val));
+            out.push_str(&sanitize(&val));
         } else {
             out.push(c);
         }
@@ -157,7 +161,7 @@ mod tests {
     use super::*;
 
     fn vars() -> Vars<'static> {
-        Vars { project: "proj", texture_set: "body", mesh: "hero" }
+        Vars { project: "proj", texture_set: "body", mesh: "hero", udim: None }
     }
 
     #[test]
@@ -176,10 +180,19 @@ mod tests {
 
     #[test]
     fn values_cannot_inject_path_components() {
-        let evil = Vars { project: "../../x", texture_set: "a/b\\c", mesh: "m" };
+        let evil = Vars { project: "../../x", texture_set: "a/b\\c", mesh: "m", udim: None };
         let name = expand_template("$project_$textureSet", &evil).unwrap();
         assert!(!name.contains('/') && !name.contains('\\'), "{name}");
         assert!(!name.contains(".."), "{name}");
+    }
+
+    #[test]
+    fn udim_fills_in_for_tiled_sets_and_vanishes_otherwise() {
+        let mut v = vars();
+        assert_eq!(expand_template("t_$textureSet_Base(.$udim)", &v).unwrap(), "t_body_Base");
+        v.udim = Some(1002);
+        assert_eq!(expand_template("t_$textureSet_Base(.$udim)", &v).unwrap(), "t_body_Base.1002");
+        assert_eq!(expand_template("$udim_$textureSet", &v).unwrap(), "1002_body");
     }
 
     #[test]

@@ -13,14 +13,41 @@ use std::sync::Arc;
 /// Size of the paint store of a set nobody has touched.
 const PLACEHOLDER_SIZE: u32 = 64;
 
+/// Baked maps of one UV tile of a set, and a revision that changes whenever they do (generated
+/// masks regenerate when it moves).
+#[derive(Clone, Default)]
+pub struct TileBake {
+    pub baked: Arc<HashMap<MeshMap, BakedMap>>,
+    pub rev: u64,
+}
+
+/// Background mask generation for one tile: it depends on that tile's baked maps.
+pub struct TileProc {
+    pub scheduler: crate::procgen::Scheduler,
+    pub jobs: Vec<crate::ProcJob>,
+    pub info: HashMap<NodeId, crate::ProcInfo>,
+}
+
+impl TileProc {
+    pub fn new() -> Self {
+        Self { scheduler: crate::procgen::Scheduler::new(std::time::Duration::from_millis(150)), jobs: Vec::new(), info: HashMap::new() }
+    }
+
+    fn cancel(&self) {
+        for j in &self.jobs {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Everything that belongs to one texture set while it is not the active one.
 pub struct SetState {
     pub doc: Document,
     pub selected: Option<NodeId>,
     pub undo: Vec<Hist>,
     pub redo: Vec<Hist>,
-    pub baked: Arc<HashMap<MeshMap, BakedMap>>,
-    pub bake_rev: u64,
+    /// Baked maps per UV tile (one entry unless UV tiles are in use).
+    pub bakes: Vec<TileBake>,
     pub tex_size: u32,
     pub collapsed: HashSet<NodeId>,
     /// False while the set's paint store is held at the small placeholder size: nothing has been
@@ -30,13 +57,14 @@ pub struct SetState {
 
 impl SetState {
     /// A set restored from a saved project.
-    pub fn restored(doc: Document, tex_size: u32, baked: HashMap<MeshMap, BakedMap>) -> Self {
+    pub fn restored(doc: Document, tex_size: u32, baked: Vec<HashMap<MeshMap, BakedMap>>) -> Self {
         let selected = doc.nodes.last().map(|n| n.id);
-        Self { doc, selected, undo: Vec::new(), redo: Vec::new(), baked: Arc::new(baked), bake_rev: 1, tex_size, collapsed: HashSet::new(), materialized: true }
+        let bakes = baked.into_iter().map(|b| TileBake { baked: Arc::new(b), rev: 1 }).collect();
+        Self { doc, selected, undo: Vec::new(), redo: Vec::new(), bakes, tex_size, collapsed: HashSet::new(), materialized: true }
     }
 
     /// A new set with the default material layer.
-    pub fn fresh(tex_size: u32) -> Self {
+    pub fn fresh(tex_size: u32, tiles: usize) -> Self {
         let doc = Document::with_default_material();
         let selected = doc.nodes.last().map(|n| n.id);
         Self {
@@ -44,8 +72,7 @@ impl SetState {
             selected,
             undo: Vec::new(),
             redo: Vec::new(),
-            baked: Arc::new(HashMap::new()),
-            bake_rev: 0,
+            bakes: vec![TileBake::default(); tiles.max(1)],
             tex_size,
             collapsed: HashSet::new(),
             materialized: false,
@@ -83,8 +110,7 @@ impl App {
             selected: self.selected.take(),
             undo: std::mem::take(&mut self.undo),
             redo: std::mem::take(&mut self.redo),
-            baked: std::mem::replace(&mut self.baked, Arc::new(HashMap::new())),
-            bake_rev: self.bake_rev,
+            bakes: std::mem::take(&mut self.bakes),
             tex_size: self.tex_size,
             collapsed: std::mem::take(&mut self.collapsed),
             materialized: true,
@@ -97,10 +123,28 @@ impl App {
         self.selected = s.selected;
         self.undo = s.undo;
         self.redo = s.redo;
-        self.baked = s.baked;
-        self.bake_rev = s.bake_rev;
+        self.bakes = s.bakes;
         self.tex_size = s.tex_size;
         self.collapsed = s.collapsed;
+        self.rebuild_procs();
+    }
+
+    /// One mask-generation state per tile of the working set, all starting afresh.
+    fn rebuild_procs(&mut self) {
+        for p in &self.procs {
+            p.cancel();
+        }
+        self.procs = (0..self.bakes.len().max(1)).map(|_| TileProc::new()).collect();
+    }
+
+    /// Baked maps of the first tile of the active set, for the places that show "what is baked".
+    pub(crate) fn baked0(&self) -> &HashMap<MeshMap, BakedMap> {
+        &self.bakes[0].baked
+    }
+
+    /// The number of UV tiles of a set (always 1 unless UV tiles are in use).
+    pub(crate) fn tile_count(&self, set: usize) -> usize {
+        if self.udim { self.mesh.set_tiles(set).len() } else { 1 }
     }
 
     /// Forget the active set's undo history (its paint was discarded), leaving other sets' alone.
@@ -134,12 +178,7 @@ impl App {
     fn restart_procgen(&mut self) {
         self.thumbs.clear();
         self.thumbs_dirty();
-        for j in &self.proc_jobs {
-            j.cancel.store(true, Ordering::Relaxed);
-        }
-        self.proc_jobs.clear();
-        self.proc.invalidate();
-        self.proc_info.clear();
+        self.rebuild_procs();
     }
 
     pub(crate) fn enqueue_batch(&self, batch: SetBatch) {
@@ -178,7 +217,7 @@ impl App {
         self.gesture_before = None;
         self.stroke.active = false;
         self.restart_procgen();
-        self.parked = (0..n).map(|_| Some(SetState::fresh(size))).collect();
+        self.parked = (0..n).map(|set| Some(SetState::fresh(size, self.tile_count(set)))).collect();
         self.active = 0;
         let first = self.parked[0].take().expect("just created");
         self.put_live(first);
@@ -192,7 +231,7 @@ impl App {
 
     /// Replace every texture set with the saved ones (opening a project), restoring each set's
     /// paint on the GPU. `loads` holds, per set, its resolution and texture contents.
-    pub(crate) fn install_sets(&mut self, states: Vec<SetState>, loads: Vec<(u32, Vec<op_project::TextureBlob>)>, active: usize) {
+    pub(crate) fn install_sets(&mut self, states: Vec<SetState>, loads: Vec<(u32, Vec<Vec<op_project::TextureBlob>>)>, active: usize) {
         debug_assert_eq!(states.len(), loads.len());
         self.pending.clear();
         self.clear_queue();
@@ -204,16 +243,19 @@ impl App {
         let active = active.min(states.len().saturating_sub(1));
         let mut states = states;
         for (set, ((size, blobs), st)) in loads.into_iter().zip(states.iter_mut()).enumerate() {
-            if set != active && blobs.is_empty() {
+            if set != active && blobs.iter().all(|b| b.is_empty()) {
                 // Nothing painted: keep it small until it is opened.
                 st.materialized = false;
                 self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
             } else {
-                let mut ops = vec![PaintOp::Load { size, blobs }];
-                if st.baked.contains_key(&MeshMap::NormalBase) {
-                    ops.push(baked_normal_op(&st.baked, size));
+                // Each tile gets its own textures and baked normal.
+                for (t, blobs) in blobs.into_iter().enumerate() {
+                    let mut ops = vec![PaintOp::Load { size, blobs }];
+                    if st.bakes[t].baked.contains_key(&MeshMap::NormalBase) {
+                        ops.push(baked_normal_op(&st.bakes[t].baked, size));
+                    }
+                    self.enqueue(SetBatch { tile: Some(t), set, doc: st.doc.clone(), ops });
                 }
-                self.enqueue(SetBatch { tile: None, set, doc: st.doc.clone(), ops });
             }
         }
         self.parked = states.into_iter().map(Some).collect();
@@ -282,9 +324,12 @@ impl App {
         }
         let (doc, size) = (st.doc.clone(), st.tex_size);
         self.gpu_rebuild(set, &doc, size);
-        let op = self.parked[set].as_ref().map(|st| baked_normal_op(&st.baked, size));
-        if let (Some(op), true) = (op, self.parked[set].as_ref().is_some_and(|st| st.baked.contains_key(&MeshMap::NormalBase))) {
-            self.enqueue(SetBatch { tile: None, set, doc, ops: vec![op] });
+        let ops: Vec<(usize, PaintOp)> = self.parked[set]
+            .as_ref()
+            .map(|st| st.bakes.iter().enumerate().filter(|(_, b)| b.baked.contains_key(&MeshMap::NormalBase)).map(|(t, b)| (t, baked_normal_op(&b.baked, size))).collect())
+            .unwrap_or_default();
+        for (t, op) in ops {
+            self.enqueue(SetBatch { tile: Some(t), set, doc: doc.clone(), ops: vec![op] });
         }
         if let Some(Some(st)) = self.parked.get_mut(set) {
             st.materialized = true;
@@ -322,10 +367,12 @@ mod tests {
 
     #[test]
     fn a_fresh_set_has_the_default_material_selected() {
-        let s = SetState::fresh(1024);
+        let s = SetState::fresh(1024, 1);
         assert_eq!(s.doc.nodes.len(), 1);
         assert_eq!(s.selected, s.doc.nodes.last().map(|n| n.id));
         assert_eq!(s.tex_size, 1024);
-        assert!(s.undo.is_empty() && s.redo.is_empty() && s.baked.is_empty());
+        assert!(s.undo.is_empty() && s.redo.is_empty() && s.bakes[0].baked.is_empty());
+        assert_eq!(SetState::fresh(64, 3).bakes.len(), 3, "one baked-map slot per UV tile");
+        assert_eq!(SetState::fresh(64, 0).bakes.len(), 1, "at least one");
     }
 }

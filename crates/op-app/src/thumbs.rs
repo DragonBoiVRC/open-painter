@@ -131,6 +131,14 @@ impl App {
         if self.thumb_rev == self.paint_rev || self.stroke.active || self.thumb_at.elapsed() < REFRESH_EVERY {
             return;
         }
+        // Wait until everything queued for the GPU (a project being loaded, say) has been applied.
+        let gpu_busy = !self.pending.is_empty()
+            || !self.pending_tiles.is_empty()
+            || self.render_state.renderer.read().callback_resources.get::<crate::viewport::ViewportGpu>().is_none_or(|g| !g.queued.is_empty());
+        if gpu_busy {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
         self.thumb_rev = self.paint_rev;
         self.thumb_at = Instant::now();
         let mut want = Vec::new();

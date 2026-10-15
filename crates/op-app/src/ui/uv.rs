@@ -2,7 +2,6 @@
 
 use super::theme;
 use crate::uvview::{self, Channel, UvCallback, UvCamera};
-use crate::viewport::SetBatch;
 use crate::{App, PaintOp};
 use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, UiBuilder};
@@ -54,14 +53,14 @@ impl App {
             },
             _ => self.stroke.active = false,
         }
-        let mut ops = std::mem::take(&mut self.pending);
+        let mut ops = Vec::new();
         if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
             ops.push(PaintOp::Stamps2d { layer, target, stamps });
         }
-        if !ops.is_empty() {
+        let batches = self.take_batches(ops);
+        if batches.iter().any(|b| !b.ops.is_empty()) {
             self.thumbs_dirty();
         }
-        let batches = vec![SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
         let wire = self.uv_wire.then_some([0.35, 0.75, 1.0, 0.55]);
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
@@ -118,6 +117,13 @@ impl App {
                     }
                     if let Some(e) = uvview::uv_extent(&self.mesh, self.active) {
                         let (text, fits) = uvview::extent_summary(e);
+                        // With UV tiles on, UVs beyond the first tile are expected.
+                        let (text, fits) = if self.udim {
+                            let n = self.mesh.set_tiles(self.active).len();
+                            (format!("{n} UV tile{}", if n == 1 { "" } else { "s" }), true)
+                        } else {
+                            (text, fits)
+                        };
                         let color = if fits { theme::TEXT_DIM } else { theme::WARN };
                         ui.label(egui::RichText::new(text).color(color).size(11.0));
                     }

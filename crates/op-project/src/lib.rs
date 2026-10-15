@@ -1,13 +1,14 @@
 //! Project files (`.opproj`): a zip container holding the mesh and, for each texture set, its layer
 //! document and raw paint textures. Lossless: textures are the GPU texel bytes, unchanged.
 //!
-//! Layout (version 3):
+//! Layout (version 4):
 //!   manifest.json                          format id, version, mesh name, one entry per texture set
 //!   mesh.bin                               `op_mesh::Mesh::to_bytes` (carries the set names and ranges)
-//!   sets/<set>/textures/<node>_<kind>.raw  one entry per paint channel / mask of that set
-//!   sets/<set>/bakes/<map>.raw             one entry per baked mesh map (u16 little endian)
+//!   sets/<set>/tiles/<tile>/textures/<node>_<kind>.raw  one entry per paint channel / mask of that tile
+//!   sets/<set>/tiles/<tile>/bakes/<map>.raw             one entry per baked mesh map (u16 little endian)
 //!
-//! Versions 1 and 2 held a single set at the top level (`textures/`, `bakes/`); they still load.
+//! Version 3 had one tile per set (`sets/<set>/textures/`); versions 1 and 2 held a single set at the top
+//! level (`textures/`, `bakes/`). All still load.
 //!
 //! Saving is atomic (temp file + rename) so a crash or full disk while saving, or
 //! autosaving, never destroys the previous good file. Loading treats the file as
@@ -23,8 +24,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_ID: &str = "open-painter-project";
-/// Version 3 holds several texture sets; versions 1 (no baked maps) and 2 (one set) remain readable.
-pub const FORMAT_VERSION: u32 = 3;
+/// Version 4 stores each texture set's paint per UV tile; versions 1 (no baked maps), 2 (one set) and 3
+/// (several sets, one tile each) remain readable.
+pub const FORMAT_VERSION: u32 = 4;
 pub const EXTENSION: &str = "opproj";
 const MAX_TEXTURE_SIZE: u32 = 8192;
 const MAX_BAKE_BYTES: usize = 8192 * 8192 * 3 * 2;
@@ -90,14 +92,21 @@ pub struct TextureBlob {
     pub bytes: Vec<u8>,
 }
 
-/// One texture set: its layer stack, the paint inside it and the maps baked for it.
+/// The paint and baked maps of one UV tile of a texture set.
+#[derive(Clone, Debug, Default)]
+pub struct TileData {
+    pub blobs: Vec<TextureBlob>,
+    /// Baked mesh maps; each carries its own resolution.
+    pub baked: HashMap<MeshMap, BakedMap>,
+}
+
+/// One texture set: its layer stack and, for each UV tile, the paint inside it. Without UV tiles a
+/// set has exactly one tile.
 #[derive(Clone, Debug)]
 pub struct SetData {
     pub texture_size: u32,
     pub document: Document,
-    pub blobs: Vec<TextureBlob>,
-    /// Baked mesh maps; each carries its own resolution.
-    pub baked: HashMap<MeshMap, BakedMap>,
+    pub tiles: Vec<TileData>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +117,8 @@ pub struct Project {
     pub sets: Vec<SetData>,
     /// The set that was being edited.
     pub active: usize,
+    /// Whether UV tiles are in use: then each set has a tile for every UDIM tile its UVs occupy.
+    pub udim: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,12 +135,17 @@ struct BakeEntry {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SetEntry {
-    texture_size: u32,
-    document: Document,
+struct TileEntry {
     blobs: Vec<BlobEntry>,
     #[serde(default)]
     bakes: Vec<BakeEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SetEntry {
+    texture_size: u32,
+    document: Document,
+    tiles: Vec<TileEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -139,7 +155,29 @@ struct Manifest {
     mesh_name: String,
     #[serde(default)]
     active: usize,
+    #[serde(default)]
+    udim: bool,
     sets: Vec<SetEntry>,
+}
+
+/// Version 3: one tile per set, stored at the set level.
+#[derive(Serialize, Deserialize)]
+struct SetEntryV3 {
+    texture_size: u32,
+    document: Document,
+    blobs: Vec<BlobEntry>,
+    #[serde(default)]
+    bakes: Vec<BakeEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ManifestV3 {
+    format: String,
+    version: u32,
+    mesh_name: String,
+    #[serde(default)]
+    active: usize,
+    sets: Vec<SetEntryV3>,
 }
 
 /// Versions 1 and 2: a single set at the top level.
@@ -162,20 +200,33 @@ struct Header {
     version: u32,
 }
 
-/// Where a set's entries live in the zip: `Some(i)` is set `i` of a version 3 file, `None` the
-/// top level of a version 1 or 2 file.
-fn blob_path(set: Option<usize>, node: NodeId, kind: BlobKind) -> String {
-    match set {
-        Some(i) => format!("sets/{i}/textures/{node}_{}.raw", kind.name()),
-        None => format!("textures/{node}_{}.raw", kind.name()),
+/// Where a tile's entries live in the zip.
+#[derive(Clone, Copy, Debug)]
+enum Place {
+    /// Versions 1 and 2: the top level.
+    Legacy,
+    /// Version 3: `sets/<set>/`.
+    Set(usize),
+    /// Version 4: `sets/<set>/tiles/<tile>/`.
+    Tile(usize, usize),
+}
+
+impl Place {
+    fn dir(self) -> String {
+        match self {
+            Place::Legacy => String::new(),
+            Place::Set(s) => format!("sets/{s}/"),
+            Place::Tile(s, t) => format!("sets/{s}/tiles/{t}/"),
+        }
     }
 }
 
-fn bake_path(set: Option<usize>, map: MeshMap) -> String {
-    match set {
-        Some(i) => format!("sets/{i}/bakes/{map:?}.raw"),
-        None => format!("bakes/{map:?}.raw"),
-    }
+fn blob_path(at: Place, node: NodeId, kind: BlobKind) -> String {
+    format!("{}textures/{node}_{}.raw", at.dir(), kind.name())
+}
+
+fn bake_path(at: Place, map: MeshMap) -> String {
+    format!("{}bakes/{map:?}.raw", at.dir())
 }
 
 fn expected_len(size: u32, kind: BlobKind) -> usize {
@@ -205,28 +256,39 @@ fn check_size(size: u32) -> Result<(), ProjectError> {
 impl SetData {
     fn validate(&self) -> Result<(), ProjectError> {
         check_size(self.texture_size)?;
-        let mut seen = HashSet::new();
-        for b in &self.blobs {
-            check_blob_target(&self.document, b.node, b.kind)?;
-            if !seen.insert((b.node, b.kind)) {
-                return invalid(format!("duplicate {} texture for layer {}", b.kind.name(), b.node));
-            }
-            let want = expected_len(self.texture_size, b.kind);
-            if b.bytes.len() != want {
-                return invalid(format!("{} texture of layer {} has {} bytes, expected {want}", b.kind.name(), b.node, b.bytes.len()));
-            }
+        if self.tiles.is_empty() {
+            return invalid("a texture set has no tiles");
         }
-        for (map, b) in &self.baked {
-            check_size(b.size)?;
-            if b.channels != map.channels() {
-                return invalid(format!("{} must have {} channel(s), not {}", map.label(), map.channels(), b.channels));
+        for (t, tile) in self.tiles.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for b in &tile.blobs {
+                check_blob_target(&self.document, b.node, b.kind)?;
+                if !seen.insert((b.node, b.kind)) {
+                    return invalid(format!("duplicate {} texture for layer {}", b.kind.name(), b.node));
+                }
+                let want = expected_len(self.texture_size, b.kind);
+                if b.bytes.len() != want {
+                    return invalid(format!("{} texture of layer {} has {} bytes, expected {want}", b.kind.name(), b.node, b.bytes.len()));
+                }
             }
-            if b.data.len() != b.texels() * b.channels as usize {
-                return invalid(format!("baked {} has {} values, expected {}", map.label(), b.data.len(), b.texels() * b.channels as usize));
+            for (map, b) in &tile.baked {
+                check_size(b.size)?;
+                if b.channels != map.channels() {
+                    return invalid(format!("{} must have {} channel(s), not {}", map.label(), map.channels(), b.channels));
+                }
+                if b.data.len() != b.texels() * b.channels as usize {
+                    return invalid(format!("baked {} has {} values, expected {}", map.label(), b.data.len(), b.texels() * b.channels as usize));
+                }
             }
+            let _ = t;
         }
         Ok(())
     }
+}
+
+/// How many tiles set `set` of `mesh` has: one per UDIM tile its UVs occupy with UV tiles, else one.
+fn expected_tiles(mesh: &Mesh, set: usize, udim: bool) -> usize {
+    if udim { mesh.set_tiles(set).len() } else { 1 }
 }
 
 impl Project {
@@ -244,6 +306,10 @@ impl Project {
         }
         for (i, s) in self.sets.iter().enumerate() {
             s.validate().map_err(|e| ProjectError::Invalid(format!("texture set {i}: {e}")))?;
+            let tiles = expected_tiles(&self.mesh, i, self.udim);
+            if s.tiles.len() != tiles {
+                return invalid(format!("texture set {i} has {} tile(s) but its UVs occupy {tiles}", s.tiles.len()));
+            }
         }
         Ok(())
     }
@@ -278,14 +344,21 @@ fn write_zip(path: &Path, project: &Project) -> Result<(), ProjectError> {
         version: FORMAT_VERSION,
         mesh_name: project.mesh_name.clone(),
         active: project.active,
+        udim: project.udim,
         sets: project
             .sets
             .iter()
             .map(|s| SetEntry {
                 texture_size: s.texture_size,
                 document: s.document.clone(),
-                blobs: s.blobs.iter().map(|b| BlobEntry { node: b.node, kind: b.kind }).collect(),
-                bakes: baked_sorted(&s.baked).iter().map(|(m, b)| BakeEntry { map: *m, size: b.size, channels: b.channels }).collect(),
+                tiles: s
+                    .tiles
+                    .iter()
+                    .map(|t| TileEntry {
+                        blobs: t.blobs.iter().map(|b| BlobEntry { node: b.node, kind: b.kind }).collect(),
+                        bakes: baked_sorted(&t.baked).iter().map(|(m, b)| BakeEntry { map: *m, size: b.size, channels: b.channels }).collect(),
+                    })
+                    .collect(),
             })
             .collect(),
     };
@@ -294,14 +367,17 @@ fn write_zip(path: &Path, project: &Project) -> Result<(), ProjectError> {
     zip.start_file("mesh.bin", deflate)?;
     zip.write_all(&project.mesh.to_bytes())?;
     for (i, set) in project.sets.iter().enumerate() {
-        for b in &set.blobs {
-            zip.start_file(blob_path(Some(i), b.node, b.kind), deflate)?;
-            zip.write_all(&b.bytes)?;
-        }
-        for (map, b) in baked_sorted(&set.baked) {
-            zip.start_file(bake_path(Some(i), map), deflate)?;
-            let bytes: Vec<u8> = b.data.iter().flat_map(|v| v.to_le_bytes()).collect();
-            zip.write_all(&bytes)?;
+        for (t, tile) in set.tiles.iter().enumerate() {
+            let at = Place::Tile(i, t);
+            for b in &tile.blobs {
+                zip.start_file(blob_path(at, b.node, b.kind), deflate)?;
+                zip.write_all(&b.bytes)?;
+            }
+            for (map, b) in baked_sorted(&tile.baked) {
+                zip.start_file(bake_path(at, map), deflate)?;
+                let bytes: Vec<u8> = b.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+                zip.write_all(&bytes)?;
+            }
         }
     }
     let file = zip.finish()?;
@@ -326,27 +402,26 @@ fn read_limited(entry: &mut impl Read, limit: u64, what: &str) -> Result<Vec<u8>
     Ok(buf)
 }
 
-/// Read one set's textures and baked maps, checking everything against the manifest.
-fn load_set(zip: &mut zip::ZipArchive<File>, which: Option<usize>, e: SetEntry) -> Result<SetData, ProjectError> {
-    check_size(e.texture_size)?;
-    let mut blobs = Vec::with_capacity(e.blobs.len());
+/// Read one tile's textures and baked maps, checking everything against the manifest.
+fn load_tile(zip: &mut zip::ZipArchive<File>, at: Place, doc: &Document, size: u32, blobs: &[BlobEntry], bakes: &[BakeEntry]) -> Result<TileData, ProjectError> {
+    let mut out_blobs = Vec::with_capacity(blobs.len());
     let mut seen = HashSet::new();
-    for b in &e.blobs {
-        check_blob_target(&e.document, b.node, b.kind)?;
+    for b in blobs {
+        check_blob_target(doc, b.node, b.kind)?;
         if !seen.insert((b.node, b.kind)) {
             return invalid(format!("duplicate {} texture for layer {}", b.kind.name(), b.node));
         }
-        let want = expected_len(e.texture_size, b.kind);
-        let mut entry = zip.by_name(&blob_path(which, b.node, b.kind))?;
+        let want = expected_len(size, b.kind);
+        let mut entry = zip.by_name(&blob_path(at, b.node, b.kind))?;
         let bytes = read_limited(&mut entry, want as u64, "texture")?;
         if bytes.len() != want {
             return invalid(format!("{} texture of layer {} is truncated ({} of {want} bytes)", b.kind.name(), b.node, bytes.len()));
         }
-        blobs.push(TextureBlob { node: b.node, kind: b.kind, bytes });
+        out_blobs.push(TextureBlob { node: b.node, kind: b.kind, bytes });
     }
 
     let mut baked = HashMap::new();
-    for be in &e.bakes {
+    for be in bakes {
         check_size(be.size)?;
         if be.channels != be.map.channels() {
             return invalid(format!("{} must have {} channel(s)", be.map.label(), be.map.channels()));
@@ -358,7 +433,7 @@ fn load_set(zip: &mut zip::ZipArchive<File>, which: Option<usize>, e: SetEntry) 
         if want > MAX_BAKE_BYTES {
             return invalid("baked map is implausibly large");
         }
-        let mut entry = zip.by_name(&bake_path(which, be.map))?;
+        let mut entry = zip.by_name(&bake_path(at, be.map))?;
         let bytes = read_limited(&mut entry, want as u64, "baked map")?;
         if bytes.len() != want {
             return invalid(format!("baked {} is truncated ({} of {want} bytes)", be.map.label(), bytes.len()));
@@ -366,7 +441,7 @@ fn load_set(zip: &mut zip::ZipArchive<File>, which: Option<usize>, e: SetEntry) 
         let data: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         baked.insert(be.map, BakedMap::new(be.size, be.channels, data).map_err(ProjectError::Invalid)?);
     }
-    Ok(SetData { texture_size: e.texture_size, document: e.document, blobs, baked })
+    Ok(TileData { blobs: out_blobs, baked })
 }
 
 pub fn load(path: &Path) -> Result<Project, ProjectError> {
@@ -392,13 +467,38 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
         Mesh::from_bytes(&read_limited(&mut entry, MAX_MESH_BYTES, "mesh")?)?
     };
 
-    let (mesh_name, entries, active, legacy) = if header.version >= 3 {
+    /// A set as the manifest describes it, before its entries are read.
+    struct Pending {
+        texture_size: u32,
+        document: Document,
+        tiles: Vec<(Place, Vec<BlobEntry>, Vec<BakeEntry>)>,
+    }
+    let (mesh_name, entries, active, udim): (String, Vec<Pending>, usize, bool) = if header.version >= 4 {
         let m: Manifest = serde_json::from_slice(&manifest_bytes)?;
-        (m.mesh_name, m.sets, m.active, false)
+        let sets = m
+            .sets
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| Pending {
+                texture_size: s.texture_size,
+                document: s.document,
+                tiles: s.tiles.into_iter().enumerate().map(|(t, e)| (Place::Tile(i, t), e.blobs, e.bakes)).collect(),
+            })
+            .collect();
+        (m.mesh_name, sets, m.active, m.udim)
+    } else if header.version == 3 {
+        let m: ManifestV3 = serde_json::from_slice(&manifest_bytes)?;
+        let sets = m
+            .sets
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| Pending { texture_size: s.texture_size, document: s.document, tiles: vec![(Place::Set(i), s.blobs, s.bakes)] })
+            .collect();
+        (m.mesh_name, sets, m.active, false)
     } else {
         let m: LegacyManifest = serde_json::from_slice(&manifest_bytes)?;
-        let set = SetEntry { texture_size: m.texture_size, document: m.document, blobs: m.blobs, bakes: m.bakes };
-        (m.mesh_name, vec![set], 0, true)
+        let one = Pending { texture_size: m.texture_size, document: m.document, tiles: vec![(Place::Legacy, m.blobs, m.bakes)] };
+        (m.mesh_name, vec![one], 0, false)
     };
     let want = mesh.set_ranges().len();
     if entries.len() != want || entries.len() > MAX_SETS {
@@ -409,9 +509,18 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
     }
     let mut sets = Vec::with_capacity(entries.len());
     for (i, e) in entries.into_iter().enumerate() {
-        sets.push(load_set(&mut zip, if legacy { None } else { Some(i) }, e)?);
+        check_size(e.texture_size)?;
+        let tiles = expected_tiles(&mesh, i, udim);
+        if e.tiles.len() != tiles {
+            return invalid(format!("texture set {i} lists {} tile(s) but its UVs occupy {tiles}", e.tiles.len()));
+        }
+        let mut data = Vec::with_capacity(tiles);
+        for (at, blobs, bakes) in &e.tiles {
+            data.push(load_tile(&mut zip, *at, &e.document, e.texture_size, blobs, bakes)?);
+        }
+        sets.push(SetData { texture_size: e.texture_size, document: e.document, tiles: data });
     }
-    Ok(Project { mesh_name, mesh, sets, active })
+    Ok(Project { mesh_name, mesh, sets, active, udim })
 }
 
 /// Where to autosave: next to a saved project, or in `fallback_dir` for an untitled one.
@@ -453,8 +562,9 @@ mod tests {
         Project {
             mesh_name: "sphere".into(),
             mesh: Mesh::uv_sphere(1.0, 12, 6),
-            sets: vec![SetData { texture_size: SIZE, document: doc, blobs, baked }],
+            sets: vec![SetData { texture_size: SIZE, document: doc, tiles: vec![TileData { blobs, baked }] }],
             active: 0,
+            udim: false,
         }
     }
 
@@ -479,7 +589,7 @@ mod tests {
         ];
         let mut baked = HashMap::new();
         baked.insert(MeshMap::Thickness, BakedMap::new(2, 1, vec![1, 2, 3, 4]).unwrap());
-        p.sets.push(SetData { texture_size: size, document: doc, blobs, baked });
+        p.sets.push(SetData { texture_size: size, document: doc, tiles: vec![TileData { blobs, baked }] });
         p.active = 1;
         p
     }
@@ -495,8 +605,8 @@ mod tests {
         assert_eq!(qs.document, ps.document);
         assert_eq!((qs.texture_size, q.mesh_name.as_str()), (SIZE, "sphere"));
         assert_eq!(q.mesh.to_bytes(), p.mesh.to_bytes());
-        assert_eq!(qs.blobs, ps.blobs);
-        assert_eq!(qs.baked, ps.baked, "baked maps come back bit for bit, each at its own size");
+        assert_eq!(qs.tiles[0].blobs, ps.tiles[0].blobs);
+        assert_eq!(qs.tiles[0].baked, ps.tiles[0].baked, "baked maps come back bit for bit, each at its own size");
         let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(leftovers.len(), 1, "temp file left behind: {leftovers:?}");
     }
@@ -509,24 +619,24 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
 
         let mut short = sample();
-        short.sets[0].blobs[0].bytes.pop();
+        short.sets[0].tiles[0].blobs[0].bytes.pop();
         assert!(save(&path, &short).is_err(), "wrong blob length");
         let mut unknown = sample();
-        unknown.sets[0].blobs[0].node = 9999;
+        unknown.sets[0].tiles[0].blobs[0].node = 9999;
         assert!(save(&path, &unknown).is_err(), "unknown layer");
         let mut wrong_kind = sample();
         let fill = wrong_kind.sets[0].document.nodes[0].id; // fill layer cannot own paint textures
-        wrong_kind.sets[0].blobs[0].node = fill;
+        wrong_kind.sets[0].tiles[0].blobs[0].node = fill;
         assert!(save(&path, &wrong_kind).is_err(), "texture on fill layer");
         let mut dup = sample();
-        let first = dup.sets[0].blobs[0].clone();
-        dup.sets[0].blobs.push(first);
+        let first = dup.sets[0].tiles[0].blobs[0].clone();
+        dup.sets[0].tiles[0].blobs.push(first);
         assert!(save(&path, &dup).is_err(), "duplicate blob");
         let mut huge = sample();
         huge.sets[0].texture_size = 1 << 20;
         assert!(save(&path, &huge).is_err(), "absurd size");
         let mut wrong = sample();
-        wrong.sets[0].baked.insert(MeshMap::Curvature, BakedMap::new(2, 3, vec![0; 12]).unwrap()); // curvature is scalar
+        wrong.sets[0].tiles[0].baked.insert(MeshMap::Curvature, BakedMap::new(2, 3, vec![0; 12]).unwrap()); // curvature is scalar
         assert!(save(&path, &wrong).is_err(), "channel count must match the map kind");
 
         assert_eq!(std::fs::read(&path).unwrap(), before, "previous file was modified");
@@ -572,12 +682,12 @@ mod tests {
             texture_size: s.texture_size,
             mesh_name: "m".into(),
             document: s.document.clone(),
-            blobs: s.blobs.iter().map(|b| BlobEntry { node: b.node, kind: b.kind }).collect(),
+            blobs: s.tiles[0].blobs.iter().map(|b| BlobEntry { node: b.node, kind: b.kind }).collect(),
             bakes: Vec::new(),
         };
         let mut entries: Vec<(String, Vec<u8>)> = vec![("mesh.bin".into(), p.mesh.to_bytes())];
-        for b in &s.blobs {
-            entries.push((blob_path(None, b.node, b.kind), b.bytes.clone()));
+        for b in &s.tiles[0].blobs {
+            entries.push((blob_path(Place::Legacy, b.node, b.kind), b.bytes.clone()));
         }
         edit(&mut manifest, &mut entries);
         let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
@@ -642,7 +752,7 @@ mod tests {
         let path = dir.path().join("old.opproj");
         handmade(&path, |m, _| m.version = 1);
         let p = load(&path).unwrap();
-        assert!(p.sets[0].baked.is_empty());
+        assert!(p.sets[0].tiles[0].baked.is_empty());
     }
 
     #[test]
@@ -654,25 +764,25 @@ mod tests {
 
         handmade(&path, |m, e| {
             m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 1));
-            e.push((bake_path(None, MeshMap::AmbientOcclusion), ao_bytes(16)));
+            e.push((bake_path(Place::Legacy, MeshMap::AmbientOcclusion), ao_bytes(16)));
         });
-        assert_eq!(load(&path).unwrap().sets[0].baked[&MeshMap::AmbientOcclusion].texels(), 16);
+        assert_eq!(load(&path).unwrap().sets[0].tiles[0].baked[&MeshMap::AmbientOcclusion].texels(), 16);
 
         handmade(&path, |m, e| {
             m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 3)); // AO is scalar
-            e.push((bake_path(None, MeshMap::AmbientOcclusion), ao_bytes(48)));
+            e.push((bake_path(Place::Legacy, MeshMap::AmbientOcclusion), ao_bytes(48)));
         });
         assert!(load(&path).is_err(), "wrong channel count");
 
         handmade(&path, |m, e| {
             m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 1));
-            e.push((bake_path(None, MeshMap::AmbientOcclusion), ao_bytes(15)));
+            e.push((bake_path(Place::Legacy, MeshMap::AmbientOcclusion), ao_bytes(15)));
         });
         assert!(load(&path).unwrap_err().to_string().contains("truncated"));
 
         handmade(&path, |m, e| {
             m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 1));
-            e.push((bake_path(None, MeshMap::AmbientOcclusion), ao_bytes(1 << 20))); // far larger than declared
+            e.push((bake_path(Place::Legacy, MeshMap::AmbientOcclusion), ao_bytes(1 << 20))); // far larger than declared
         });
         assert!(load(&path).unwrap_err().to_string().contains("larger"), "zip-bomb guard");
 
@@ -683,7 +793,7 @@ mod tests {
             for _ in 0..2 {
                 m.bakes.push(entry(MeshMap::AmbientOcclusion, 2, 1));
             }
-            e.push((bake_path(None, MeshMap::AmbientOcclusion), ao_bytes(4)));
+            e.push((bake_path(Place::Legacy, MeshMap::AmbientOcclusion), ao_bytes(4)));
         });
         assert!(load(&path).is_err(), "duplicate bake");
 
@@ -702,11 +812,11 @@ mod tests {
         assert_eq!(q.mesh.sets, p.mesh.sets, "set names and ranges are stored with the mesh");
         assert_eq!(q.sets.len(), 2);
         for (a, b) in q.sets.iter().zip(&p.sets) {
-            assert_eq!((a.texture_size, &a.document, &a.blobs, &a.baked), (b.texture_size, &b.document, &b.blobs, &b.baked));
+            assert_eq!((a.texture_size, &a.document, &a.tiles[0].blobs, &a.tiles[0].baked), (b.texture_size, &b.document, &b.tiles[0].blobs, &b.tiles[0].baked));
         }
         // The two sets really are different (not both reading the first set's entries).
         assert_ne!(q.sets[0].texture_size, q.sets[1].texture_size);
-        assert!(q.sets[0].baked.contains_key(&MeshMap::AmbientOcclusion) && q.sets[1].baked.contains_key(&MeshMap::Thickness));
+        assert!(q.sets[0].tiles[0].baked.contains_key(&MeshMap::AmbientOcclusion) && q.sets[1].tiles[0].baked.contains_key(&MeshMap::Thickness));
     }
 
     #[test]
@@ -723,7 +833,7 @@ mod tests {
         bad_active.active = 2;
         assert!(save(&path, &bad_active).is_err());
         let mut bad_inner = two_sets();
-        bad_inner.sets[1].blobs[0].bytes.pop();
+        bad_inner.sets[1].tiles[0].blobs[0].bytes.pop();
         let e = save(&path, &bad_inner).unwrap_err().to_string();
         assert!(e.contains("texture set 1"), "the error names the set: {e}");
         assert!(!path.exists());
@@ -755,7 +865,114 @@ mod tests {
         handmade(&path, |_, _| {});
         let p = load(&path).unwrap();
         assert_eq!((p.sets.len(), p.active), (1, 0));
-        assert_eq!(p.sets[0].blobs.len(), 4);
+        assert_eq!(p.sets[0].tiles[0].blobs.len(), 4);
+    }
+
+    /// A mesh with one set whose UVs fill tiles 1001 and 1002.
+    fn two_tile_project() -> Project {
+        let mut mesh = Mesh::uv_sphere(1.0, 12, 6);
+        let half = mesh.indices.len() / 6 * 3;
+        let mut moved = HashMap::new();
+        for k in half..mesh.indices.len() {
+            let old = mesh.indices[k];
+            let new = *moved.entry(old).or_insert_with(|| {
+                let mut v = mesh.vertices[old as usize];
+                v.uv[0] += 1.0;
+                mesh.vertices.push(v);
+                (mesh.vertices.len() - 1) as u32
+            });
+            mesh.indices[k] = new;
+        }
+        mesh.partition_tiles();
+        let mut doc = Document::with_default_material();
+        let paint = doc.add(None, None, "Paint", NodeKind::Paint);
+        let tile = |seed: u8| {
+            let blobs = [BlobKind::Base, BlobKind::Metal, BlobKind::Rough, BlobKind::Height]
+                .map(|kind| TextureBlob { node: paint, kind, bytes: vec![seed; expected_len(SIZE, kind)] })
+                .to_vec();
+            let mut baked = HashMap::new();
+            baked.insert(MeshMap::Thickness, BakedMap::new(2, 1, vec![seed as u16; 4]).unwrap());
+            TileData { blobs, baked }
+        };
+        Project {
+            mesh_name: "tiled".into(),
+            mesh,
+            sets: vec![SetData { texture_size: SIZE, document: doc, tiles: vec![tile(10), tile(20)] }],
+            active: 0,
+            udim: true,
+        }
+    }
+
+    #[test]
+    fn uv_tiles_round_trip_each_with_its_own_paint_and_bakes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("udim.opproj");
+        let p = two_tile_project();
+        assert_eq!(p.mesh.set_tiles(0).len(), 2);
+        save(&path, &p).unwrap();
+        let q = load(&path).unwrap();
+        assert!(q.udim);
+        assert_eq!(q.sets[0].tiles.len(), 2);
+        for t in 0..2 {
+            assert_eq!(q.sets[0].tiles[t].blobs, p.sets[0].tiles[t].blobs, "tile {t}");
+            assert_eq!(q.sets[0].tiles[t].baked, p.sets[0].tiles[t].baked, "tile {t}");
+        }
+        assert_ne!(q.sets[0].tiles[0].blobs[0].bytes, q.sets[0].tiles[1].blobs[0].bytes, "the tiles hold different paint");
+    }
+
+    #[test]
+    fn the_tile_count_must_match_the_uvs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.opproj");
+        let mut one = two_tile_project();
+        one.sets[0].tiles.pop();
+        assert!(save(&path, &one).unwrap_err().to_string().contains("tile"), "a missing tile");
+        let mut extra = sample();
+        let copy = extra.sets[0].tiles[0].clone();
+        extra.sets[0].tiles.push(copy);
+        assert!(save(&path, &extra).is_err(), "no extra tiles without UV tiles");
+        let mut none = sample();
+        none.sets[0].tiles.clear();
+        assert!(save(&path, &none).is_err());
+        let mut off = two_tile_project();
+        off.udim = false; // two tiles stored but UV tiles not in use
+        assert!(save(&path, &off).is_err());
+    }
+
+    /// A version 3 file keeps its paint at the set level; it loads as a single tile.
+    #[test]
+    fn version_3_files_load_as_one_tile_per_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3.opproj");
+        let p = sample();
+        let s = &p.sets[0];
+        let manifest = ManifestV3 {
+            format: FORMAT_ID.into(),
+            version: 3,
+            mesh_name: "m".into(),
+            active: 0,
+            sets: vec![SetEntryV3 {
+                texture_size: s.texture_size,
+                document: s.document.clone(),
+                blobs: s.tiles[0].blobs.iter().map(|b| BlobEntry { node: b.node, kind: b.kind }).collect(),
+                bakes: Vec::new(),
+            }],
+        };
+        let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("manifest.json", opts).unwrap();
+        zip.write_all(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        zip.start_file("mesh.bin", opts).unwrap();
+        zip.write_all(&p.mesh.to_bytes()).unwrap();
+        for b in &s.tiles[0].blobs {
+            zip.start_file(blob_path(Place::Set(0), b.node, b.kind), opts).unwrap();
+            zip.write_all(&b.bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        let q = load(&path).unwrap();
+        assert!(!q.udim);
+        assert_eq!(q.sets[0].tiles.len(), 1);
+        assert_eq!(q.sets[0].tiles[0].blobs, s.tiles[0].blobs);
     }
 
     #[test]

@@ -153,6 +153,11 @@ impl ExportPreset {
     pub fn separates_texture_sets(&self) -> bool {
         self.maps.iter().all(|m| m.file.contains("$textureSet"))
     }
+
+    /// True if every file name contains `$udim`, so the tiles of a set go to separate files.
+    pub fn separates_udim_tiles(&self) -> bool {
+        self.maps.iter().all(|m| m.file.contains("$udim"))
+    }
 }
 
 fn map(file: &str, channels: &[ChannelSrc], format: FileFormat, bit_depth: BitDepth, srgb: bool) -> MapSpec {
@@ -169,25 +174,25 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
         ExportPreset {
             name: "PBR Metallic Roughness".into(),
             maps: vec![
-                png8("$project_$textureSet_BaseColor", &color, true),
-                png8("$project_$textureSet_Roughness", &[Roughness], false),
-                png8("$project_$textureSet_Metallic", &[Metallic], false),
+                png8("$project_$textureSet_BaseColor(.$udim)", &color, true),
+                png8("$project_$textureSet_Roughness(.$udim)", &[Roughness], false),
+                png8("$project_$textureSet_Metallic(.$udim)", &[Metallic], false),
             ],
         },
         ExportPreset {
             name: "glTF Metallic-Roughness".into(),
             maps: vec![
-                png8("$project_$textureSet_BaseColor", &color, true),
-                png8("$project_$textureSet_MetallicRoughness", &orm, false),
+                png8("$project_$textureSet_BaseColor(.$udim)", &color, true),
+                png8("$project_$textureSet_MetallicRoughness(.$udim)", &orm, false),
             ],
         },
         ExportPreset {
             name: "Unreal Engine (ORM packed)".into(),
             maps: vec![
-                png8("$project_$textureSet_BaseColor", &color, true),
-                png8("$project_$textureSet_OcclusionRoughnessMetallic", &orm, false),
+                png8("$project_$textureSet_BaseColor(.$udim)", &color, true),
+                png8("$project_$textureSet_OcclusionRoughnessMetallic(.$udim)", &orm, false),
                 png8(
-                    "$project_$textureSet_Normal",
+                    "$project_$textureSet_Normal(.$udim)",
                     &[Normal { directx: true, comp: Comp::R }, Normal { directx: true, comp: Comp::G }, Normal { directx: true, comp: Comp::B }],
                     false,
                 ),
@@ -197,13 +202,13 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
             name: "Unity Standard (Metallic Smoothness)".into(),
             maps: vec![
                 png8(
-                    "$project_$textureSet_AlbedoTransparency",
+                    "$project_$textureSet_AlbedoTransparency(.$udim)",
                     &[ChannelSrc::base(Comp::R), ChannelSrc::base(Comp::G), ChannelSrc::base(Comp::B), Constant(1.0)],
                     true,
                 ),
-                png8("$project_$textureSet_MetallicSmoothness", &[Metallic, Constant(0.0), Constant(0.0), Smoothness], false),
+                png8("$project_$textureSet_MetallicSmoothness(.$udim)", &[Metallic, Constant(0.0), Constant(0.0), Smoothness], false),
                 png8(
-                    "$project_$textureSet_Normal",
+                    "$project_$textureSet_Normal(.$udim)",
                     &[Normal { directx: false, comp: Comp::R }, Normal { directx: false, comp: Comp::G }, Normal { directx: false, comp: Comp::B }],
                     false,
                 ),
@@ -212,9 +217,9 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
         ExportPreset {
             name: "OpenEXR 32-bit (linear)".into(),
             maps: vec![
-                map("$project_$textureSet_BaseColor", &color, FileFormat::Exr, BitDepth::F32, false),
-                map("$project_$textureSet_Roughness", &[Roughness], FileFormat::Exr, BitDepth::F32, false),
-                map("$project_$textureSet_Metallic", &[Metallic], FileFormat::Exr, BitDepth::F32, false),
+                map("$project_$textureSet_BaseColor(.$udim)", &color, FileFormat::Exr, BitDepth::F32, false),
+                map("$project_$textureSet_Roughness(.$udim)", &[Roughness], FileFormat::Exr, BitDepth::F32, false),
+                map("$project_$textureSet_Metallic(.$udim)", &[Metallic], FileFormat::Exr, BitDepth::F32, false),
             ],
         },
     ]
@@ -230,5 +235,9 @@ mod tests {
         let mut p = crate::builtin_presets().remove(0);
         p.maps[0].file = "diffuse".into();
         assert!(!p.separates_texture_sets());
+        assert!(!p.separates_udim_tiles());
+        for preset in crate::builtin_presets() {
+            assert!(preset.separates_udim_tiles(), "{} would overwrite files between UV tiles", preset.name);
+        }
     }
 }

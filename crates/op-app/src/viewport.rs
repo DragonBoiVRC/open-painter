@@ -394,6 +394,7 @@ impl ViewportGpu {
     }
 
     /// Show `rgba8` (a `size` x `size` image) on the model, or go back to the neutral preview.
+    #[cfg(test)]
     pub fn set_preview(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: Option<(u32, &[u8])>) {
         self.set_previews(device, queue, &[image]);
     }
@@ -405,6 +406,7 @@ impl ViewportGpu {
         self.preview_tiles = binds;
     }
 
+    #[cfg(test)]
     pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: &Mesh) {
         self.set_mesh_tiles(device, mesh, false);
     }
@@ -1010,8 +1012,13 @@ mod tests {
         let project = op_project::Project {
             mesh_name: "sphere".into(),
             mesh: Mesh::uv_sphere(1.0, 96, 48),
-            sets: vec![op_project::SetData { texture_size: SIZE, document: doc.clone(), blobs: blobs.clone(), baked: Default::default() }],
+            sets: vec![op_project::SetData {
+                texture_size: SIZE,
+                document: doc.clone(),
+                tiles: vec![op_project::TileData { blobs: blobs.clone(), baked: Default::default() }],
+            }],
             active: 0,
+            udim: false,
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.opproj");
@@ -1021,7 +1028,7 @@ mod tests {
         assert_eq!(loaded.document, doc);
 
         let mut fresh = Rig::new().unwrap();
-        fresh.run(&loaded.document, &[PaintOp::Load { size: loaded.texture_size, blobs: loaded.blobs }]);
+        fresh.run(&loaded.document, &[PaintOp::Load { size: loaded.texture_size, blobs: loaded.tiles[0].blobs.clone() }]);
         // Compare piecewise so a failure says which texture differs, not a wall of bytes.
         let recaptured = fresh.gpu.paint().capture_blobs(&fresh.device, &fresh.queue, &loaded.document);
         assert_eq!(recaptured.len(), blobs.len());
@@ -1279,10 +1286,11 @@ mod tests {
             mesh_name: "sphere".into(),
             mesh: mesh.clone(),
             sets: vec![
-                op_project::SetData { texture_size: SIZE, document: a.clone(), blobs: c0.clone(), baked: Default::default() },
-                op_project::SetData { texture_size: SIZE, document: b.clone(), blobs: c1.clone(), baked: Default::default() },
+                op_project::SetData { texture_size: SIZE, document: a.clone(), tiles: vec![op_project::TileData { blobs: c0.clone(), baked: Default::default() }] },
+                op_project::SetData { texture_size: SIZE, document: b.clone(), tiles: vec![op_project::TileData { blobs: c1.clone(), baked: Default::default() }] },
             ],
             active: 1,
+            udim: false,
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("two.opproj");
@@ -1296,7 +1304,7 @@ mod tests {
             .sets
             .iter()
             .enumerate()
-            .map(|(i, s)| SetBatch { tile: None, set: i, doc: s.document.clone(), ops: vec![PaintOp::Load { size: s.texture_size, blobs: s.blobs.clone() }] })
+            .map(|(i, s)| SetBatch { tile: None, set: i, doc: s.document.clone(), ops: vec![PaintOp::Load { size: s.texture_size, blobs: s.tiles[0].blobs.clone() }] })
             .collect();
         fresh.run_sets(&batches);
         assert_eq!(capture(&fresh, 0, &loaded.sets[0].document), c0, "set 0 after reload");
@@ -1314,7 +1322,7 @@ mod tests {
         let data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
         let preset = op_export::builtin_presets().remove(0);
         let dir = tempfile::tempdir().unwrap();
-        let ctx = op_export::ExportContext { project: "p", texture_set: "s", mesh: "m", out_dir: dir.path() };
+        let ctx = op_export::ExportContext { project: "p", texture_set: "s", mesh: "m", out_dir: dir.path(), udim: None };
         op_export::export(&preset, &data, &ctx).unwrap();
 
         let near = |a: u8, b: f32| (a as f32 - b * 255.0).abs() <= 1.5;

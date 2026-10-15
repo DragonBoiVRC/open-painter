@@ -123,7 +123,7 @@ impl App {
                             changed |= ui.checkbox(&mut gen.invert, "Invert").changed();
                             let missing: Vec<&str> = op_proc::required_maps(&gen.kind)
                                 .into_iter()
-                                .filter(|m| !self.baked.contains_key(m))
+                                .filter(|m| !self.baked0().contains_key(m))
                                 .map(|m| m.label())
                                 .collect();
                             if !missing.is_empty() {
@@ -132,10 +132,10 @@ impl App {
                                     format!("Not baked yet: {}. Use Bake... to create them.", missing.join(", ")),
                                 );
                             }
-                            if self.proc.is_busy(id) {
+                            if self.procs.iter().any(|p| p.scheduler.is_busy(id)) {
                                 ui.label("Generating...");
                             }
-                            if let Some(info) = self.proc_info.get(&id) {
+                            if let Some(info) = self.procs.iter().find_map(|p| p.info.get(&id)) {
                                 for w in &info.warnings {
                                     ui.small(w);
                                 }

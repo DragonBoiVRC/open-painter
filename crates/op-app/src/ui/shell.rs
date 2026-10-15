@@ -153,11 +153,11 @@ impl App {
                     let mut view = current;
                     ui.selectable_value(&mut view, crate::View::Shaded, "Shaded");
                     ui.selectable_value(&mut view, crate::View::PaintedNormal, "Normal map");
-                    if self.baked.contains_key(&MeshMap::AmbientOcclusion) {
+                    if self.baked0().contains_key(&MeshMap::AmbientOcclusion) {
                         ui.selectable_value(&mut view, crate::View::ShadedAo, "Shaded + baked AO");
                     }
                     for m in MeshMap::ALL {
-                        if self.baked.contains_key(&m) {
+                        if self.baked0().contains_key(&m) {
                             ui.selectable_value(&mut view, crate::View::Map(m), m.label());
                         }
                     }
@@ -198,7 +198,7 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     ui.label(egui::RichText::new(self.status.lines().next().unwrap_or("")).color(theme::TEXT_DIM).size(11.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let baked = if self.baked.is_empty() { String::new() } else { format!("{} baked  |  ", self.baked.len()) };
+                        let baked = if self.baked0().is_empty() { String::new() } else { format!("{} baked  |  ", self.baked0().len()) };
                         let tris = self.mesh.indices.len() / 3;
                         ui.label(
                             egui::RichText::new(format!("{baked}{tris} tris  |  {0}x{0}", self.tex_size))

@@ -23,11 +23,29 @@ impl App {
                     self.pending.push(PaintOp::Reset(self.tex_size));
                     // Baked maps are tied to the resolution they were baked at.
                     self.clear_baked();
-                    self.proc.invalidate();
                     self.modified = true;
                 }
             });
             hint(ui, "Changing the resolution clears all paint, history and baked maps.");
+        });
+        section(ui, "UV tiles", |ui| {
+            let mut on = self.udim;
+            let ctx = ui.ctx().clone();
+            if ui.checkbox(&mut on, "Use UV tiles (UDIM)").on_hover_text("One texture per UDIM tile of the UV layout (1001, 1002, ...)").changed() {
+                self.request(crate::Pending::Udim(on), &ctx);
+            }
+            hint(ui, "Switching restarts the texture sets: paint and baked maps are cleared.");
+            if let Some(e) = crate::uvview::uv_extent(&self.mesh, self.active) {
+                let (text, fits) = crate::uvview::extent_summary(e);
+                if self.udim {
+                    let tiles: Vec<String> = self.mesh.set_tiles(self.active).iter().map(|t| t.udim().to_string()).collect();
+                    hint(ui, &format!("This set has {} tile(s): {}", tiles.len(), tiles.join(", ")));
+                } else if !fits {
+                    ui.colored_label(crate::ui::theme::WARN, format!("{text}. Turn on UV tiles to paint each tile separately."));
+                } else {
+                    hint(ui, &text);
+                }
+            }
         });
         section(ui, "Normal map", |ui| {
             hint(ui, "Painted height becomes a tangent-space normal map, combined with the baked normal map.");

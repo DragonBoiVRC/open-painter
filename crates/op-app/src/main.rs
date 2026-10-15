@@ -88,6 +88,8 @@ enum Pending {
     New,
     Open(PathBuf),
     Mesh(PathBuf),
+    /// Turn UV tiles (UDIM) on or off; this restarts the texture sets.
+    Udim(bool),
     Quit,
 }
 
@@ -106,6 +108,8 @@ struct PathDialog {
 /// One texture set's pixels, read back and ready for the export thread.
 struct ExportJob {
     name: String,
+    /// UDIM number of the tile, when the set has UV tiles.
+    udim: Option<u32>,
     size: u32,
     planes: [Vec<u8>; 4],
     /// The set's height strength, for deriving its normal map.
@@ -182,9 +186,21 @@ fn builtin_kinds() -> [GeneratorKind; 5] {
 struct BakeJob {
     /// The texture set being baked.
     set: usize,
-    rx: Receiver<Result<op_bake::BakeResult, String>>,
+    /// One result per UV tile of the set, in tile order.
+    rx: Receiver<Result<Vec<op_bake::BakeResult>, String>>,
+    /// Progress of the tile being baked now.
     progress: Arc<BakeProgress>,
+    tiles: usize,
+    tiles_done: Arc<std::sync::atomic::AtomicUsize>,
     started: Instant,
+}
+
+impl BakeJob {
+    /// Overall progress across the tiles, 0..1.
+    fn fraction(&self) -> f32 {
+        let done = self.tiles_done.load(std::sync::atomic::Ordering::Relaxed) as f32;
+        ((done + self.progress.fraction()) / self.tiles.max(1) as f32).min(1.0)
+    }
 }
 
 struct BakeUi {
@@ -257,14 +273,16 @@ struct App {
     presets: Vec<ExportPreset>,
     preset_warnings: Vec<String>,
     export: ExportUi,
-    baked: Arc<HashMap<MeshMap, BakedMap>>,
+    /// Baked maps of each UV tile of the active set (one entry unless UV tiles are in use).
+    bakes: Vec<sets::TileBake>,
+    /// Background mask generation, one state per tile.
+    procs: Vec<sets::TileProc>,
+    /// Whether UV tiles (UDIM) are in use: each set then has a paint store per tile its UVs occupy.
+    udim: bool,
+    /// Paint operations meant for one tile only, as (tile, op); sent with the next frame.
+    pending_tiles: Vec<(usize, PaintOp)>,
     bake: BakeUi,
     view: View,
-    /// Bumped whenever the baked maps change, so generated masks know to regenerate.
-    bake_rev: u64,
-    proc: procgen::Scheduler,
-    proc_jobs: Vec<ProcJob>,
-    proc_info: HashMap<NodeId, ProcInfo>,
     custom_generators: Vec<Generator>,
     smart_materials: Vec<SmartMaterial>,
     /// Problems found while loading the user's smart materials and generator files.
@@ -383,7 +401,7 @@ impl App {
                 report: Vec::new(),
                 last_notes: Vec::new(),
             },
-            baked: Arc::new(HashMap::new()),
+            bakes: vec![sets::TileBake::default()],
             bake: BakeUi {
                 maps: MeshMap::ALL.to_vec(),
                 samples: 32,
@@ -397,10 +415,9 @@ impl App {
                 job: None,
             },
             view: View::Shaded,
-            bake_rev: 0,
-            proc: procgen::Scheduler::new(Duration::from_millis(150)),
-            proc_jobs: Vec::new(),
-            proc_info: HashMap::new(),
+            procs: vec![sets::TileProc::new()],
+            udim: false,
+            pending_tiles: Vec::new(),
             custom_generators,
             smart_materials,
             definition_warnings,
@@ -426,11 +443,14 @@ impl App {
 
     // ---- project lifecycle -----------------------------------------------------------
 
-    fn set_mesh(&mut self, mesh: Mesh, name: String) {
+    fn set_mesh(&mut self, mut mesh: Mesh, name: String) {
         let (lo, hi) = mesh.bounds();
         self.camera.frame(lo, hi);
+        if self.udim {
+            mesh.partition_tiles();
+        }
         if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
-            gpu.set_mesh(&self.render_state.device, &mesh);
+            gpu.set_mesh_tiles(&self.render_state.device, &mesh, self.udim);
         }
         self.mesh = mesh;
         self.mesh_name = name;
@@ -442,6 +462,26 @@ impl App {
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".into())
+    }
+
+    /// Switch between one texture per set and one texture per UDIM tile. Paint and bakes are cleared,
+    /// because the textures they belong to are replaced.
+    fn set_udim(&mut self, on: bool) {
+        if self.udim == on {
+            return;
+        }
+        self.udim = on;
+        let (mesh, name) = (self.mesh.clone(), self.mesh_name.clone());
+        self.set_mesh(mesh, name);
+        self.init_sets();
+        self.set_view(View::Shaded);
+        self.modified = true;
+        let tiles: usize = (0..self.set_ranges_len()).map(|s| self.tile_count(s)).sum();
+        self.status = if on {
+            format!("UV tiles are on: {tiles} texture(s) across {} set(s).", self.set_ranges_len())
+        } else {
+            "UV tiles are off: one texture per set.".to_string()
+        };
     }
 
     fn new_project(&mut self) {
@@ -478,12 +518,18 @@ impl App {
     }
 
     fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {
+        self.udim = p.udim;
         self.set_mesh(p.mesh, p.mesh_name);
         let mut states = Vec::new();
         let mut loads = Vec::new();
         for s in p.sets {
-            loads.push((s.texture_size, s.blobs));
-            states.push(sets::SetState::restored(s.document, s.texture_size, s.baked));
+            let (mut blobs, mut baked) = (Vec::new(), Vec::new());
+            for t in s.tiles {
+                blobs.push(t.blobs);
+                baked.push(t.baked);
+            }
+            loads.push((s.texture_size, blobs));
+            states.push(sets::SetState::restored(s.document, s.texture_size, baked));
         }
         self.install_sets(states, loads, p.active);
         self.set_view(View::Shaded);
@@ -531,6 +577,7 @@ impl App {
             Pending::Open(p) if is_project(&p) => self.open_path(&p),
             Pending::Open(p) => self.load_mesh_file(&p),
             Pending::Mesh(p) => self.load_mesh_file(&p),
+            Pending::Udim(on) => self.set_udim(on),
             Pending::Quit => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -542,22 +589,27 @@ impl App {
         let renderer = self.render_state.renderer.read();
         let gpu = renderer.callback_resources.get::<ViewportGpu>().ok_or("viewport not ready")?;
         let mut sets = Vec::new();
-        for (i, paint) in gpu.sets.iter().enumerate() {
-            let (doc, baked) = if i == self.active {
-                (&self.doc, &self.baked)
+        for (i, unit) in gpu.sets.iter().enumerate() {
+            let (doc, bakes) = if i == self.active {
+                (&self.doc, &self.bakes)
             } else {
                 let st = self.parked.get(i).and_then(Option::as_ref).ok_or("a texture set is missing")?;
-                (&st.doc, &st.baked)
+                (&st.doc, &st.bakes)
             };
             let untouched = i != self.active && self.parked.get(i).and_then(Option::as_ref).is_some_and(|s| !s.materialized);
-            let (texture_size, blobs) = if untouched {
-                (self.parked[i].as_ref().map_or(paint.size(), |s| s.tex_size), Vec::new())
-            } else {
-                (paint.size(), paint.capture_blobs(&self.render_state.device, &self.render_state.queue, doc))
-            };
-            sets.push(op_project::SetData { texture_size, document: doc.clone(), blobs, baked: (**baked).clone() });
+            let texture_size = if untouched { self.parked[i].as_ref().map_or(unit.size(), |s| s.tex_size) } else { unit.size() };
+            let tiles = unit
+                .tiles
+                .iter()
+                .enumerate()
+                .map(|(t, paint)| op_project::TileData {
+                    blobs: if untouched { Vec::new() } else { paint.capture_blobs(&self.render_state.device, &self.render_state.queue, doc) },
+                    baked: bakes.get(t).map(|b| (*b.baked).clone()).unwrap_or_default(),
+                })
+                .collect();
+            sets.push(op_project::SetData { texture_size, document: doc.clone(), tiles });
         }
-        Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active })
+        Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active, udim: self.udim })
     }
 
     fn do_save(&mut self, mut path: PathBuf, ctx: &egui::Context) {
@@ -617,6 +669,10 @@ impl App {
             self.status = "Select at least one texture set to export.".into();
             return;
         }
+        if self.udim && !preset.separates_udim_tiles() && chosen.iter().any(|&i| self.tile_count(i) > 1) {
+            self.status = "This preset's file names lack $udim, so the UV tiles would overwrite each other.".into();
+            return;
+        }
         if chosen.len() > 1 && !preset.separates_texture_sets() {
             self.status = "This preset's file names lack $textureSet, so the sets would overwrite each other.".into();
             return;
@@ -630,17 +686,23 @@ impl App {
             {
                 let renderer = self.render_state.renderer.read();
                 let Some(gpu) = renderer.callback_resources.get::<ViewportGpu>() else { return };
-                let (Some(paint), Some(mesh)) = (gpu.sets.get(i), self.mesh.extract_set(i)) else { continue };
-                let baked = if i == self.active { self.baked.clone() } else { self.parked[i].as_ref().map_or_else(Default::default, |s| s.baked.clone()) };
+                let Some(unit) = gpu.sets.get(i) else { continue };
+                let bakes = if i == self.active { self.bakes.clone() } else { self.parked[i].as_ref().map_or_else(Default::default, |s| s.bakes.clone()) };
                 let name = if ranges.len() > 1 { ranges[i].name.clone() } else { self.export.set_name.clone() };
-                jobs.push(ExportJob {
-                    name,
-                    size: paint.size(),
-                    planes: paint.capture_output(&self.render_state.device, &self.render_state.queue),
-                    height_strength: if i == self.active { self.doc.height_strength } else { self.parked[i].as_ref().map_or(1.0, |s| s.doc.height_strength) },
-                    mesh,
-                    baked,
-                });
+                let height_strength = if i == self.active { self.doc.height_strength } else { self.parked[i].as_ref().map_or(1.0, |s| s.doc.height_strength) };
+                for (t, paint) in unit.tiles.iter().enumerate() {
+                    let mesh = if self.udim { self.mesh.extract_tile(i, paint.tile) } else { self.mesh.extract_set(i) };
+                    let Some(mesh) = mesh else { continue };
+                    jobs.push(ExportJob {
+                        name: name.clone(),
+                        udim: self.udim.then(|| paint.tile.udim()),
+                        size: paint.size(),
+                        planes: paint.capture_output(&self.render_state.device, &self.render_state.queue),
+                        height_strength,
+                        mesh,
+                        baked: bakes.get(t).map(|b| b.baked.clone()).unwrap_or_default(),
+                    });
+                }
             }
             if !was_open {
                 self.release_if_untouched(i);
@@ -679,10 +741,14 @@ impl App {
                     if padding > 0 {
                         data.dilate(&op_export::uv_coverage(&job.mesh, size), padding);
                     }
-                    let ctx = ExportContext { project: &project, texture_set: &job.name, mesh: &mesh_name, out_dir: &dir };
-                    let outcome = op_export::export(&preset, &data, &ctx).map_err(|e| format!("{}: {e}", job.name))?;
+                    let ctx = ExportContext { project: &project, texture_set: &job.name, mesh: &mesh_name, out_dir: &dir, udim: job.udim };
+                    let label = match job.udim {
+                        Some(n) => format!("{} ({n})", job.name),
+                        None => job.name.clone(),
+                    };
+                    let outcome = op_export::export(&preset, &data, &ctx).map_err(|e| format!("{label}: {e}"))?;
                     total.files.extend(outcome.files);
-                    total.notes.extend(outcome.notes.into_iter().chain(notes).map(|n| format!("{}: {n}", job.name)));
+                    total.notes.extend(outcome.notes.into_iter().chain(notes).map(|n| format!("{label}: {n}")));
                 }
                 Ok(total)
             })();
@@ -694,37 +760,42 @@ impl App {
 
     fn clear_baked(&mut self) {
         self.pending.push(PaintOp::SetBakedNormal { size: self.tex_size, rgba8: None });
-        if !self.baked.is_empty() {
-            self.baked = Arc::new(HashMap::new());
-            self.bake_rev += 1;
+        for b in &mut self.bakes {
+            if !b.baked.is_empty() {
+                b.baked = Arc::new(HashMap::new());
+                b.rev += 1;
+            }
         }
         self.set_view(View::Shaded);
     }
 
-    /// Switch what the viewport shows, uploading the baked map it needs.
+    /// Switch what the viewport shows, uploading the baked maps it needs (one per UV tile).
     fn set_view(&mut self, view: View) {
-        let source = match view {
+        let wanted = |b: &sets::TileBake| match view {
             View::Shaded | View::PaintedNormal => None,
-            View::ShadedAo => self.baked.get(&MeshMap::AmbientOcclusion),
-            View::Map(m) => self.baked.get(&m),
+            View::ShadedAo => b.baked.get(&MeshMap::AmbientOcclusion).cloned(),
+            View::Map(m) => b.baked.get(&m).cloned(),
         };
-        // A view whose map is no longer baked falls back to the normal shaded view.
-        let view = if source.is_none() && view != View::PaintedNormal { View::Shaded } else { view };
-        let image = source.map(|b| {
-            let mut rgba = Vec::with_capacity(b.texels() * 4);
-            for i in 0..b.texels() {
-                let t = b.texel(i);
-                rgba.extend([t[0], t[1], t[2]].map(|v| (v * 255.0 + 0.5) as u8));
-                rgba.push(255);
-            }
-            (b.size, rgba)
-        });
+        let sources: Vec<Option<BakedMap>> = self.bakes.iter().map(wanted).collect();
+        // A view none of whose maps are baked falls back to the normal shaded view.
+        let view = if sources.iter().all(Option::is_none) && view != View::PaintedNormal { View::Shaded } else { view };
+        let images: Vec<Option<(u32, Vec<u8>)>> = sources
+            .iter()
+            .map(|src| {
+                src.as_ref().map(|b| {
+                    let mut rgba = Vec::with_capacity(b.texels() * 4);
+                    for i in 0..b.texels() {
+                        let t = b.texel(i);
+                        rgba.extend([t[0], t[1], t[2]].map(|v| (v * 255.0 + 0.5) as u8));
+                        rgba.push(255);
+                    }
+                    (b.size, rgba)
+                })
+            })
+            .collect();
         if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
-            gpu.set_preview(
-                &self.render_state.device,
-                &self.render_state.queue,
-                image.as_ref().map(|(size, px)| (*size, px.as_slice())),
-            );
+            let refs: Vec<Option<(u32, &[u8])>> = images.iter().map(|i| i.as_ref().map(|(size, px)| (*size, px.as_slice()))).collect();
+            gpu.set_previews(&self.render_state.device, &self.render_state.queue, &refs);
         }
         self.view = view;
     }
@@ -761,47 +832,73 @@ impl App {
             cage_rear: b.cage_rear_pct / 100.0,
             padding: 16,
         };
-        // Bake this texture set's triangles; the rest of the model still shades them.
-        let Some(low) = self.mesh.extract_set(self.active) else { return };
+        // Bake this texture set's triangles, tile by tile; the rest of the model still shades them.
+        let set = self.active;
+        let lows: Vec<Mesh> = if self.udim {
+            self.mesh.set_tiles(set).into_iter().filter_map(|t| self.mesh.extract_tile(set, t)).collect()
+        } else {
+            self.mesh.extract_set(set).into_iter().collect()
+        };
+        if lows.is_empty() {
+            return;
+        }
+        let tiles = lows.len();
         let occluders = (self.set_ranges_len() > 1).then(|| self.mesh.clone());
         let high = b.high.as_ref().map(|(m, _)| m.clone());
         let progress = BakeProgress::new();
         let worker_progress = progress.clone();
+        let tiles_done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_done = tiles_done.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = op_bake::bake_with_occluders(&low, high.as_deref(), occluders.as_ref(), &settings, &worker_progress)
-                .map_err(|e| e.to_string());
+            let result = (|| {
+                let mut results = Vec::with_capacity(lows.len());
+                for low in &lows {
+                    results.push(
+                        op_bake::bake_with_occluders(low, high.as_deref(), occluders.as_ref(), &settings, &worker_progress).map_err(|e| e.to_string())?,
+                    );
+                    worker_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(results)
+            })();
             let _ = tx.send(result);
         });
-        self.bake.job = Some(BakeJob { set: self.active, rx, progress, started: Instant::now() });
+        self.bake.job = Some(BakeJob { set, rx, progress, tiles, tiles_done, started: Instant::now() });
         let (n, size) = (self.bake.maps.len(), self.tex_size);
-        self.status = format!("Baking {n} map(s) for '{}' at {size}x{size}...", self.set_name(self.active));
+        let of_tiles = if tiles > 1 { format!(" ({tiles} UV tiles)") } else { String::new() };
+        self.status = format!("Baking {n} map(s) for '{}'{of_tiles} at {size}x{size}...", self.set_name(set));
     }
 
     fn poll_bake(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.bake.job else { return };
         let (set, started) = (job.set, job.started);
         match job.rx.try_recv() {
-            Ok(Ok(result)) => {
+            Ok(Ok(results)) => {
                 let secs = started.elapsed().as_secs_f32();
-                let n = result.maps.len();
-                let covered = result.covered;
+                let n = results.first().map_or(0, |r| r.maps.len());
+                let covered: usize = results.iter().map(|r| r.covered).sum();
                 // The bake belongs to the set it was started for, which may no longer be the active one.
-                let normal = self.with_set(set, |st| {
-                    let mut maps = (*st.baked).clone();
-                    maps.retain(|_, b| b.size == result.size); // older bakes at another resolution are stale
-                    maps.extend(result.maps);
-                    let op = sets::baked_normal_op(&maps, result.size);
-                    st.baked = Arc::new(maps);
-                    st.bake_rev += 1;
-                    (op, st.doc.clone(), st.materialized)
+                let normals = self.with_set(set, |st| {
+                    let mut ops = Vec::new();
+                    for (t, result) in results.into_iter().enumerate() {
+                        let Some(slot) = st.bakes.get_mut(t) else { continue };
+                        let mut maps = (*slot.baked).clone();
+                        maps.retain(|_, b| b.size == result.size); // older bakes at another resolution are stale
+                        maps.extend(result.maps);
+                        ops.push((t, sets::baked_normal_op(&maps, result.size)));
+                        slot.baked = Arc::new(maps);
+                        slot.rev += 1;
+                    }
+                    (ops, st.doc.clone(), st.materialized)
                 });
                 // The normal map the viewport uses changes with the bake.
-                if let Some((op, doc, materialized)) = normal {
-                    if set == self.active {
-                        self.pending.push(op);
-                    } else if materialized {
-                        self.enqueue_batch(viewport::SetBatch { tile: None, set, doc, ops: vec![op] });
+                if let Some((ops, doc, materialized)) = normals {
+                    for (t, op) in ops {
+                        if set == self.active {
+                            self.pending_tiles.push((t, op));
+                        } else if materialized {
+                            self.enqueue_batch(viewport::SetBatch { tile: Some(t), set, doc: doc.clone(), ops: vec![op] });
+                        }
                     }
                 }
                 self.bake.job = None;
@@ -1234,54 +1331,73 @@ impl App {
         }
     }
 
-    /// Start, collect and apply background mask generation.
+    /// Start, collect and apply background mask generation, separately for every UV tile (a generated
+    /// mask is a function of the tile's baked maps).
     fn drive_procgen(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        for req in self.proc.plan(&self.doc, self.bake_rev, self.tex_size, now) {
-            let (baked, generator, size) = (self.baked.clone(), req.key.generator.clone(), req.key.size);
-            let cancel = Arc::new(AtomicBool::new(false));
-            let flag = cancel.clone();
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(op_proc::generate(&generator, size, &baked, &flag).map_err(|e| e.to_string()));
-            });
-            self.proc_jobs.push(ProcJob { layer: req.layer, key: req.key, rx, cancel });
-        }
+        let live = self.doc.ids();
+        let mut busy = false;
+        let mut wake: Option<Duration> = None;
+        for t in 0..self.procs.len().min(self.bakes.len()) {
+            let rev = self.bakes[t].rev;
+            for req in self.procs[t].scheduler.plan(&self.doc, rev, self.tex_size, now) {
+                let (baked, generator, size) = (self.bakes[t].baked.clone(), req.key.generator.clone(), req.key.size);
+                let cancel = Arc::new(AtomicBool::new(false));
+                let flag = cancel.clone();
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(op_proc::generate(&generator, size, &baked, &flag).map_err(|e| e.to_string()));
+                });
+                self.procs[t].jobs.push(ProcJob { layer: req.layer, key: req.key, rx, cancel });
+            }
 
-        let mut finished = Vec::new();
-        self.proc_jobs.retain(|job| match job.rx.try_recv() {
-            Err(mpsc::TryRecvError::Empty) => true,
-            Ok(result) => {
-                finished.push((job.layer, job.key.clone(), result));
-                false
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                finished.push((job.layer, job.key.clone(), Err("the worker stopped unexpectedly".into())));
-                false
-            }
-        });
-        for (layer, key, result) in finished {
-            match result {
-                Ok(eval) => {
-                    if self.proc.finish(layer, &key) {
-                        self.pending.push(PaintOp::SetMask { layer, size: key.size, bytes: op_proc::to_mask_bytes(&eval.values) });
-                        self.proc_info.insert(layer, ProcInfo { warnings: eval.warnings, error: None });
+            let mut finished = Vec::new();
+            self.procs[t].jobs.retain(|job| match job.rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => true,
+                Ok(result) => {
+                    finished.push((job.layer, job.key.clone(), result));
+                    false
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    finished.push((job.layer, job.key.clone(), Err("the worker stopped unexpectedly".into())));
+                    false
+                }
+            });
+            for (layer, key, result) in finished {
+                match result {
+                    Ok(eval) => {
+                        if self.procs[t].scheduler.finish(layer, &key) {
+                            self.pending_tiles.push((t, PaintOp::SetMask { layer, size: key.size, bytes: op_proc::to_mask_bytes(&eval.values) }));
+                            self.procs[t].info.insert(layer, ProcInfo { warnings: eval.warnings, error: None });
+                        }
+                    }
+                    Err(e) => {
+                        self.procs[t].scheduler.failed(layer, &key);
+                        self.procs[t].info.insert(layer, ProcInfo { warnings: Vec::new(), error: Some(e) });
                     }
                 }
-                Err(e) => {
-                    self.proc.failed(layer, &key);
-                    self.proc_info.insert(layer, ProcInfo { warnings: Vec::new(), error: Some(e) });
-                }
+            }
+            self.procs[t].info.retain(|id, _| live.contains(id));
+            busy |= !self.procs[t].jobs.is_empty();
+            if let Some(w) = self.procs[t].scheduler.next_wakeup(now) {
+                wake = Some(wake.map_or(w, |x| x.min(w)));
             }
         }
-        let live = self.doc.ids();
-        self.proc_info.retain(|id, _| live.contains(id));
-
-        if !self.proc_jobs.is_empty() {
+        if busy {
             ctx.request_repaint_after(Duration::from_millis(60));
-        } else if let Some(wait) = self.proc.next_wakeup(now) {
+        } else if let Some(wait) = wake {
             ctx.request_repaint_after(wait + Duration::from_millis(5));
         }
+    }
+
+    /// The operations to send with this frame: those for the whole set, then those for single tiles.
+    fn take_batches(&mut self, mut ops: Vec<PaintOp>) -> Vec<viewport::SetBatch> {
+        ops.splice(0..0, std::mem::take(&mut self.pending));
+        let mut batches = vec![viewport::SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
+        for (tile, op) in std::mem::take(&mut self.pending_tiles) {
+            batches.push(viewport::SetBatch { tile: Some(tile), set: self.active, doc: self.doc.clone(), ops: vec![op] });
+        }
+        batches
     }
 
     fn add_smart_material(&mut self, index: usize) {
@@ -1294,7 +1410,7 @@ impl App {
         let ids = self.doc.insert_nodes(parent, at, material.nodes);
         self.selected = ids.last().copied();
         self.record(before);
-        let needs_bakes = !self.baked.contains_key(&MeshMap::Curvature);
+        let needs_bakes = !self.bakes[0].baked.contains_key(&MeshMap::Curvature);
         self.smart_ui.message = if needs_bakes {
             format!("Added '{}'. Its generated masks need baked maps: use Bake...", material.name)
         } else {
@@ -1436,6 +1552,7 @@ impl App {
             let what = match action {
                 Pending::Quit => "quit",
                 Pending::New => "start a new project",
+                Pending::Udim(_) => "change the UV tile setting, which restarts the texture sets",
                 _ => "open another file",
             };
             egui::Window::new("Unsaved changes").collapsible(false).resizable(false).show(ctx, |ui| {
