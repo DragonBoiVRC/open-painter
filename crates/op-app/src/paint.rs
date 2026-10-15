@@ -78,6 +78,8 @@ pub enum PaintOp {
     /// Snapshot the target so the stroke that follows can be undone.
     BeginStroke { layer: NodeId, target: Target },
     Stamps { layer: NodeId, target: Target, stamps: Vec<Stamp> },
+    /// Stamps drawn directly in UV space: `brush` is (u, v, radius in UV units, hardness).
+    Stamps2d { layer: NodeId, target: Target, stamps: Vec<Stamp> },
     /// Reset the target (content: transparent; mask: its initial value). Pair with BeginStroke.
     Clear { layer: NodeId, target: Target },
     UndoStroke,
@@ -212,6 +214,9 @@ impl StrokeSnap {
 pub struct PaintGpu {
     pipeline_content: wgpu::RenderPipeline,
     pipeline_mask: wgpu::RenderPipeline,
+    /// The same brushes drawn directly in UV space (the 2D view).
+    pipeline_content_2d: wgpu::RenderPipeline,
+    pipeline_mask_2d: wgpu::RenderPipeline,
     stamp_layout: wgpu::BindGroupLayout,
     pub material_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -348,6 +353,34 @@ impl PaintGpu {
             make("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_mask = make("fs_mask", &[target(MASK_FORMAT, straight)]);
 
+        let shader_2d = device.create_shader_module(wgpu::include_wgsl!("shaders/stamp2d.wgsl"));
+        let pl_2d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("stamp2d_pl"), bind_group_layouts: &[], immediate_size: 0 });
+        let make_2d = |entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pl_2d),
+                vertex: wgpu::VertexState {
+                    module: &shader_2d,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Stamp>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &instance_attrs,
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState { module: &shader_2d, entry_point: Some(entry), compilation_options: Default::default(), targets }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline_content_2d =
+            make_2d("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
+        let pipeline_mask_2d = make_2d("fs_mask", &[target(MASK_FORMAT, straight)]);
+
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamp_globals"),
             size: std::mem::size_of::<StampGlobals>() as u64,
@@ -374,6 +407,8 @@ impl PaintGpu {
         Self {
             pipeline_content,
             pipeline_mask,
+            pipeline_content_2d,
+            pipeline_mask_2d,
             stamp_layout,
             material_layout,
             sampler,
@@ -696,6 +731,44 @@ impl PaintGpu {
                     for b in blobs {
                         self.upload(device, encoder, b);
                     }
+                    dirty = true;
+                }
+                PaintOp::Stamps2d { layer, target, stamps } => {
+                    let Some(g) = self.store.get(layer) else { continue };
+                    let n = stamps.len().min(MAX_STAMPS - self.cursor);
+                    if n == 0 {
+                        continue;
+                    }
+                    let (views, pipeline): (Vec<wgpu::TextureView>, _) = match target {
+                        Target::Content => match &g.content {
+                            Some(c) => (c.views().into(), &self.pipeline_content_2d),
+                            None => continue,
+                        },
+                        Target::Mask => match &g.mask {
+                            Some(m) => (vec![m.create_view(&Default::default())], &self.pipeline_mask_2d),
+                            None => continue,
+                        },
+                    };
+                    let stride = std::mem::size_of::<Stamp>() as u64;
+                    let offset = self.cursor as u64 * stride;
+                    queue.write_buffer(&self.instance_buf, offset, bytemuck::cast_slice(&stamps[..n]));
+                    let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+                    let attachments: Vec<_> = views
+                        .iter()
+                        .map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: load }))
+                        .collect();
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("stamp2d_pass"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_vertex_buffer(0, self.instance_buf.slice(offset..offset + n as u64 * stride));
+                    pass.draw(0..6, 0..n as u32);
+                    self.cursor += n;
                     dirty = true;
                 }
                 PaintOp::Stamps { layer, target, stamps } => {

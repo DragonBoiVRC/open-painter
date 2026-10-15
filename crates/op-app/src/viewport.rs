@@ -63,11 +63,11 @@ pub struct ViewportGpu {
     sampler: wgpu::Sampler,
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
-    vbuf: Option<wgpu::Buffer>,
+    pub(crate) vbuf: Option<wgpu::Buffer>,
     ibuf: Option<wgpu::Buffer>,
     index_count: u32,
     /// Draw ranges (first index, index count) of each texture set, in set order.
-    ranges: Vec<(u32, u32)>,
+    pub(crate) ranges: Vec<(u32, u32)>,
     /// A copy of the globals with the baked-map preview switched off, for sets that are not being viewed.
     plain_buf: wgpu::Buffer,
     plain_bind: wgpu::BindGroup,
@@ -77,8 +77,13 @@ pub struct ViewportGpu {
     /// The set being edited and previewed.
     pub active: usize,
     /// Batches waiting for the next rendered frame (set up by the app outside of frames).
-    queued: Vec<SetBatch>,
+    pub(crate) queued: Vec<SetBatch>,
     thumbnailer: crate::thumbs::Thumbnailer,
+    pub(crate) uv: crate::uvview::UvGpu,
+    /// CPU copy of the mesh indices, for building the UV wireframe of a set.
+    pub(crate) cpu_indices: Vec<u32>,
+    /// A 1x1 depth texture for applying paint when the 3D view is not drawn.
+    pub(crate) dummy_depth: wgpu::Texture,
     preview_layout: wgpu::BindGroupLayout,
     preview_sampler: wgpu::Sampler,
     preview_bind: wgpu::BindGroup,
@@ -112,6 +117,7 @@ impl ViewportGpu {
         });
 
         let paint = PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE);
+        let paint_layout = paint.material_layout.clone();
         let plain_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals_plain"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -275,6 +281,18 @@ impl ViewportGpu {
             active: 0,
             queued: Vec::new(),
             thumbnailer: crate::thumbs::Thumbnailer::new(device),
+            uv: crate::uvview::UvGpu::new(device, target_format, &paint_layout),
+            cpu_indices: Vec::new(),
+            dummy_depth: device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("dummy_depth"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }),
             preview_layout,
             preview_sampler,
             preview_bind,
@@ -312,6 +330,8 @@ impl ViewportGpu {
             usage: wgpu::BufferUsages::INDEX,
         }));
         self.index_count = mesh.indices.len() as u32;
+        self.cpu_indices = mesh.indices.clone();
+        self.uv.generation += 1;
         self.ranges = mesh.set_ranges().iter().map(|s| (s.first_index, s.index_count)).collect();
         // One paint store per texture set. Extra stores are dropped; new ones start at the default size
         // and are given their real size by a `Reset`/`Load` op.
@@ -1001,6 +1021,45 @@ mod tests {
         // Removing it restores the plain result.
         rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: None }]);
         check(&rig, None, "after removing the baked normal");
+    }
+
+    /// 2D stamps land exactly where their UV position says, with the radius in UV units.
+    #[test]
+    fn uv_space_stamps_land_at_their_uv_position() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let stamp = Stamp {
+            brush: [0.25, 0.75, 0.1, 1.0], // u, v (v down), radius, hardness
+            color: [1.0, 0.0, 0.0, 0.0],
+            values: [0.0, 0.0, 1.0, 0.0],
+            enables: [1.0, 0.0, 0.0, 0.0],
+        };
+        rig.run(&doc, &[PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let base = rig.read(&rig.gpu.paint().output.base, 8);
+        let alpha = |u: f32, v: f32| {
+            let (x, y) = ((u * SIZE as f32) as usize, (v * SIZE as f32) as usize);
+            let i = (y * SIZE as usize + x) * 8 + 6;
+            f16_to_f32(u16::from_le_bytes([base[i], base[i + 1]]))
+        };
+        assert!(alpha(0.25, 0.75) > 0.99, "centre is covered");
+        assert!(alpha(0.25 + 0.08, 0.75) > 0.99 && alpha(0.25, 0.75 - 0.08) > 0.99, "inside the radius");
+        assert!(alpha(0.25 + 0.13, 0.75) < 0.01, "outside the radius");
+        assert!(alpha(0.75, 0.25) < 0.01 && alpha(0.25, 0.25) < 0.01 && alpha(0.75, 0.75) < 0.01, "v points down, not mirrored");
+        let covered = base.chunks_exact(8).filter(|t| f16_to_f32(u16::from_le_bytes([t[6], t[7]])) > 0.5).count();
+        let expect = std::f32::consts::PI * (0.1 * SIZE as f32).powi(2);
+        assert!((covered as f32 - expect).abs() < expect * 0.1, "{covered} texels vs {expect}");
+        // Mask stamps work the same way.
+        let mut doc2 = Document::default();
+        let m = doc2.add(None, None, "m", NodeKind::Paint);
+        doc2.find_mut(m).unwrap().mask = Some(Mask::new(false));
+        rig.run(&doc2, &[PaintOp::Reset(SIZE)]);
+        let reveal = Stamp { brush: [0.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4] };
+        rig.run(&doc2, &[PaintOp::Stamps2d { layer: m, target: Target::Mask, stamps: vec![reveal] }]);
+        let mask = rig.read(rig.gpu.paint().store[&m].mask.as_ref().unwrap(), 1);
+        assert_eq!(mask[(SIZE / 2 * SIZE + SIZE / 2) as usize], 255);
+        assert_eq!(mask[0], 0);
     }
 
     /// Paint in two texture sets survives a save and reload, each set keeping its own textures.

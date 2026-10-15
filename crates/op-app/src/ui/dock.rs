@@ -9,6 +9,8 @@ use std::path::Path;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
     Viewport,
+    /// The active texture set laid out in UV space, for painting directly on the texture.
+    Uv2d,
     /// Brush and paint settings ("Properties - Paint").
     Brush,
     /// The materials of the model; each is edited on its own.
@@ -23,12 +25,13 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 9] =
-        [Tab::Viewport, Tab::Brush, Tab::Sets, Tab::Layers, Tab::Properties, Tab::TextureSet, Tab::Bake, Tab::Display, Tab::Shelf];
+    pub const ALL: [Tab; 10] =
+        [Tab::Viewport, Tab::Uv2d, Tab::Brush, Tab::Sets, Tab::Layers, Tab::Properties, Tab::TextureSet, Tab::Bake, Tab::Display, Tab::Shelf];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Viewport => "Viewport",
+            Tab::Uv2d => "UV View",
             Tab::Brush => "Properties - Paint",
             Tab::Sets => "Texture Sets",
             Tab::Layers => "Layers",
@@ -54,6 +57,7 @@ impl Tab {
         use egui_phosphor::regular as ph;
         match self {
             Tab::Viewport => ph::CUBE,
+            Tab::Uv2d => ph::GRID_NINE,
             Tab::Brush => ph::PAINT_BRUSH,
             Tab::Sets => ph::SQUARES_FOUR,
             Tab::Layers => ph::STACK,
@@ -74,7 +78,7 @@ impl Tab {
 /// The arrangement a fresh install starts with: paint properties on the left, the viewport in
 /// the middle with the shelf below it, layers and their properties on the right.
 pub fn default_layout() -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Viewport]);
+    let mut dock = DockState::new(vec![Tab::Viewport, Tab::Uv2d]);
     let tree = dock.main_surface_mut();
     let [center, _left] = tree.split_left(NodeIndex::root(), 0.19, vec![Tab::Brush]);
     let [center, right] = tree.split_right(center, 0.76, vec![Tab::Layers]);

@@ -33,11 +33,11 @@ impl TabViewer for Viewer<'_> {
 
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         // The viewport fills its tab; every other panel scrolls when it outgrows its space.
-        if *tab == Tab::Viewport { [false, false] } else { [false, true] }
+        if matches!(*tab, Tab::Viewport | Tab::Uv2d) { [false, false] } else { [false, true] }
     }
 
     fn clear_background(&self, tab: &Tab) -> bool {
-        *tab != Tab::Viewport
+        !matches!(*tab, Tab::Viewport | Tab::Uv2d)
     }
 }
 
@@ -69,6 +69,7 @@ impl App {
     pub(crate) fn tab_ui(&mut self, ui: &mut egui::Ui, tab: Tab) {
         match tab {
             Tab::Viewport => self.viewport_ui(ui),
+            Tab::Uv2d => self.uv_view_ui(ui),
             Tab::Brush => self.brush_panel(ui),
             Tab::Sets => self.sets_panel(ui),
             Tab::Layers => self.layers_panel(ui),

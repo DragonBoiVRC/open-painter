@@ -8,6 +8,7 @@ mod picker;
 mod procgen;
 mod sets;
 mod thumbs;
+mod uvview;
 mod ui;
 mod viewport;
 
@@ -240,6 +241,10 @@ struct App {
     paint_rev: u64,
     thumb_rev: u64,
     thumb_at: Instant,
+    /// The 2D UV view's camera; `None` until the view is first drawn, then it frames the unit square.
+    uv_cam: Option<uvview::UvCamera>,
+    uv_channel: uvview::Channel,
+    uv_wire: bool,
     /// The set last scrolled into view in the Texture Sets list.
     sets_scrolled: usize,
     confirm: Option<Pending>,
@@ -353,6 +358,9 @@ impl App {
             paint_rev: 1,
             thumb_rev: 0,
             thumb_at: Instant::now() - Duration::from_secs(10),
+            uv_cam: None,
+            uv_channel: uvview::Channel::Base,
+            uv_wire: true,
             sets_scrolled: usize::MAX,
             confirm: None,
             after_save: None,
@@ -1090,10 +1098,14 @@ impl App {
     }
 
     fn make_stamp(&self, px: [f32; 2], ppp: f32, target: Target) -> Stamp {
+        self.make_stamp_raw([px[0], px[1], self.brush.radius_pts * ppp, self.brush.hardness], target)
+    }
+
+    /// A stamp with the current tool and channels at an explicit `brush` (position, radius, hardness).
+    fn make_stamp_raw(&self, brush: [f32; 4], target: Target) -> Stamp {
         let c = &self.channels;
         let erase = self.tool == Tool::Erase;
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
-        let brush = [px[0], px[1], self.brush.radius_pts * ppp, self.brush.hardness];
         match target {
             // Masks: paint white to reveal, erase to black to hide.
             Target::Mask => Stamp {
@@ -1140,6 +1152,34 @@ impl App {
         let mut t = self.stroke.next_in;
         while t <= dist && out.len() < MAX_STAMPS {
             out.push(self.make_stamp([from[0] + dir[0] * t, from[1] + dir[1] * t], ppp, target));
+            t += spacing;
+        }
+        self.stroke.next_in = t - dist;
+        self.stroke.last_px = to;
+    }
+
+    /// Like [`App::stroke_to`] in UV space: `to` is a UV position and `radius` is in UV units.
+    fn stroke_to_uv(&mut self, to: [f32; 2], radius: f32, layer: NodeId, target: Target, out: &mut Vec<Stamp>) {
+        let spacing = (radius * self.brush.spacing).max(1e-5);
+        let hardness = self.brush.hardness;
+        let at = move |p: [f32; 2]| [p[0], p[1], radius, hardness];
+        if !self.stroke.active {
+            self.stroke = Stroke { active: true, last_px: to, next_in: spacing };
+            self.pending.push(PaintOp::BeginStroke { layer, target });
+            self.push_hist(Hist::Stroke);
+            out.push(self.make_stamp_raw(at(to), target));
+            return;
+        }
+        let from = self.stroke.last_px;
+        let delta = [to[0] - from[0], to[1] - from[1]];
+        let dist = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
+        if dist <= f32::EPSILON {
+            return;
+        }
+        let dir = [delta[0] / dist, delta[1] / dist];
+        let mut t = self.stroke.next_in;
+        while t <= dist && out.len() < MAX_STAMPS {
+            out.push(self.make_stamp_raw(at([from[0] + dir[0] * t, from[1] + dir[1] * t]), target));
             t += spacing;
         }
         self.stroke.next_in = t - dist;
