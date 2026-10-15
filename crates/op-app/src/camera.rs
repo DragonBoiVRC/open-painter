@@ -24,6 +24,14 @@ impl OrbitCamera {
         self.target + self.distance * Vec3::new(cy * cp, sp, sy * cp)
     }
 
+    /// The camera's orthonormal axes in world space: (right, up, forward).
+    pub fn basis(&self) -> (Vec3, Vec3, Vec3) {
+        let forward = (self.target - self.position()).normalize_or_zero();
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        let up = right.cross(forward);
+        (right, up, forward)
+    }
+
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * 0.01;
         self.pitch = (self.pitch + dy * 0.01).clamp(-1.5, 1.5);
@@ -79,5 +87,22 @@ mod tests {
     fn position_is_at_orbit_distance() {
         let c = OrbitCamera { distance: 7.0, ..Default::default() };
         assert!((c.position() - c.target).length() - 7.0 < 1e-4);
+    }
+
+    #[test]
+    fn basis_is_orthonormal_and_points_along_the_view() {
+        for (yaw, pitch) in [(0.0, 0.0), (0.6, 0.35), (2.5, -1.0), (-1.2, 1.4)] {
+            let c = OrbitCamera { yaw, pitch, ..Default::default() };
+            let (r, u, f) = c.basis();
+            for v in [r, u, f] {
+                assert!((v.length() - 1.0).abs() < 1e-5, "unit length at {yaw},{pitch}");
+            }
+            assert!(r.dot(u).abs() < 1e-5 && r.dot(f).abs() < 1e-5 && u.dot(f).abs() < 1e-5);
+            assert!((f - (c.target - c.position()).normalize()).length() < 1e-5);
+            assert!(u.dot(Vec3::Y) > 0.0, "up stays on the upper side of the horizon");
+        }
+        // At yaw 0 the camera sits on +X looking back at the origin.
+        let (_, _, f) = OrbitCamera { yaw: 0.0, pitch: 0.0, ..Default::default() }.basis();
+        assert!((f + Vec3::X).length() < 1e-5);
     }
 }

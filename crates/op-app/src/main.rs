@@ -4,16 +4,17 @@ mod files;
 mod gpu_io;
 mod paint;
 mod procgen;
+mod ui;
 mod viewport;
 
 use camera::OrbitCamera;
+use egui_dock::DockState;
+use ui::dock::{self, Tab};
 use eframe::{egui, egui_wgpu};
-use glam::Vec3;
 use op_bake::{BakeSettings, Progress as BakeProgress};
 use op_core::smart::{builtin_smart_materials, SmartMaterial};
 use op_core::{
-    srgb_to_linear, BakedMap, BlendMode, Document, FillParams, Generator, GeneratorKind, Mask, MeshMap, Node, NodeId,
-    NodeKind, FALLBACK_BASE, FALLBACK_METALLIC, FALLBACK_ROUGHNESS,
+    srgb_to_linear, BakedMap, Document, Generator, GeneratorKind, Mask, MeshMap, NodeId, NodeKind,
 };
 use op_export::{ExportContext, ExportOutcome, ExportPreset, TextureSetData};
 use op_mesh::Mesh;
@@ -25,7 +26,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use viewport::{Globals, ViewportCallback, ViewportGpu};
+use viewport::ViewportGpu;
 
 const TEXTURE_SIZES: [u32; 4] = [512, 1024, 2048, 4096];
 const MAX_HISTORY: usize = 300;
@@ -165,7 +166,6 @@ struct BakeJob {
 }
 
 struct BakeUi {
-    open: bool,
     maps: Vec<MeshMap>,
     samples: u32,
     ao_distance_pct: f32,
@@ -225,6 +225,12 @@ struct App {
     /// Problems found while loading the user's smart materials and generator files.
     definition_warnings: Vec<String>,
     smart_ui: SmartUi,
+    /// Panel arrangement; `None` only while a frame is being drawn.
+    dock: Option<DockState<Tab>>,
+    /// The layout as last written to disk, to avoid rewriting an unchanged file.
+    layout_json: String,
+    layout_check: Instant,
+    show_shortcuts: bool,
 }
 
 fn is_project(p: &Path) -> bool {
@@ -245,6 +251,10 @@ impl App {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|s| *s > 0)
             .unwrap_or(DEFAULT_AUTOSAVE_SECS);
+
+        ui::theme::install_fonts(&cc.egui_ctx);
+        ui::theme::apply(&cc.egui_ctx);
+        let dock_state = dock::load(&files::layout_path()).unwrap_or_else(dock::default_layout);
 
         let (user_smart, mut definition_warnings) = files::load_smart_materials(&files::smart_materials_dir());
         let (custom_generators, generator_warnings) = files::load_custom_generators(&files::generators_dir());
@@ -311,7 +321,6 @@ impl App {
             },
             baked: Arc::new(HashMap::new()),
             bake: BakeUi {
-                open: false,
                 maps: MeshMap::ALL.to_vec(),
                 samples: 32,
                 ao_distance_pct: 10.0,
@@ -332,6 +341,10 @@ impl App {
             smart_materials,
             definition_warnings,
             smart_ui: SmartUi::default(),
+            dock: Some(dock_state),
+            layout_json: String::new(),
+            layout_check: Instant::now(),
+            show_shortcuts: false,
         };
         app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
         app.pending.push(PaintOp::Reset(app.tex_size));
@@ -784,6 +797,7 @@ impl App {
                 Err(mpsc::TryRecvError::Disconnected) => self.export.running = None,
             }
         }
+        self.save_layout_if_changed();
         // Keep the autosave timer ticking even when the user is idle.
         if self.modified {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -797,6 +811,22 @@ impl App {
         if ctx.input(|i| i.viewport().close_requested()) && self.modified && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(Pending::Quit);
+        }
+    }
+
+    /// Remember the panel arrangement between sessions (checked every couple of seconds).
+    fn save_layout_if_changed(&mut self) {
+        if self.layout_check.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.layout_check = Instant::now();
+        let Some(json) = self.dock.as_ref().and_then(dock::to_json) else { return };
+        if json != self.layout_json {
+            let path = files::layout_path();
+            let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, &json));
+            if written.is_ok() {
+                self.layout_json = json;
+            }
         }
     }
 
@@ -987,274 +1017,6 @@ impl App {
         self.record(before);
     }
 
-    fn layer_rows(ui: &mut egui::Ui, nodes: &[Node], depth: usize, selected: Option<NodeId>, acts: &mut Vec<Act>) {
-        for n in nodes.iter().rev() {
-            ui.horizontal(|ui| {
-                ui.add_space(depth as f32 * 14.0);
-                let mut vis = n.visible;
-                if ui.checkbox(&mut vis, "").changed() {
-                    acts.push(Act::Visible(n.id, vis));
-                }
-                let tag = match n.kind {
-                    NodeKind::Paint => "[P]",
-                    NodeKind::Fill(_) => "[F]",
-                    NodeKind::Group { .. } => "[G]",
-                };
-                let mask = if n.mask.is_some() { " (mask)" } else { "" };
-                if ui.selectable_label(selected == Some(n.id), format!("{tag} {}{mask}", n.name)).clicked() {
-                    acts.push(Act::Select(n.id));
-                }
-            });
-            if let NodeKind::Group { children } = &n.kind {
-                Self::layer_rows(ui, children, depth + 1, selected, acts);
-            }
-        }
-    }
-
-    fn layer_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Layers");
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("+ Paint").clicked() {
-                self.add_node("Paint layer", NodeKind::Paint);
-            }
-            if ui.button("+ Fill").clicked() {
-                self.add_node(
-                    "Fill layer",
-                    NodeKind::Fill(FillParams { base: Some([0.5, 0.5, 0.5]), metallic: None, roughness: None }),
-                );
-            }
-            if ui.button("+ Group").clicked() {
-                self.add_node("Group", NodeKind::Group { children: Vec::new() });
-            }
-        });
-
-        let mut acts = Vec::new();
-        egui::ScrollArea::vertical().id_salt("layer_list").max_height(260.0).show(ui, |ui| {
-            Self::layer_rows(ui, &self.doc.nodes, 0, self.selected, &mut acts);
-        });
-        for a in acts {
-            match a {
-                Act::Select(id) => self.selected = Some(id),
-                Act::Visible(id, v) => self.edit(|d| {
-                    if let Some(n) = d.find_mut(id) {
-                        n.visible = v;
-                    }
-                }),
-            }
-        }
-
-        let Some(id) = self.selected.filter(|id| self.doc.find(*id).is_some()) else {
-            ui.label("No layer selected.");
-            return;
-        };
-
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Up").clicked() {
-                self.edit(|d| {
-                    d.move_up(id);
-                });
-            }
-            if ui.button("Down").clicked() {
-                self.edit(|d| {
-                    d.move_down(id);
-                });
-            }
-            if ui.button("Into group above").clicked() {
-                self.edit(|d| {
-                    d.indent(id);
-                });
-            }
-            if ui.button("Out of group").clicked() {
-                self.edit(|d| {
-                    d.outdent(id);
-                });
-            }
-            if ui.button("Delete").clicked() {
-                self.edit(|d| {
-                    d.remove(id);
-                });
-                self.fix_selection();
-            }
-        });
-
-        ui.separator();
-        // Property widgets edit the document in place; the gesture is committed to
-        // history once the pointer is released so a slider drag is a single undo step.
-        let snapshot = self.doc.clone();
-        let mut changed = false;
-        let mut mask_action = None;
-        let mut gen_action: Option<GenAction> = None;
-        if let Some(node) = self.doc.find_mut(id) {
-            changed |= ui.text_edit_singleline(&mut node.name).changed();
-            egui::ComboBox::from_id_salt("blend").selected_text(node.blend.name()).show_ui(ui, |ui| {
-                for m in BlendMode::ALL {
-                    changed |= ui.selectable_value(&mut node.blend, m, m.name()).changed();
-                }
-            });
-            changed |= ui.add(egui::Slider::new(&mut node.opacity, 0.0..=1.0).text("Opacity")).changed();
-
-            if let NodeKind::Fill(f) = &mut node.kind {
-                let mut on = f.base.is_some();
-                if ui.checkbox(&mut on, "Base color").changed() {
-                    f.base = on.then(|| f.base.unwrap_or([0.8, 0.8, 0.8]));
-                    changed = true;
-                }
-                if let Some(c) = &mut f.base {
-                    changed |= ui.color_edit_button_rgb(c).changed();
-                }
-                let mut on = f.metallic.is_some();
-                if ui.checkbox(&mut on, "Metallic").changed() {
-                    f.metallic = on.then(|| f.metallic.unwrap_or(0.0));
-                    changed = true;
-                }
-                if let Some(v) = &mut f.metallic {
-                    changed |= ui.add(egui::Slider::new(v, 0.0..=1.0)).changed();
-                }
-                let mut on = f.roughness.is_some();
-                if ui.checkbox(&mut on, "Roughness").changed() {
-                    f.roughness = on.then(|| f.roughness.unwrap_or(0.5));
-                    changed = true;
-                }
-                if let Some(v) = &mut f.roughness {
-                    changed |= ui.add(egui::Slider::new(v, 0.0..=1.0)).changed();
-                }
-            }
-
-            ui.separator();
-            match &mut node.mask {
-                None => {
-                    ui.horizontal(|ui| {
-                        if ui.button("Add mask (reveal all)").clicked() {
-                            mask_action = Some(Some(true));
-                        }
-                        if ui.button("Add mask (hide all)").clicked() {
-                            mask_action = Some(Some(false));
-                        }
-                    });
-                    egui::ComboBox::from_id_salt("gen_new").selected_text("Add generated mask...").show_ui(ui, |ui| {
-                        for k in builtin_kinds() {
-                            if ui.selectable_label(false, op_proc::label(&k)).clicked() {
-                                gen_action = Some(GenAction::NewMask(Generator::new(k)));
-                            }
-                        }
-                        for c in &self.custom_generators {
-                            if ui.selectable_label(false, op_proc::label(&c.kind)).clicked() {
-                                gen_action = Some(GenAction::NewMask(c.clone()));
-                            }
-                        }
-                    });
-                }
-                Some(m) => {
-                    ui.horizontal(|ui| {
-                        changed |= ui.checkbox(&mut m.enabled, "Mask enabled").changed();
-                        if ui.button("Delete mask").clicked() {
-                            mask_action = Some(None);
-                        }
-                    });
-                    match &mut m.generator {
-                        Some(gen) => {
-                            ui.label("Generated from the baked maps:");
-                            egui::ComboBox::from_id_salt("gen_kind").selected_text(op_proc::label(&gen.kind)).show_ui(ui, |ui| {
-                                for k in builtin_kinds() {
-                                    if ui.selectable_label(gen.kind == k, op_proc::label(&k)).clicked() && gen.kind != k {
-                                        gen.kind = k;
-                                        gen.params.clear();
-                                        changed = true;
-                                    }
-                                }
-                                for c in &self.custom_generators {
-                                    if ui.selectable_label(gen.kind == c.kind, op_proc::label(&c.kind)).clicked() && gen.kind != c.kind {
-                                        gen.kind = c.kind.clone();
-                                        gen.params.clear();
-                                        changed = true;
-                                    }
-                                }
-                            });
-                            for spec in op_proc::param_specs(&gen.kind) {
-                                let mut v = op_proc::value(gen, spec.key);
-                                let mut slider = egui::Slider::new(&mut v, spec.min..=spec.max).text(spec.label);
-                                if spec.integer {
-                                    slider = slider.step_by(1.0);
-                                }
-                                if ui.add(slider).changed() {
-                                    gen.params.insert(spec.key.to_string(), v);
-                                    changed = true;
-                                }
-                            }
-                            changed |= ui.checkbox(&mut gen.invert, "Invert").changed();
-                            let missing: Vec<&str> = op_proc::required_maps(&gen.kind)
-                                .into_iter()
-                                .filter(|m| !self.baked.contains_key(m))
-                                .map(|m| m.label())
-                                .collect();
-                            if !missing.is_empty() {
-                                ui.colored_label(
-                                    egui::Color32::YELLOW,
-                                    format!("Not baked yet: {}. Use Bake... to create them.", missing.join(", ")),
-                                );
-                            }
-                            if self.proc.is_busy(id) {
-                                ui.label("Generating...");
-                            }
-                            if let Some(info) = self.proc_info.get(&id) {
-                                for w in &info.warnings {
-                                    ui.small(w);
-                                }
-                                if let Some(e) = &info.error {
-                                    ui.colored_label(egui::Color32::LIGHT_RED, format!("Generation failed: {e}"));
-                                }
-                            }
-                            if ui.button("Freeze (make paintable)").clicked() {
-                                gen_action = Some(GenAction::Freeze);
-                            }
-                        }
-                        None => {
-                            egui::ComboBox::from_id_salt("gen_replace").selected_text("Replace with generated...").show_ui(ui, |ui| {
-                                for k in builtin_kinds() {
-                                    if ui.selectable_label(false, op_proc::label(&k)).clicked() {
-                                        gen_action = Some(GenAction::Replace(Generator::new(k)));
-                                    }
-                                }
-                                for c in &self.custom_generators {
-                                    if ui.selectable_label(false, op_proc::label(&c.kind)).clicked() {
-                                        gen_action = Some(GenAction::Replace(c.clone()));
-                                    }
-                                }
-                            });
-                            ui.small("Replacing is undoable: Ctrl+Z restores the painted mask.");
-                        }
-                    }
-                }
-            }
-        }
-        if changed && self.gesture_before.is_none() {
-            self.gesture_before = Some(snapshot.clone());
-        }
-        if let Some(action) = gen_action {
-            self.apply_gen_action(id, action);
-        }
-        if let Some(action) = mask_action {
-            self.edit(|d| {
-                if let Some(n) = d.find_mut(id) {
-                    n.mask = action.map(Mask::new);
-                }
-            });
-            if action.is_none() && self.target == Target::Mask {
-                self.target = Target::Content;
-            }
-        }
-
-        ui.separator();
-        ui.label("Paint on:");
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut self.target, Target::Content, "Layer content");
-            ui.radio_value(&mut self.target, Target::Mask, "Mask");
-        });
-        if let Err(msg) = self.paint_target() {
-            ui.small(msg);
-        }
-    }
-
     fn apply_gen_action(&mut self, id: NodeId, action: GenAction) {
         let set = |d: &mut Document, g: Option<Generator>, keep_mask: bool| {
             if let Some(n) = d.find_mut(id) {
@@ -1411,66 +1173,6 @@ impl App {
 
     // ---- file bar and dialogs -----------------------------------------------------------
 
-    fn file_bar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        ui.horizontal(|ui| {
-            if ui.button("New").clicked() {
-                self.request(Pending::New, &ctx);
-            }
-            if ui.button("Open...").clicked() {
-                let start = self.project_path.clone().map(|p| p.display().to_string()).unwrap_or_default();
-                self.dialog = Some(PathDialog { save: false, path: start });
-            }
-            if ui.button("Save").clicked() {
-                match self.project_path.clone() {
-                    Some(p) => {
-                        self.todo.push(Todo::Save(p));
-                        ctx.request_repaint();
-                    }
-                    None => self.dialog = Some(PathDialog { save: true, path: self.default_save_path() }),
-                }
-            }
-            if ui.button("Save as...").clicked() {
-                self.dialog = Some(PathDialog { save: true, path: self.default_save_path() });
-            }
-            let recoverable = self.recover_path().exists();
-            if ui.add_enabled(recoverable, egui::Button::new("Recover autosave")).clicked() {
-                self.recover();
-            }
-            ui.separator();
-            if ui.button("Bake...").clicked() {
-                self.bake.open = true;
-            }
-            let mut view = self.view;
-            let label = |v: View| match v {
-                View::Shaded => "Shaded".to_string(),
-                View::ShadedAo => "Shaded + baked AO".to_string(),
-                View::Map(m) => m.label().to_string(),
-            };
-            egui::ComboBox::from_id_salt("viewmode").selected_text(format!("View: {}", label(self.view))).show_ui(ui, |ui| {
-                ui.selectable_value(&mut view, View::Shaded, "Shaded");
-                if self.baked.contains_key(&MeshMap::AmbientOcclusion) {
-                    ui.selectable_value(&mut view, View::ShadedAo, "Shaded + baked AO");
-                }
-                for m in MeshMap::ALL {
-                    if self.baked.contains_key(&m) {
-                        ui.selectable_value(&mut view, View::Map(m), m.label());
-                    }
-                }
-            });
-            if view != self.view {
-                self.set_view(view);
-            }
-            ui.separator();
-            if ui.button("Export...").clicked() {
-                if self.export.dir.is_empty() {
-                    self.export.dir = self.default_export_dir().display().to_string();
-                }
-                self.export.open = true;
-            }
-        });
-    }
-
     fn default_save_path(&self) -> String {
         match &self.project_path {
             Some(p) => p.display().to_string(),
@@ -1490,6 +1192,29 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_shortcuts {
+            let mut open = true;
+            egui::Window::new("Keyboard shortcuts").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                egui::Grid::new("shortcut_grid").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                    for (keys, what) in [
+                        ("Ctrl+N / Ctrl+O / Ctrl+S", "new / open / save"),
+                        ("Ctrl+Z / Ctrl+Y", "undo / redo"),
+                        ("P / E", "paint / erase"),
+                        ("[  ]", "smaller / larger brush"),
+                        ("F", "frame the model"),
+                        ("Alt + left drag", "orbit"),
+                        ("Middle drag", "pan"),
+                        ("Alt + right drag, scroll", "zoom"),
+                        ("Ctrl + right drag", "brush size and hardness"),
+                    ] {
+                        ui.label(egui::RichText::new(keys).strong());
+                        ui.label(what);
+                        ui.end_row();
+                    }
+                });
+            });
+            self.show_shortcuts = open;
+        }
         if let Some(mut d) = self.dialog.take() {
             let mut keep = true;
             let mut accepted = false;
@@ -1558,72 +1283,6 @@ impl App {
             });
         }
 
-        if self.bake.open {
-            let mut open = true;
-            egui::Window::new("Bake mesh maps").open(&mut open).collapsible(false).show(ctx, |ui| {
-                let busy = self.bake.job.is_some();
-                ui.label(format!("Resolution: {}x{} (the texture set resolution)", self.tex_size, self.tex_size));
-                ui.separator();
-                ui.label("Maps:");
-                ui.horizontal_wrapped(|ui| {
-                    for m in MeshMap::ALL {
-                        let mut on = self.bake.maps.contains(&m);
-                        if ui.add_enabled(!busy, egui::Checkbox::new(&mut on, m.label())).changed() {
-                            if on {
-                                self.bake.maps.push(m);
-                            } else {
-                                self.bake.maps.retain(|x| *x != m);
-                            }
-                        }
-                    }
-                });
-                ui.add_enabled_ui(!busy, |ui| {
-                    ui.add(egui::Slider::new(&mut self.bake.samples, 4..=256).logarithmic(true).text("Rays per texel"));
-                    ui.add(egui::Slider::new(&mut self.bake.ao_distance_pct, 1.0..=100.0).text("AO distance (% of size)"));
-                    ui.add(egui::Slider::new(&mut self.bake.thickness_pct, 1.0..=100.0).text("Thickness distance (% of size)"));
-                    ui.add(egui::Slider::new(&mut self.bake.curvature_strength, 0.1..=8.0).logarithmic(true).text("Curvature strength"));
-                    ui.separator();
-                    ui.label("High-poly source (optional): normals, height and opacity are projected from it.");
-                    ui.add(egui::TextEdit::singleline(&mut self.bake.high_path).desired_width(420.0));
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.bake.high_path.trim().is_empty(), egui::Button::new("Load high-poly")).clicked() {
-                            self.load_high_poly();
-                        }
-                        if self.bake.high.is_some() && ui.button("Remove").clicked() {
-                            self.bake.high = None;
-                        }
-                    });
-                    match &self.bake.high {
-                        Some((m, name)) => ui.label(format!("Using {name} ({} triangles)", m.indices.len() / 3)),
-                        None => ui.label("None: maps come from the low-poly mesh itself."),
-                    };
-                    ui.add(egui::Slider::new(&mut self.bake.cage_front_pct, 0.5..=50.0).text("Search in front (% of size)"));
-                    ui.add(egui::Slider::new(&mut self.bake.cage_rear_pct, 0.5..=50.0).text("Search behind (% of size)"));
-                });
-                ui.separator();
-                match &self.bake.job {
-                    Some(job) => {
-                        ui.add(egui::ProgressBar::new(job.progress.fraction()).show_percentage());
-                        ui.label(format!("{:.0} s elapsed", job.started.elapsed().as_secs_f32()));
-                        if ui.button("Cancel").clicked() {
-                            job.progress.cancel();
-                        }
-                    }
-                    None => {
-                        if ui.add_enabled(!self.bake.maps.is_empty(), egui::Button::new("Bake")).clicked() {
-                            self.start_bake();
-                        }
-                    }
-                }
-                if !self.baked.is_empty() {
-                    let mut names: Vec<_> = self.baked.keys().map(|m| m.label()).collect();
-                    names.sort_unstable();
-                    ui.small(format!("Baked: {}", names.join(", ")));
-                }
-            });
-            self.bake.open = open;
-        }
-
         if self.export.open {
             let mut open = true;
             egui::Window::new("Export textures").open(&mut open).collapsible(false).show(ctx, |ui| {
@@ -1685,24 +1344,17 @@ fn srgb_for_display(c: [f32; 3]) -> [f32; 4] {
     [c[0], c[1], c[2], 1.0]
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.housekeeping(&ctx);
-
-        let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| Some(f.path().to_path_buf())));
-        if let Some(p) = dropped {
-            let action = if is_project(&p) { Pending::Open(p) } else { Pending::Mesh(p) };
-            self.request(action, &ctx);
-        }
-
-        // Shortcuts: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, Ctrl+S save, [ ] brush size.
-        let (undo, redo, save, smaller, larger) = ui.input_mut(|i| {
-            let redo = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
-                || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
-            let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
-            (undo, redo, save, i.key_pressed(egui::Key::OpenBracket), i.key_pressed(egui::Key::CloseBracket))
+impl App {
+    fn handle_shortcuts(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        use egui::{Key, Modifiers};
+        let (undo, redo, save, new, open, quit) = ui.input_mut(|i| {
+            let redo = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y);
+            let undo = i.consume_key(Modifiers::COMMAND, Key::Z);
+            let save = i.consume_key(Modifiers::COMMAND, Key::S);
+            let new = i.consume_key(Modifiers::COMMAND, Key::N);
+            let open = i.consume_key(Modifiers::COMMAND, Key::O);
+            let quit = i.consume_key(Modifiers::COMMAND, Key::Q);
+            (undo, redo, save, new, open, quit)
         });
         if undo {
             self.do_undo();
@@ -1716,160 +1368,61 @@ impl eframe::App for App {
                 None => self.dialog = Some(PathDialog { save: true, path: self.default_save_path() }),
             }
         }
+        if new {
+            self.request(Pending::New, ctx);
+        }
+        if open {
+            let start = self.project_path.clone().map(|p| p.display().to_string()).unwrap_or_default();
+            self.dialog = Some(PathDialog { save: false, path: start });
+        }
+        if quit {
+            self.request(Pending::Quit, ctx);
+        }
+
+        // Single-key shortcuts must not fire while a text field has focus.
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (smaller, larger, paint, erase, frame) = ui.input(|i| {
+            (
+                i.key_pressed(Key::OpenBracket),
+                i.key_pressed(Key::CloseBracket),
+                i.key_pressed(Key::P),
+                i.key_pressed(Key::E),
+                i.key_pressed(Key::F) && !i.modifiers.any(),
+            )
+        });
         if smaller {
             self.brush.radius_pts = (self.brush.radius_pts * 0.85).max(2.0);
         }
         if larger {
             self.brush.radius_pts = (self.brush.radius_pts / 0.85).min(300.0);
         }
+        if paint {
+            self.tool = Tool::Paint;
+        }
+        if erase {
+            self.tool = Tool::Erase;
+        }
+        if frame {
+            self.frame_model();
+        }
+    }
+}
 
-        egui::Panel::top("file_bar").show(ui, |ui| self.file_bar(ui));
-        egui::Panel::left("properties").default_size(250.0).show(ui, |ui| {
-            ui.heading("Texture set");
-            ui.horizontal(|ui| {
-                ui.label("Resolution");
-                let before = self.tex_size;
-                egui::ComboBox::from_id_salt("tex_size")
-                    .selected_text(format!("{0}x{0}", self.tex_size))
-                    .show_ui(ui, |ui| {
-                        for s in TEXTURE_SIZES {
-                            ui.selectable_value(&mut self.tex_size, s, format!("{s}x{s}"));
-                        }
-                    });
-                if self.tex_size != before {
-                    // Changing resolution discards all paint and history.
-                    self.undo.clear();
-                    self.redo.clear();
-                    self.pending.push(PaintOp::Reset(self.tex_size));
-                    // Baked maps are tied to the resolution they were baked at.
-                    self.clear_baked();
-                    self.proc.invalidate();
-                    self.modified = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo")).clicked() {
-                    self.do_undo();
-                }
-                if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo")).clicked() {
-                    self.do_redo();
-                }
-                if ui.button("Clear target").clicked() {
-                    self.clear_target();
-                }
-            });
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.housekeeping(&ctx);
 
-            ui.separator();
-            ui.heading("Brush");
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut self.tool, Tool::Paint, "Paint");
-                ui.radio_value(&mut self.tool, Tool::Erase, "Erase");
-            });
-            ui.add(egui::Slider::new(&mut self.brush.radius_pts, 2.0..=300.0).text("Size"));
-            ui.add(egui::Slider::new(&mut self.brush.hardness, 0.0..=1.0).text("Hardness"));
-            ui.add(egui::Slider::new(&mut self.brush.opacity, 0.0..=1.0).text("Opacity"));
-            ui.add(egui::Slider::new(&mut self.brush.spacing, 0.02..=1.0).text("Spacing"));
+        let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| Some(f.path().to_path_buf())));
+        if let Some(p) = dropped {
+            let action = if is_project(&p) { Pending::Open(p) } else { Pending::Mesh(p) };
+            self.request(action, &ctx);
+        }
 
-            ui.separator();
-            ui.heading("Paint channels");
-            ui.small("Used when painting layer content. Masks paint white (reveal) / erase black (hide).");
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.channels.base, "Base color");
-                ui.color_edit_button_rgb(&mut self.channels.base_color);
-            });
-            ui.checkbox(&mut self.channels.metal, "Metallic");
-            ui.add_enabled(self.channels.metal, egui::Slider::new(&mut self.channels.metallic, 0.0..=1.0));
-            ui.checkbox(&mut self.channels.rough, "Roughness");
-            ui.add_enabled(self.channels.rough, egui::Slider::new(&mut self.channels.roughness, 0.0..=1.0));
-
-            ui.separator();
-            ui.small("Paint: left drag\nOrbit: Alt+left / middle drag\nPan: right drag\nZoom: scroll\nBrush size: [ ]\nUndo/Redo: Ctrl+Z / Ctrl+Y\nSave: Ctrl+S");
-        });
-        egui::Panel::right("layers").default_size(300.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("right_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                self.layer_panel(ui);
-                ui.separator();
-                self.smart_panel(ui);
-            });
-        });
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.label(&self.status);
-        });
-        self.commit_gesture(ui);
-        self.dialogs(&ctx);
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-            let ppp = ui.pixels_per_point();
-            let (alt, primary_down) = ui.input(|i| (i.modifiers.alt, i.pointer.primary_down()));
-            let d = resp.drag_delta();
-
-            if (resp.dragged_by(egui::PointerButton::Primary) && alt) || resp.dragged_by(egui::PointerButton::Middle) {
-                self.camera.orbit(d.x, d.y);
-            }
-            if resp.dragged_by(egui::PointerButton::Secondary) {
-                self.camera.pan(d.x, d.y, rect.height());
-            }
-            if resp.hovered() {
-                self.camera.zoom(ui.input(|i| i.smooth_scroll_delta.y));
-            }
-
-            let mut stamps = Vec::new();
-            let mut stamp_target = None;
-            // A modal dialog must not paint through to the viewport underneath.
-            let modal_open = self.dialog.is_some() || self.confirm.is_some();
-            let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !modal_open;
-            match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
-                (true, Some(pos)) => match self.paint_target() {
-                    Ok((layer, target)) => {
-                        let local = [(pos.x - rect.min.x) * ppp, (pos.y - rect.min.y) * ppp];
-                        self.stroke_to(local, ppp, layer, target, &mut stamps);
-                        stamp_target = Some((layer, target));
-                        ui.ctx().request_repaint();
-                    }
-                    Err(msg) => {
-                        self.status = msg.to_string();
-                        self.stroke.active = false;
-                    }
-                },
-                _ => self.stroke.active = false,
-            }
-
-            let mut ops = std::mem::take(&mut self.pending);
-            if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
-                ops.push(PaintOp::Stamps { layer, target, stamps });
-            }
-
-            let size_px = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
-            let cam = self.camera.position();
-            let light = Vec3::new(0.5, 0.8, 0.6).normalize();
-            let (near, far) = self.camera.near_far();
-            let globals = Globals {
-                view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).to_cols_array_2d(),
-                camera_pos: [cam.x, cam.y, cam.z, 1.0],
-                light_dir: [
-                    light.x,
-                    light.y,
-                    light.z,
-                    match self.view {
-                        View::Shaded => 0.0,
-                        View::Map(_) => 1.0,
-                        View::ShadedAo => 2.0,
-                    },
-                ],
-                // Shown only where the layer stack leaves a pixel uncovered.
-                base_color: srgb_for_display(FALLBACK_BASE),
-                params: [FALLBACK_METALLIC, FALLBACK_ROUGHNESS, near, far],
-            };
-            ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-                rect,
-                ViewportCallback { globals, size_px, doc: self.doc.clone(), ops },
-            ));
-
-            if let (true, Some(pos)) = (!alt && !modal_open, resp.hover_pos()) {
-                ui.painter().circle_stroke(pos, self.brush.radius_pts, egui::Stroke::new(1.0, egui::Color32::WHITE));
-            }
-        });
+        self.handle_shortcuts(ui, &ctx);
+        self.ui_frame(ui);
     }
 }
 

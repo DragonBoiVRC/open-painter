@@ -18,6 +18,10 @@ pub fn data_dir() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("open-painter")
 }
 
+pub fn layout_path() -> PathBuf {
+    data_dir().join("layout.json")
+}
+
 pub fn presets_dir() -> PathBuf {
     data_dir().join("presets")
 }
