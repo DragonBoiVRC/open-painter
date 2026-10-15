@@ -75,16 +75,18 @@ impl Tab {
     }
 }
 
-/// The arrangement a fresh install starts with: paint properties on the left, the viewport in
-/// the middle with the shelf below it, layers and their properties on the right.
+/// The arrangement a fresh install starts with: paint properties on the left, the 3D and UV views
+/// in the middle with the shelf below them, layers and their properties on the right.
 pub fn default_layout() -> DockState<Tab> {
-    let mut dock = DockState::new(vec![Tab::Viewport, Tab::Uv2d]);
+    let mut dock = DockState::new(vec![Tab::Viewport]);
     let tree = dock.main_surface_mut();
     let [center, _left] = tree.split_left(NodeIndex::root(), 0.19, vec![Tab::Brush]);
     let [center, right] = tree.split_right(center, 0.76, vec![Tab::Layers]);
     let [right, _sets] = tree.split_above(right, 0.2, vec![Tab::Sets]);
     tree.split_below(right, 0.5, vec![Tab::Properties, Tab::TextureSet, Tab::Bake, Tab::Display]);
-    tree.split_below(center, 0.74, vec![Tab::Shelf]);
+    let [top, _shelf] = tree.split_below(center, 0.74, vec![Tab::Shelf]);
+    // The 3D view and the 2D UV view side by side.
+    tree.split_right(top, 0.5, vec![Tab::Uv2d]);
     dock
 }
 
