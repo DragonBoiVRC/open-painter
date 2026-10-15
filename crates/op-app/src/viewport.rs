@@ -631,7 +631,7 @@ mod tests {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
         let mut doc = Document::default();
         let layer = doc.add(None, None, "metal", fill(None, Some(1.0), None));
-        doc.find_mut(layer).unwrap().mask = Some(Mask { enabled: true, init_white: false });
+        doc.find_mut(layer).unwrap().mask = Some(Mask::new(false));
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
         assert!(rig.metal().iter().all(|&b| b == 0), "black mask should hide the layer entirely");
 
@@ -692,7 +692,7 @@ mod tests {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
         let mut doc = Document::with_default_material();
         let paint = doc.add(None, None, "paint", NodeKind::Paint);
-        doc.find_mut(paint).unwrap().mask = Some(Mask { enabled: true, init_white: false });
+        doc.find_mut(paint).unwrap().mask = Some(Mask::new(false));
         doc.find_mut(paint).unwrap().blend = BlendMode::Multiply;
         doc.find_mut(paint).unwrap().opacity = 0.8;
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
@@ -807,5 +807,31 @@ mod tests {
         rig.globals.light_dir[3] = 0.0;
         rig.run(&doc, &[]);
         assert_eq!(center_pixel(&rig), shaded);
+    }
+
+    /// A generated mask uploaded with `SetMask` gates its layer like a painted one.
+    #[test]
+    fn generated_mask_content_is_uploaded_and_composited() {
+        use op_core::{Generator, GeneratorKind};
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "metal", fill(None, Some(1.0), None));
+        doc.find_mut(layer).unwrap().mask = Some(Mask::generated(Generator::new(GeneratorKind::Noise)));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+
+        // Left half white, right half black.
+        let n = SIZE as usize;
+        let bytes: Vec<u8> = (0..n * n).map(|i| if i % n < n / 2 { 255 } else { 0 }).collect();
+        rig.run(&doc, &[PaintOp::SetMask { layer, size: SIZE, bytes: bytes.clone() }]);
+        let metal = rig.metal();
+        let probe = |x: usize, y: usize| metal[(y * n + x) * 2 + 1];
+        assert_eq!(probe(10, 40), 255, "left half is revealed");
+        assert_eq!(probe(n - 10, 40), 0, "right half stays hidden");
+
+        // A result for another resolution, or with the wrong byte count, is ignored.
+        rig.run(&doc, &[PaintOp::SetMask { layer, size: SIZE / 2, bytes: vec![0; (n / 2) * (n / 2)] }]);
+        rig.run(&doc, &[PaintOp::SetMask { layer, size: SIZE, bytes: vec![0; 5] }]);
+        rig.run(&doc, &[PaintOp::SetMask { layer: 12345, size: SIZE, bytes }]); // no such layer
+        assert_eq!(rig.metal(), metal, "mismatched uploads must not change anything");
     }
 }

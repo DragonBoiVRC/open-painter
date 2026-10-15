@@ -3,8 +3,12 @@
 //! `nodes` lists are ordered **bottom to top** (index 0 is composited first).
 
 pub mod blend;
+pub mod graph;
+pub mod smart;
 
+use graph::Graph;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub type NodeId = u64;
 
@@ -203,11 +207,88 @@ pub struct FillParams {
     pub roughness: Option<f32>,
 }
 
+/// A procedural source for a mask. The template's parameters live in `params` by name;
+/// anything missing takes the template's default (see `op-proc`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum GeneratorKind {
+    /// Convex edges, from the baked curvature, broken up with noise.
+    EdgeWear,
+    /// Occluded crevices, from baked AO and concave curvature, broken up with noise.
+    CreviceDirt,
+    /// Up-facing surfaces, from the baked world normal.
+    TopDust,
+    /// A gradient along the object's up axis, from the baked position.
+    HeightGradient,
+    /// Plain fractal noise.
+    Noise,
+    /// An arbitrary graph, usually loaded from a file.
+    Custom { name: String, graph: Graph },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Generator {
+    pub kind: GeneratorKind,
+    pub params: BTreeMap<String, f32>,
+    pub invert: bool,
+}
+
+impl Generator {
+    pub fn new(kind: GeneratorKind) -> Self {
+        Self { kind, params: BTreeMap::new(), invert: false }
+    }
+
+    pub fn with(mut self, key: &str, value: f32) -> Self {
+        self.params.insert(key.to_string(), value);
+        self
+    }
+
+    pub fn inverted(mut self) -> Self {
+        self.invert = true;
+        self
+    }
+
+    /// Reject anything that did not come from our own code before it is evaluated.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.params.len() > 32 {
+            return Err("too many generator parameters".into());
+        }
+        for (k, v) in &self.params {
+            if k.is_empty() || k.len() > 32 {
+                return Err(format!("parameter name '{k}' has an unusable length"));
+            }
+            if !v.is_finite() {
+                return Err(format!("parameter '{k}' is not a finite number"));
+            }
+        }
+        if let GeneratorKind::Custom { name, graph } = &self.kind {
+            if name.len() > 128 {
+                return Err("generator name is too long".into());
+            }
+            graph.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
     pub enabled: bool,
     /// Initial content: white reveals everything, black hides everything.
     pub init_white: bool,
+    /// When set the mask content is computed from the generator and cannot be painted
+    /// until it is frozen (the generator removed).
+    #[serde(default)]
+    pub generator: Option<Generator>,
+}
+
+impl Mask {
+    pub fn new(init_white: bool) -> Self {
+        Self { enabled: true, init_white, generator: None }
+    }
+
+    pub fn generated(generator: Generator) -> Self {
+        Self { enabled: true, init_white: true, generator: Some(generator) }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -363,6 +444,37 @@ impl Document {
         let at = index.unwrap_or(list.len()).min(list.len());
         list.insert(at, node);
         id
+    }
+
+    /// A copy of the node and everything under it.
+    pub fn extract(&self, id: NodeId) -> Option<Node> {
+        self.find(id).cloned()
+    }
+
+    fn reassign_ids(&mut self, node: &mut Node) {
+        node.id = self.next_id;
+        self.next_id += 1;
+        if let NodeKind::Group { children } = &mut node.kind {
+            for c in children {
+                self.reassign_ids(c);
+            }
+        }
+    }
+
+    /// Insert copies of `nodes` (bottom to top) with fresh ids, as `add` would. Returns the ids
+    /// of the inserted top-level nodes.
+    pub fn insert_nodes(&mut self, parent: Option<NodeId>, index: Option<usize>, mut nodes: Vec<Node>) -> Vec<NodeId> {
+        for n in &mut nodes {
+            self.reassign_ids(n);
+        }
+        let ids: Vec<NodeId> = nodes.iter().map(|n| n.id).collect();
+        let list = match parent.and_then(|p| self.find_mut(p)) {
+            Some(Node { kind: NodeKind::Group { children }, .. }) => children,
+            _ => &mut self.nodes,
+        };
+        let at = index.unwrap_or(list.len()).min(list.len());
+        list.splice(at..at, nodes);
+        ids
     }
 
     pub fn remove(&mut self, id: NodeId) -> Option<Node> {

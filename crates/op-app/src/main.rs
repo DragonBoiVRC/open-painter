@@ -3,15 +3,17 @@ mod composite;
 mod files;
 mod gpu_io;
 mod paint;
+mod procgen;
 mod viewport;
 
 use camera::OrbitCamera;
 use eframe::{egui, egui_wgpu};
 use glam::Vec3;
 use op_bake::{BakeSettings, Progress as BakeProgress};
+use op_core::smart::{builtin_smart_materials, SmartMaterial};
 use op_core::{
-    srgb_to_linear, BakedMap, BlendMode, Document, FillParams, Mask, MeshMap, Node, NodeId, NodeKind, FALLBACK_BASE,
-    FALLBACK_METALLIC, FALLBACK_ROUGHNESS,
+    srgb_to_linear, BakedMap, BlendMode, Document, FillParams, Generator, GeneratorKind, Mask, MeshMap, Node, NodeId,
+    NodeKind, FALLBACK_BASE, FALLBACK_METALLIC, FALLBACK_ROUGHNESS,
 };
 use op_export::{ExportContext, ExportOutcome, ExportPreset, TextureSetData};
 use op_mesh::Mesh;
@@ -20,6 +22,7 @@ use paint::{PaintOp, Stamp, Target, DEFAULT_TEXTURE_SIZE, MAX_STAMPS};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use viewport::{Globals, ViewportCallback, ViewportGpu};
@@ -118,6 +121,43 @@ enum View {
     Map(MeshMap),
 }
 
+/// A mask generation running on a worker thread.
+struct ProcJob {
+    layer: NodeId,
+    key: procgen::Key,
+    rx: Receiver<Result<op_proc::Evaluation, String>>,
+    #[allow(dead_code)]
+    cancel: Arc<AtomicBool>,
+}
+
+/// What the layer panel shows about a generated mask.
+#[derive(Default)]
+struct ProcInfo {
+    warnings: Vec<String>,
+    error: Option<String>,
+}
+
+/// Changes to a mask's generator that need more than editing a field in place.
+enum GenAction {
+    /// Remove the generator but keep the generated pixels, so the mask can be painted.
+    Freeze,
+    /// Replace a painted mask's content by a generator (the old content is snapshotted for undo).
+    Replace(Generator),
+    /// Give a layer a brand-new generated mask.
+    NewMask(Generator),
+}
+
+#[derive(Default)]
+struct SmartUi {
+    pick: usize,
+    save_name: String,
+    message: String,
+}
+
+fn builtin_kinds() -> [GeneratorKind; 5] {
+    [GeneratorKind::EdgeWear, GeneratorKind::CreviceDirt, GeneratorKind::TopDust, GeneratorKind::HeightGradient, GeneratorKind::Noise]
+}
+
 struct BakeJob {
     rx: Receiver<Result<op_bake::BakeResult, String>>,
     progress: Arc<BakeProgress>,
@@ -175,6 +215,16 @@ struct App {
     baked: Arc<HashMap<MeshMap, BakedMap>>,
     bake: BakeUi,
     view: View,
+    /// Bumped whenever the baked maps change, so generated masks know to regenerate.
+    bake_rev: u64,
+    proc: procgen::Scheduler,
+    proc_jobs: Vec<ProcJob>,
+    proc_info: HashMap<NodeId, ProcInfo>,
+    custom_generators: Vec<Generator>,
+    smart_materials: Vec<SmartMaterial>,
+    /// Problems found while loading the user's smart materials and generator files.
+    definition_warnings: Vec<String>,
+    smart_ui: SmartUi,
 }
 
 fn is_project(p: &Path) -> bool {
@@ -195,6 +245,18 @@ impl App {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|s| *s > 0)
             .unwrap_or(DEFAULT_AUTOSAVE_SECS);
+
+        let (user_smart, mut definition_warnings) = files::load_smart_materials(&files::smart_materials_dir());
+        let (custom_generators, generator_warnings) = files::load_custom_generators(&files::generators_dir());
+        definition_warnings.extend(generator_warnings);
+        let mut smart_materials = builtin_smart_materials();
+        for mut m in user_smart {
+            // A user file never replaces a built-in one silently.
+            while smart_materials.iter().any(|b| b.name == m.name) {
+                m.name.push_str(" (user)");
+            }
+            smart_materials.push(m);
+        }
 
         let doc = Document::with_default_material();
         let selected = doc.nodes.last().map(|n| n.id);
@@ -262,6 +324,14 @@ impl App {
                 job: None,
             },
             view: View::Shaded,
+            bake_rev: 0,
+            proc: procgen::Scheduler::new(Duration::from_millis(150)),
+            proc_jobs: Vec::new(),
+            proc_info: HashMap::new(),
+            custom_generators,
+            smart_materials,
+            definition_warnings,
+            smart_ui: SmartUi::default(),
         };
         app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
         app.pending.push(PaintOp::Reset(app.tex_size));
@@ -306,6 +376,8 @@ impl App {
         self.stroke.active = false;
         self.pending.clear();
         self.pending.push(PaintOp::Reset(self.tex_size));
+        self.proc.invalidate();
+        self.proc_info.clear();
     }
 
     fn new_project(&mut self) {
@@ -342,6 +414,9 @@ impl App {
         self.pending.clear();
         self.pending.push(PaintOp::Load { size: p.texture_size, blobs: p.blobs });
         self.baked = Arc::new(p.baked);
+        self.bake_rev += 1;
+        self.proc.invalidate();
+        self.proc_info.clear();
         self.set_view(View::Shaded);
         self.project_path = path;
         self.modified = modified;
@@ -505,6 +580,7 @@ impl App {
     fn clear_baked(&mut self) {
         if !self.baked.is_empty() {
             self.baked = Arc::new(HashMap::new());
+            self.bake_rev += 1;
         }
         self.set_view(View::Shaded);
     }
@@ -567,6 +643,7 @@ impl App {
             curvature_strength: b.curvature_strength,
             cage_front: b.cage_front_pct / 100.0,
             cage_rear: b.cage_rear_pct / 100.0,
+            padding: 16,
         };
         let low = self.mesh.clone();
         let high = b.high.as_ref().map(|(m, _)| m.clone());
@@ -591,6 +668,7 @@ impl App {
                 let n = result.maps.len();
                 maps.extend(result.maps);
                 self.baked = Arc::new(maps);
+                self.bake_rev += 1;
                 self.bake.job = None;
                 self.modified = true;
                 let view = self.view;
@@ -688,6 +766,7 @@ impl App {
             }
         }
         self.poll_bake(ctx);
+        self.drive_procgen(ctx);
         if let Some(rx) = &self.export.running {
             match rx.try_recv() {
                 Ok(result) => {
@@ -816,6 +895,9 @@ impl App {
     fn paint_target(&self) -> Result<(NodeId, Target), &'static str> {
         let node = self.selected.and_then(|id| self.doc.find(id)).ok_or("Select a layer to paint on")?;
         match self.target {
+            Target::Mask if node.mask.as_ref().is_some_and(|m| m.generator.is_some()) => {
+                Err("This mask is generated from baked maps: use 'Freeze' to make it paintable")
+            }
             Target::Mask if node.mask.is_some() => Ok((node.id, Target::Mask)),
             Target::Mask => Err("This layer has no mask: add one in the layer panel"),
             Target::Content if matches!(node.kind, NodeKind::Paint) => Ok((node.id, Target::Content)),
@@ -1001,6 +1083,7 @@ impl App {
         let snapshot = self.doc.clone();
         let mut changed = false;
         let mut mask_action = None;
+        let mut gen_action: Option<GenAction> = None;
         if let Some(node) = self.doc.find_mut(id) {
             changed |= ui.text_edit_singleline(&mut node.name).changed();
             egui::ComboBox::from_id_salt("blend").selected_text(node.blend.name()).show_ui(ui, |ui| {
@@ -1048,6 +1131,18 @@ impl App {
                             mask_action = Some(Some(false));
                         }
                     });
+                    egui::ComboBox::from_id_salt("gen_new").selected_text("Add generated mask...").show_ui(ui, |ui| {
+                        for k in builtin_kinds() {
+                            if ui.selectable_label(false, op_proc::label(&k)).clicked() {
+                                gen_action = Some(GenAction::NewMask(Generator::new(k)));
+                            }
+                        }
+                        for c in &self.custom_generators {
+                            if ui.selectable_label(false, op_proc::label(&c.kind)).clicked() {
+                                gen_action = Some(GenAction::NewMask(c.clone()));
+                            }
+                        }
+                    });
                 }
                 Some(m) => {
                     ui.horizontal(|ui| {
@@ -1056,16 +1151,92 @@ impl App {
                             mask_action = Some(None);
                         }
                     });
+                    match &mut m.generator {
+                        Some(gen) => {
+                            ui.label("Generated from the baked maps:");
+                            egui::ComboBox::from_id_salt("gen_kind").selected_text(op_proc::label(&gen.kind)).show_ui(ui, |ui| {
+                                for k in builtin_kinds() {
+                                    if ui.selectable_label(gen.kind == k, op_proc::label(&k)).clicked() && gen.kind != k {
+                                        gen.kind = k;
+                                        gen.params.clear();
+                                        changed = true;
+                                    }
+                                }
+                                for c in &self.custom_generators {
+                                    if ui.selectable_label(gen.kind == c.kind, op_proc::label(&c.kind)).clicked() && gen.kind != c.kind {
+                                        gen.kind = c.kind.clone();
+                                        gen.params.clear();
+                                        changed = true;
+                                    }
+                                }
+                            });
+                            for spec in op_proc::param_specs(&gen.kind) {
+                                let mut v = op_proc::value(gen, spec.key);
+                                let mut slider = egui::Slider::new(&mut v, spec.min..=spec.max).text(spec.label);
+                                if spec.integer {
+                                    slider = slider.step_by(1.0);
+                                }
+                                if ui.add(slider).changed() {
+                                    gen.params.insert(spec.key.to_string(), v);
+                                    changed = true;
+                                }
+                            }
+                            changed |= ui.checkbox(&mut gen.invert, "Invert").changed();
+                            let missing: Vec<&str> = op_proc::required_maps(&gen.kind)
+                                .into_iter()
+                                .filter(|m| !self.baked.contains_key(m))
+                                .map(|m| m.label())
+                                .collect();
+                            if !missing.is_empty() {
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    format!("Not baked yet: {}. Use Bake... to create them.", missing.join(", ")),
+                                );
+                            }
+                            if self.proc.is_busy(id) {
+                                ui.label("Generating...");
+                            }
+                            if let Some(info) = self.proc_info.get(&id) {
+                                for w in &info.warnings {
+                                    ui.small(w);
+                                }
+                                if let Some(e) = &info.error {
+                                    ui.colored_label(egui::Color32::LIGHT_RED, format!("Generation failed: {e}"));
+                                }
+                            }
+                            if ui.button("Freeze (make paintable)").clicked() {
+                                gen_action = Some(GenAction::Freeze);
+                            }
+                        }
+                        None => {
+                            egui::ComboBox::from_id_salt("gen_replace").selected_text("Replace with generated...").show_ui(ui, |ui| {
+                                for k in builtin_kinds() {
+                                    if ui.selectable_label(false, op_proc::label(&k)).clicked() {
+                                        gen_action = Some(GenAction::Replace(Generator::new(k)));
+                                    }
+                                }
+                                for c in &self.custom_generators {
+                                    if ui.selectable_label(false, op_proc::label(&c.kind)).clicked() {
+                                        gen_action = Some(GenAction::Replace(c.clone()));
+                                    }
+                                }
+                            });
+                            ui.small("Replacing is undoable: Ctrl+Z restores the painted mask.");
+                        }
+                    }
                 }
             }
         }
         if changed && self.gesture_before.is_none() {
             self.gesture_before = Some(snapshot.clone());
         }
+        if let Some(action) = gen_action {
+            self.apply_gen_action(id, action);
+        }
         if let Some(action) = mask_action {
             self.edit(|d| {
                 if let Some(n) = d.find_mut(id) {
-                    n.mask = action.map(|init_white| Mask { enabled: true, init_white });
+                    n.mask = action.map(Mask::new);
                 }
             });
             if action.is_none() && self.target == Target::Mask {
@@ -1081,6 +1252,152 @@ impl App {
         });
         if let Err(msg) = self.paint_target() {
             ui.small(msg);
+        }
+    }
+
+    fn apply_gen_action(&mut self, id: NodeId, action: GenAction) {
+        let set = |d: &mut Document, g: Option<Generator>, keep_mask: bool| {
+            if let Some(n) = d.find_mut(id) {
+                match (&mut n.mask, g) {
+                    (Some(m), g) if keep_mask => m.generator = g,
+                    (slot, Some(g)) => *slot = Some(Mask::generated(g)),
+                    _ => {}
+                }
+            }
+        };
+        match action {
+            GenAction::Freeze => self.edit(|d| set(d, None, true)),
+            GenAction::NewMask(g) => self.edit(|d| set(d, Some(g), false)),
+            GenAction::Replace(g) => {
+                // The generated content overwrites the painted mask, so snapshot it first: the
+                // document edit undoes first, then this snapshot restores the pixels.
+                self.pending.push(PaintOp::BeginStroke { layer: id, target: Target::Mask });
+                self.push_hist(Hist::Stroke);
+                self.edit(|d| set(d, Some(g), true));
+            }
+        }
+    }
+
+    /// Start, collect and apply background mask generation.
+    fn drive_procgen(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        for req in self.proc.plan(&self.doc, self.bake_rev, self.tex_size, now) {
+            let (baked, generator, size) = (self.baked.clone(), req.key.generator.clone(), req.key.size);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = cancel.clone();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(op_proc::generate(&generator, size, &baked, &flag).map_err(|e| e.to_string()));
+            });
+            self.proc_jobs.push(ProcJob { layer: req.layer, key: req.key, rx, cancel });
+        }
+
+        let mut finished = Vec::new();
+        self.proc_jobs.retain(|job| match job.rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Ok(result) => {
+                finished.push((job.layer, job.key.clone(), result));
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                finished.push((job.layer, job.key.clone(), Err("the worker stopped unexpectedly".into())));
+                false
+            }
+        });
+        for (layer, key, result) in finished {
+            match result {
+                Ok(eval) => {
+                    if self.proc.finish(layer, &key) {
+                        self.pending.push(PaintOp::SetMask { layer, size: key.size, bytes: op_proc::to_mask_bytes(&eval.values) });
+                        self.proc_info.insert(layer, ProcInfo { warnings: eval.warnings, error: None });
+                    }
+                }
+                Err(e) => {
+                    self.proc.failed(layer, &key);
+                    self.proc_info.insert(layer, ProcInfo { warnings: Vec::new(), error: Some(e) });
+                }
+            }
+        }
+        let live = self.doc.ids();
+        self.proc_info.retain(|id, _| live.contains(id));
+
+        if !self.proc_jobs.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(60));
+        } else if let Some(wait) = self.proc.next_wakeup(now) {
+            ctx.request_repaint_after(wait + Duration::from_millis(5));
+        }
+    }
+
+    fn add_smart_material(&mut self, index: usize) {
+        let Some(material) = self.smart_materials.get(index).cloned() else { return };
+        let before = self.doc.clone();
+        let (parent, at) = match self.selected.and_then(|id| self.doc.locate(id)) {
+            Some((parent, i)) => (parent, Some(i + 1)),
+            None => (None, None),
+        };
+        let ids = self.doc.insert_nodes(parent, at, material.nodes);
+        self.selected = ids.last().copied();
+        self.record(before);
+        let needs_bakes = !self.baked.contains_key(&MeshMap::Curvature);
+        self.smart_ui.message = if needs_bakes {
+            format!("Added '{}'. Its generated masks need baked maps: use Bake...", material.name)
+        } else {
+            format!("Added '{}'.", material.name)
+        };
+    }
+
+    fn save_smart_material(&mut self) {
+        let name = self.smart_ui.save_name.trim().to_string();
+        let Some(node) = self.selected.and_then(|id| self.doc.extract(id)) else {
+            self.smart_ui.message = "Select a layer or group to save.".into();
+            return;
+        };
+        let material = SmartMaterial { name: name.clone(), nodes: vec![node] };
+        let json = match material.to_json() {
+            Ok(j) => j,
+            Err(e) => {
+                self.smart_ui.message = format!("Cannot save: {e}");
+                return;
+            }
+        };
+        let stem: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "-_ ".contains(c) { c } else { '_' }).collect();
+        let dir = files::smart_materials_dir();
+        let file = dir.join(format!("{}.json", stem.trim()));
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&file, json)) {
+            Ok(()) => {
+                match self.smart_materials.iter().position(|m| m.name == name) {
+                    Some(i) => self.smart_materials[i] = material,
+                    None => self.smart_materials.push(material),
+                }
+                self.smart_ui.message = format!("Saved '{name}' to {} (paint layers are saved empty).", file.display());
+            }
+            Err(e) => self.smart_ui.message = format!("Could not save: {e}"),
+        }
+    }
+
+    fn smart_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Smart materials");
+        let current = self.smart_materials.get(self.smart_ui.pick).map_or("(none)", |m| m.name.as_str()).to_string();
+        egui::ComboBox::from_id_salt("smart_pick").selected_text(current).show_ui(ui, |ui| {
+            for (i, m) in self.smart_materials.iter().enumerate() {
+                ui.selectable_value(&mut self.smart_ui.pick, i, &m.name);
+            }
+        });
+        if ui.button("Add to layer stack").clicked() {
+            self.add_smart_material(self.smart_ui.pick);
+        }
+        ui.small("Smart materials use masks generated from the baked maps (Bake...).");
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.smart_ui.save_name).hint_text("name").desired_width(120.0));
+            if ui.add_enabled(!self.smart_ui.save_name.trim().is_empty(), egui::Button::new("Save selection")).clicked() {
+                self.save_smart_material();
+            }
+        });
+        if !self.smart_ui.message.is_empty() {
+            ui.small(&self.smart_ui.message);
+        }
+        for w in &self.definition_warnings {
+            ui.colored_label(egui::Color32::YELLOW, format!("Skipped: {w}"));
         }
     }
 
@@ -1426,6 +1743,7 @@ impl eframe::App for App {
                     self.pending.push(PaintOp::Reset(self.tex_size));
                     // Baked maps are tied to the resolution they were baked at.
                     self.clear_baked();
+                    self.proc.invalidate();
                     self.modified = true;
                 }
             });
@@ -1467,7 +1785,13 @@ impl eframe::App for App {
             ui.separator();
             ui.small("Paint: left drag\nOrbit: Alt+left / middle drag\nPan: right drag\nZoom: scroll\nBrush size: [ ]\nUndo/Redo: Ctrl+Z / Ctrl+Y\nSave: Ctrl+S");
         });
-        egui::Panel::right("layers").default_size(290.0).show(ui, |ui| self.layer_panel(ui));
+        egui::Panel::right("layers").default_size(300.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("right_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                self.layer_panel(ui);
+                ui.separator();
+                self.smart_panel(ui);
+            });
+        });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.label(&self.status);
         });

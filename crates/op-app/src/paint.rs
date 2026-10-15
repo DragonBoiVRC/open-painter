@@ -85,6 +85,9 @@ pub enum PaintOp {
     Gc(Vec<NodeId>),
     /// Drop all paint and stroke history and (re)allocate at this resolution.
     Reset(u32),
+    /// Replace a layer's mask with generated content (one byte per texel). Ignored if the
+    /// resolution no longer matches or the layer has no mask.
+    SetMask { layer: NodeId, size: u32, bytes: Vec<u8> },
     /// Like `Reset`, then restore saved texture contents (opening a project).
     Load { size: u32, blobs: Vec<TextureBlob> },
 }
@@ -613,6 +616,15 @@ impl PaintGpu {
                             self.undo.push(cur);
                         }
                         dirty = true;
+                    }
+                }
+                PaintOp::SetMask { layer, size, bytes } => {
+                    let expected = *size as usize * *size as usize;
+                    if *size == self.size && bytes.len() == expected {
+                        if let Some(tex) = self.store.get(layer).and_then(|g| g.mask.as_ref()) {
+                            crate::gpu_io::write_texture(device, encoder, tex, *size, 1, bytes);
+                            dirty = true;
+                        }
                     }
                 }
                 PaintOp::DropRedo => self.redo.clear(),

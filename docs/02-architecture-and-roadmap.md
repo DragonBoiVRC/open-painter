@@ -30,7 +30,7 @@ assets/         CC0 only
 | M2 | Layer stack (layers, groups, masks, blend modes, opacity), fill layers, GPU compositor |
 | M3 | Export presets (PBR MR, Unity, Unreal packed, glTF) PNG/EXR/TGA; project save/load; autosave |
 | M4 | Baking: world normal, AO, curvature, thickness, position, ID (embree-like BVH on CPU, then GPU) |
-| M5 | Smart-material/mask system (own graph-based procedural nodes: noise, gradients, curvature-driven edge wear) |
+| M5 | Smart-material/mask system (own graph-based procedural nodes: noise, gradients, curvature-driven edge wear) - done, see docs/05-procedural.md |
 | M6 | Plugin API (events + scripting), shelves/resources, environment/IBL library |
 | M7 | UDIM, text, stencils/alphas, particle brushes, import-only `.spp` best effort |
 

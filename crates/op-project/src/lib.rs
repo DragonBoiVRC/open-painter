@@ -343,7 +343,7 @@ mod tests {
     fn sample() -> Project {
         let mut doc = Document::with_default_material();
         let paint = doc.add(None, None, "Paint", NodeKind::Paint);
-        doc.find_mut(paint).unwrap().mask = Some(Mask { enabled: true, init_white: false });
+        doc.find_mut(paint).unwrap().mask = Some(Mask::new(false));
         let g = doc.add(None, None, "Group", NodeKind::Group { children: vec![] });
         doc.add(Some(g), None, "inner", NodeKind::Fill(FillParams { base: None, metallic: Some(0.5), roughness: None }));
         let pattern = |len: usize, seed: u8| (0..len).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect::<Vec<u8>>();

@@ -37,6 +37,9 @@ pub struct BakeSettings {
     /// (fractions of the diagonal). Also sets the height range.
     pub cage_front: f32,
     pub cage_rear: f32,
+    /// Texels of padding added around UV islands: the nearest shaded values are copied
+    /// outward so filtering, blurring and mip-mapping never pull in empty space.
+    pub padding: u32,
 }
 
 impl Default for BakeSettings {
@@ -50,6 +53,7 @@ impl Default for BakeSettings {
             curvature_strength: 1.0,
             cage_front: 0.05,
             cage_rear: 0.05,
+            padding: 16,
         }
     }
 }
@@ -141,6 +145,68 @@ fn rasterize(geo: &Geometry, size: u32) -> Vec<Sample> {
         }
     }
     out
+}
+
+/// Copy shaded values outward into uncovered texels, `iterations` texels deep. All maps are
+/// filled together; each new texel is the average of the already-filled texels around it.
+/// Work is proportional to the padded area, not to `iterations * size * size`.
+fn pad_edges(bufs: &mut [Vec<u16>], channels: &[usize], covered: &[bool], size: usize, iterations: u32) {
+    if iterations == 0 || bufs.is_empty() {
+        return;
+    }
+    let mut filled = covered.to_vec();
+    let neighbours = |i: usize| {
+        let (x, y) = ((i % size) as i64, (i / size) as i64);
+        (-1i64..=1).flat_map(move |dy| (-1i64..=1).map(move |dx| (dx, dy))).filter_map(move |(dx, dy)| {
+            let (nx, ny) = (x + dx, y + dy);
+            ((dx, dy) != (0, 0) && nx >= 0 && ny >= 0 && nx < size as i64 && ny < size as i64).then(|| ny as usize * size + nx as usize)
+        })
+    };
+    // First frontier: empty texels that touch a filled one.
+    let mut queued = vec![false; filled.len()];
+    let mut frontier: Vec<usize> = Vec::new();
+    for i in 0..filled.len() {
+        if !filled[i] && neighbours(i).any(|n| filled[n]) {
+            queued[i] = true;
+            frontier.push(i);
+        }
+    }
+    for _ in 0..iterations {
+        if frontier.is_empty() {
+            break;
+        }
+        // Compute the whole wave from the previous state, then write it.
+        let wave: Vec<(usize, Vec<u16>)> = frontier
+            .iter()
+            .map(|&i| {
+                let src: Vec<usize> = neighbours(i).filter(|&n| filled[n]).collect();
+                let mut vals = Vec::new();
+                for (buf, &c) in bufs.iter().zip(channels) {
+                    for k in 0..c {
+                        let sum: u32 = src.iter().map(|&n| buf[n * c + k] as u32).sum();
+                        vals.push(((sum + src.len() as u32 / 2) / src.len() as u32) as u16);
+                    }
+                }
+                (i, vals)
+            })
+            .collect();
+        let mut next = Vec::new();
+        for (i, vals) in wave {
+            let mut at = 0;
+            for (buf, &c) in bufs.iter_mut().zip(channels) {
+                buf[i * c..(i + 1) * c].copy_from_slice(&vals[at..at + c]);
+                at += c;
+            }
+            filled[i] = true;
+            for n in neighbours(i) {
+                if !filled[n] && !queued[n] {
+                    queued[n] = true;
+                    next.push(n);
+                }
+            }
+        }
+        frontier = next;
+    }
 }
 
 fn splitmix(mut x: u64) -> u64 {
@@ -430,12 +496,15 @@ pub fn bake(low: &Mesh, high: Option<&Mesh>, settings: &BakeSettings, progress: 
             }
         }
     }
+    let covered_mask: Vec<bool> = samples.iter().map(|s| s.tri != NONE).collect();
+    let channels: Vec<usize> = maps.iter().map(|m| m.channels() as usize).collect();
+    pad_edges(&mut bufs, &channels, &covered_mask, size as usize, settings.padding);
     let mut result = HashMap::new();
     for (map, data) in maps.iter().zip(bufs) {
         let baked = BakedMap::new(size, map.channels(), data).map_err(BakeError::Invalid)?;
         result.insert(*map, baked);
     }
-    let covered = samples.iter().filter(|s| s.tri != NONE).count();
+    let covered = covered_mask.iter().filter(|c| **c).count();
     Ok(BakeResult { size, maps: result, covered })
 }
 
@@ -747,6 +816,78 @@ mod tests {
         for m in &s.maps {
             assert_eq!(a.maps[m], b.maps[m], "{m:?} differs between runs");
         }
+    }
+
+    #[test]
+    fn padding_copies_edge_values_outward_by_exactly_the_requested_width() {
+        // One scalar map and one 3-channel map on a 9x9 grid with a single covered texel.
+        let size = 9;
+        let mut covered = vec![false; 81];
+        let centre = 4 * 9 + 4;
+        covered[centre] = true;
+        let mut one = vec![0u16; 81];
+        one[centre] = 40000;
+        let mut three = vec![0u16; 81 * 3];
+        three[centre * 3..centre * 3 + 3].copy_from_slice(&[100, 200, 300]);
+        let mut bufs = vec![one, three];
+        pad_edges(&mut bufs, &[1, 3], &covered, size, 3);
+        for y in 0..9usize {
+            for x in 0..9usize {
+                let d = (x as i32 - 4).abs().max((y as i32 - 4).abs());
+                let i = y * 9 + x;
+                if d <= 3 {
+                    assert_eq!(bufs[0][i], 40000, "({x},{y}) distance {d} should be padded");
+                    assert_eq!(bufs[1][i * 3..i * 3 + 3], [100, 200, 300]);
+                } else {
+                    assert_eq!(bufs[0][i], 0, "({x},{y}) distance {d} is beyond the padding");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn padding_averages_between_islands_and_never_changes_covered_texels() {
+        let size = 7;
+        let mut covered = vec![false; 49];
+        let mut buf = vec![0u16; 49];
+        // Two covered texels in one row, 2 apart, with different values; the texel between them is empty.
+        covered[3 * 7 + 1] = true;
+        covered[3 * 7 + 3] = true;
+        buf[3 * 7 + 1] = 1000;
+        buf[3 * 7 + 3] = 3000;
+        let mut bufs = vec![buf];
+        pad_edges(&mut bufs, &[1], &covered, size, 1);
+        assert_eq!(bufs[0][3 * 7 + 1], 1000, "covered texels are untouched");
+        assert_eq!(bufs[0][3 * 7 + 3], 3000);
+        assert_eq!(bufs[0][3 * 7 + 2], 2000, "the texel between is the average of both neighbours");
+    }
+
+    #[test]
+    fn padding_with_zero_iterations_or_full_coverage_is_a_no_op() {
+        let mut bufs = vec![vec![5u16; 16]];
+        let before = bufs.clone();
+        pad_edges(&mut bufs, &[1], &[true; 16], 4, 8);
+        assert_eq!(bufs, before);
+        pad_edges(&mut bufs, &[1], &[false; 16], 4, 0);
+        assert_eq!(bufs, before);
+        pad_edges(&mut bufs, &[1], &[false; 16], 4, 8); // nothing to copy from: must not loop or panic
+        assert_eq!(bufs, before);
+    }
+
+    #[test]
+    fn baked_maps_are_padded_beyond_the_uv_footprint() {
+        // The plane only fills the left half of UV space.
+        let mut half = plane();
+        for v in &mut half.vertices {
+            v.uv[0] *= 0.5;
+        }
+        let padded = run(&half, None, &BakeSettings { size: 16, maps: vec![MeshMap::Position], padding: 3, ..Default::default() });
+        let unpadded = run(&half, None, &BakeSettings { size: 16, maps: vec![MeshMap::Position], padding: 0, ..Default::default() });
+        // Column 7 is the last covered column; 8..=10 are padding, 11 is beyond it.
+        assert_eq!(at(&unpadded, MeshMap::Position, 9, 8), [0.0; 3]);
+        assert_eq!(at(&padded, MeshMap::Position, 9, 8), at(&padded, MeshMap::Position, 7, 8), "padding copies the edge");
+        assert_eq!(at(&padded, MeshMap::Position, 11, 8), [0.0; 3], "no more than 3 texels");
+        assert_eq!(at(&padded, MeshMap::Position, 3, 8), at(&unpadded, MeshMap::Position, 3, 8), "covered texels unchanged");
     }
 
     #[test]

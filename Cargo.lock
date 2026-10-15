@@ -1827,6 +1827,7 @@ dependencies = [
  "op-core",
  "op-export",
  "op-mesh",
+ "op-proc",
  "op-project",
  "pollster",
  "serde_json",
@@ -1849,6 +1850,7 @@ name = "op-core"
 version = "0.0.1"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1874,6 +1876,20 @@ dependencies = [
  "glam",
  "gltf",
  "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "op-proc"
+version = "0.0.1"
+dependencies = [
+ "glam",
+ "op-bake",
+ "op-core",
+ "op-mesh",
+ "rayon",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
