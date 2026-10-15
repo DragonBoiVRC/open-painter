@@ -859,17 +859,16 @@ mod tests {
         let blobs = rig.gpu.paint().capture_blobs(&rig.device, &rig.queue, &doc);
         assert_eq!(blobs.len(), 4, "base, metal, rough and mask of the paint layer");
         let project = op_project::Project {
-            texture_size: SIZE,
-            document: doc.clone(),
             mesh_name: "sphere".into(),
             mesh: Mesh::uv_sphere(1.0, 96, 48),
-            blobs: blobs.clone(),
-            baked: Default::default(),
+            sets: vec![op_project::SetData { texture_size: SIZE, document: doc.clone(), blobs: blobs.clone(), baked: Default::default() }],
+            active: 0,
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.opproj");
         op_project::save(&path, &project).unwrap();
         let loaded = op_project::load(&path).unwrap();
+        let loaded = loaded.sets.into_iter().next().unwrap();
         assert_eq!(loaded.document, doc);
 
         let mut fresh = Rig::new().unwrap();
@@ -886,6 +885,67 @@ mod tests {
             let diff = after[i].iter().zip(&before[i]).filter(|(x, y)| x != y).count();
             assert_eq!(diff, 0, "composited {name} differs in {diff} of {} bytes after reload", before[i].len());
         }
+    }
+
+    /// Paint in two texture sets survives a save and reload, each set keeping its own textures.
+    #[test]
+    fn two_sets_of_paint_survive_a_project_round_trip() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mesh = two_set_sphere();
+        rig.gpu.set_mesh(&rig.device, &mesh);
+        let (mut a, mut b) = (Document::default(), Document::default());
+        let pa = a.add(None, None, "paint a", NodeKind::Paint);
+        let pb = b.add(None, None, "paint b", NodeKind::Paint);
+        let reset = |set, doc: &Document| SetBatch { set, doc: doc.clone(), ops: vec![PaintOp::Reset(SIZE)] };
+        rig.run_sets(&[reset(0, &a), reset(1, &b)]);
+
+        // Set 0 gets a real stroke; set 1 is restored from stored bytes (the camera only sees set 0).
+        let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        let stroke = SetBatch {
+            set: 0,
+            doc: a.clone(),
+            ops: vec![PaintOp::Stamps { layer: pa, target: Target::Content, stamps: vec![stamp] }],
+        };
+        let n = (SIZE * SIZE) as usize;
+        let blobs_b = vec![
+            op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Base, bytes: (0..n * 8).map(|i| (i % 251) as u8).collect() },
+            op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Metal, bytes: (0..n * 2).map(|i| (i % 13) as u8).collect() },
+            op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Rough, bytes: (0..n * 2).map(|i| (i % 7) as u8).collect() },
+        ];
+        let load_b = SetBatch { set: 1, doc: b.clone(), ops: vec![PaintOp::Load { size: SIZE, blobs: blobs_b.clone() }] };
+        rig.run_sets(&[stroke, load_b]);
+
+        let capture = |rig: &Rig, set: usize, doc: &Document| rig.gpu.sets[set].capture_blobs(&rig.device, &rig.queue, doc);
+        let (c0, c1) = (capture(&rig, 0, &a), capture(&rig, 1, &b));
+        assert!(c0.iter().any(|t| t.bytes.iter().any(|&x| x != 0)), "set 0 holds the stroke");
+        assert_eq!(c1, blobs_b, "set 1 holds exactly what was loaded");
+
+        let project = op_project::Project {
+            mesh_name: "sphere".into(),
+            mesh: mesh.clone(),
+            sets: vec![
+                op_project::SetData { texture_size: SIZE, document: a.clone(), blobs: c0.clone(), baked: Default::default() },
+                op_project::SetData { texture_size: SIZE, document: b.clone(), blobs: c1.clone(), baked: Default::default() },
+            ],
+            active: 1,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two.opproj");
+        op_project::save(&path, &project).unwrap();
+        let loaded = op_project::load(&path).unwrap();
+        assert_eq!(loaded.active, 1);
+
+        let mut fresh = Rig::new().unwrap();
+        fresh.gpu.set_mesh(&fresh.device, &loaded.mesh);
+        let batches: Vec<SetBatch> = loaded
+            .sets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| SetBatch { set: i, doc: s.document.clone(), ops: vec![PaintOp::Load { size: s.texture_size, blobs: s.blobs.clone() }] })
+            .collect();
+        fresh.run_sets(&batches);
+        assert_eq!(capture(&fresh, 0, &loaded.sets[0].document), c0, "set 0 after reload");
+        assert_eq!(capture(&fresh, 1, &loaded.sets[1].document), c1, "set 1 after reload");
     }
 
     /// GPU composite -> CPU export -> PNG on disk must reproduce the document's values.

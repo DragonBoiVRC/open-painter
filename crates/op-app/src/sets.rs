@@ -23,6 +23,12 @@ pub struct SetState {
 }
 
 impl SetState {
+    /// A set restored from a saved project.
+    pub fn restored(doc: Document, tex_size: u32, baked: HashMap<MeshMap, BakedMap>) -> Self {
+        let selected = doc.nodes.last().map(|n| n.id);
+        Self { doc, selected, undo: Vec::new(), redo: Vec::new(), baked: Arc::new(baked), bake_rev: 1, tex_size, collapsed: HashSet::new() }
+    }
+
     /// A new set with the default material layer.
     pub fn fresh(tex_size: u32) -> Self {
         let doc = Document::with_default_material();
@@ -124,6 +130,25 @@ impl App {
             let doc = if set == 0 { self.doc.clone() } else { Document::with_default_material() };
             self.enqueue(SetBatch { set, doc, ops: vec![PaintOp::Reset(size)] });
         }
+    }
+
+    /// Replace every texture set with the saved ones (opening a project), restoring each set's
+    /// paint on the GPU. `loads` holds, per set, its resolution and texture contents.
+    pub(crate) fn install_sets(&mut self, states: Vec<SetState>, loads: Vec<(u32, Vec<op_project::TextureBlob>)>, active: usize) {
+        debug_assert_eq!(states.len(), loads.len());
+        self.pending.clear();
+        self.clear_queue();
+        self.gesture_before = None;
+        self.stroke.active = false;
+        self.restart_procgen();
+        let active = active.min(states.len().saturating_sub(1));
+        for (set, ((size, blobs), st)) in loads.into_iter().zip(&states).enumerate() {
+            self.enqueue(SetBatch { set, doc: st.doc.clone(), ops: vec![PaintOp::Load { size, blobs }] });
+        }
+        self.parked = states.into_iter().map(Some).collect();
+        let live = self.parked[active].take().expect("the active set is present");
+        self.put_live(live);
+        self.active = active;
     }
 
     /// Make set `i` the one being edited.

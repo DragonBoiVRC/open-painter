@@ -421,18 +421,13 @@ impl App {
 
     fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {
         self.set_mesh(p.mesh, p.mesh_name);
-        self.init_sets();
-        self.doc = p.document;
-        self.tex_size = p.texture_size;
-        self.selected = self.doc.nodes.last().map(|n| n.id);
-        self.undo.clear();
-        self.redo.clear();
-        self.gesture_before = None;
-        self.stroke.active = false;
-        self.pending.clear();
-        self.pending.push(PaintOp::Load { size: p.texture_size, blobs: p.blobs });
-        self.baked = Arc::new(p.baked);
-        self.bake_rev += 1;
+        let mut states = Vec::new();
+        let mut loads = Vec::new();
+        for s in p.sets {
+            loads.push((s.texture_size, s.blobs));
+            states.push(sets::SetState::restored(s.document, s.texture_size, s.baked));
+        }
+        self.install_sets(states, loads, p.active);
         self.set_view(View::Shaded);
         self.project_path = path;
         self.modified = modified;
@@ -487,15 +482,22 @@ impl App {
     fn capture_project(&self) -> Result<Project, String> {
         let renderer = self.render_state.renderer.read();
         let gpu = renderer.callback_resources.get::<ViewportGpu>().ok_or("viewport not ready")?;
-        let blobs = gpu.paint().capture_blobs(&self.render_state.device, &self.render_state.queue, &self.doc);
-        Ok(Project {
-            texture_size: gpu.paint().size(),
-            document: self.doc.clone(),
-            mesh_name: self.mesh_name.clone(),
-            mesh: self.mesh.clone(),
-            blobs,
-            baked: (*self.baked).clone(),
-        })
+        let mut sets = Vec::new();
+        for (i, paint) in gpu.sets.iter().enumerate() {
+            let (doc, baked) = if i == self.active {
+                (&self.doc, &self.baked)
+            } else {
+                let st = self.parked.get(i).and_then(Option::as_ref).ok_or("a texture set is missing")?;
+                (&st.doc, &st.baked)
+            };
+            sets.push(op_project::SetData {
+                texture_size: paint.size(),
+                document: doc.clone(),
+                blobs: paint.capture_blobs(&self.render_state.device, &self.render_state.queue, doc),
+                baked: (**baked).clone(),
+            });
+        }
+        Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active })
     }
 
     fn do_save(&mut self, mut path: PathBuf, ctx: &egui::Context) {
