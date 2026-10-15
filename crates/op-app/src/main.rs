@@ -231,6 +231,8 @@ struct App {
     paint_rev: u64,
     thumb_rev: u64,
     thumb_at: Instant,
+    /// The set last scrolled into view in the Texture Sets list.
+    sets_scrolled: usize,
     confirm: Option<Pending>,
     after_save: Option<Pending>,
     allow_close: bool,
@@ -340,6 +342,7 @@ impl App {
             paint_rev: 1,
             thumb_rev: 0,
             thumb_at: Instant::now() - Duration::from_secs(10),
+            sets_scrolled: usize::MAX,
             confirm: None,
             after_save: None,
             allow_close: false,
@@ -527,12 +530,13 @@ impl App {
                 let st = self.parked.get(i).and_then(Option::as_ref).ok_or("a texture set is missing")?;
                 (&st.doc, &st.baked)
             };
-            sets.push(op_project::SetData {
-                texture_size: paint.size(),
-                document: doc.clone(),
-                blobs: paint.capture_blobs(&self.render_state.device, &self.render_state.queue, doc),
-                baked: (**baked).clone(),
-            });
+            let untouched = i != self.active && self.parked.get(i).and_then(Option::as_ref).is_some_and(|s| !s.materialized);
+            let (texture_size, blobs) = if untouched {
+                (self.parked[i].as_ref().map_or(paint.size(), |s| s.tex_size), Vec::new())
+            } else {
+                (paint.size(), paint.capture_blobs(&self.render_state.device, &self.render_state.queue, doc))
+            };
+            sets.push(op_project::SetData { texture_size, document: doc.clone(), blobs, baked: (**baked).clone() });
         }
         Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active })
     }
@@ -600,10 +604,13 @@ impl App {
         }
         // Read every chosen set's textures back now; the CPU work happens off the UI thread.
         let mut jobs = Vec::new();
-        {
-            let renderer = self.render_state.renderer.read();
-            let Some(gpu) = renderer.callback_resources.get::<ViewportGpu>() else { return };
-            for &i in &chosen {
+        for &i in &chosen {
+            // A set nobody opened is held tiny; bring it to full size just long enough to read it.
+            let was_open = i == self.active || self.parked.get(i).and_then(Option::as_ref).is_some_and(|s| s.materialized);
+            self.ensure_materialized(i);
+            {
+                let renderer = self.render_state.renderer.read();
+                let Some(gpu) = renderer.callback_resources.get::<ViewportGpu>() else { return };
                 let (Some(paint), Some(mesh)) = (gpu.sets.get(i), self.mesh.extract_set(i)) else { continue };
                 let baked = if i == self.active { self.baked.clone() } else { self.parked[i].as_ref().map_or_else(Default::default, |s| s.baked.clone()) };
                 let name = if ranges.len() > 1 { ranges[i].name.clone() } else { self.export.set_name.clone() };
@@ -614,6 +621,9 @@ impl App {
                     mesh,
                     baked,
                 });
+            }
+            if !was_open {
+                self.release_if_untouched(i);
             }
         }
         let dir = PathBuf::from(&self.export.dir);
@@ -1295,6 +1305,7 @@ impl App {
                         ("Ctrl+D / Ctrl+G", "duplicate / group the selected layer"),
                         ("Delete / F2", "delete / rename the selected layer"),
                         ("Ctrl+PageUp / PageDown", "previous / next texture set"),
+                        ("Ctrl + click", "pick the texture set under the cursor"),
                         ("P / E", "paint / erase"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),

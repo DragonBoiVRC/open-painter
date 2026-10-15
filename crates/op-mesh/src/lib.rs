@@ -99,6 +99,42 @@ impl Mesh {
         Some(Mesh { vertices, indices, sets: vec![SetRange { name: r.name.clone(), first_index: 0, index_count: count }] })
     }
 
+    /// The nearest surface along a ray: the texture set it belongs to and the distance. Both sides
+    /// of a triangle count. Brute force, which is fast enough for a click on a large model.
+    pub fn raycast_set(&self, origin: Vec3, dir: Vec3) -> Option<(usize, f32)> {
+        let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
+        let mut best: Option<(usize, f32)> = None;
+        for (set, r) in self.set_ranges().iter().enumerate() {
+            let tris = &self.indices[r.first_index as usize..(r.first_index + r.index_count) as usize];
+            for t in tris.chunks_exact(3) {
+                let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
+                // Moller-Trumbore.
+                let (e1, e2) = (b - a, c - a);
+                let p = dir.cross(e2);
+                let det = e1.dot(p);
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let inv = 1.0 / det;
+                let s = origin - a;
+                let u = s.dot(p) * inv;
+                if !(0.0..=1.0).contains(&u) {
+                    continue;
+                }
+                let q = s.cross(e1);
+                let v = dir.dot(q) * inv;
+                if v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                let dist = e2.dot(q) * inv;
+                if dist > 0.0 && best.is_none_or(|(_, d)| dist < d) {
+                    best = Some((set, dist));
+                }
+            }
+        }
+        best
+    }
+
     /// Axis-aligned bounds as (min, max). Returns zeros for an empty mesh.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let mut it = self.vertices.iter().map(|v| Vec3::from(v.position));
@@ -396,6 +432,22 @@ mod tests {
         // A mesh without explicit sets is its own single set.
         let plain = Mesh::uv_sphere(1.0, 8, 4);
         assert_eq!(plain.extract_set(0).unwrap().indices.len(), plain.indices.len());
+    }
+
+    #[test]
+    fn a_ray_finds_the_nearest_surface_and_its_set() {
+        let m = two_sets();
+        // From far outside, aim at the sphere centre along each axis: the first surface hit is the
+        // sphere's, and its set is the one whose triangles contain that point.
+        let (set, d) = m.raycast_set(Vec3::new(5.0, 0.3, 0.2), Vec3::new(-1.0, 0.0, 0.0)).unwrap();
+        assert!((d - 4.07).abs() < 0.3, "distance {d}");
+        let hit = Vec3::new(5.0 - d, 0.3, 0.2);
+        let north = hit.y > 0.0;
+        assert_eq!(set, if north { 0 } else { 1 }, "hit {hit}");
+        let (south_set, _) = m.raycast_set(Vec3::new(5.0, -0.6, 0.0), Vec3::new(-1.0, 0.0, 0.0)).unwrap();
+        assert_eq!(south_set, 1);
+        assert!(m.raycast_set(Vec3::new(5.0, 5.0, 5.0), Vec3::new(1.0, 0.0, 0.0)).is_none(), "a miss");
+        assert!(m.raycast_set(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, 1.0)).is_none(), "pointing away");
     }
 
     #[test]

@@ -34,6 +34,7 @@ impl App {
             egui::Grid::new("mouse_keys").num_columns(2).spacing([12.0, 3.0]).show(ui, |ui| {
                 for (keys, what) in [
                     ("Left drag", "paint"),
+                    ("Ctrl + click", "pick texture set"),
                     ("Alt + left drag", "orbit"),
                     ("Middle drag", "pan"),
                     ("Alt + right drag, scroll", "zoom"),

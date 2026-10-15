@@ -335,6 +335,13 @@ impl ViewportGpu {
             .collect()
     }
 
+    /// Reallocate one set's paint store at `size` and composite `doc` immediately.
+    pub fn rebuild_set(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, set: usize, doc: &Document, size: u32) {
+        if let Some(p) = self.sets.get_mut(set) {
+            p.rebuild(device, queue, doc, size);
+        }
+    }
+
     /// Hold `batch` until the next frame is rendered; queued batches run before that frame's own.
     pub fn enqueue(&mut self, batch: SetBatch) {
         self.queued.push(batch);

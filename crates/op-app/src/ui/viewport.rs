@@ -71,7 +71,11 @@ impl App {
         let mut stamp_target = None;
         // A modal dialog must not paint through to the viewport underneath.
         let modal_open = self.dialog.is_some() || self.confirm.is_some();
-        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !modal_open;
+        let pick = resp.clicked() && mods.command && !alt && !modal_open;
+        if let (true, Some(pos)) = (pick, resp.interact_pointer_pos()) {
+            self.pick_set_at(rect, pos);
+        }
+        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {

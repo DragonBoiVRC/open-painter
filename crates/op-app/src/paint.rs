@@ -520,6 +520,16 @@ impl PaintGpu {
         self.size
     }
 
+    /// Reallocate at `size` and composite `doc` right away (no paint is kept). Used to grow a set
+    /// that was held at a placeholder size, or to shrink one that has not been touched.
+    pub fn rebuild(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document, size: u32) {
+        let mut enc = device.create_command_encoder(&Default::default());
+        self.reset(device, &mut enc, doc, size);
+        self.compositor.render(device, &mut enc, doc, &self.store, &self.output);
+        self.last_doc = Some(doc.clone());
+        queue.submit([enc.finish()]);
+    }
+
     /// Read back every paint layer's channels and every mask of `doc` for saving.
     pub fn capture_blobs(&self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document) -> Vec<TextureBlob> {
         let mut out = Vec::new();

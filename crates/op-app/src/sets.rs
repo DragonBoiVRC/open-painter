@@ -10,6 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+/// Size of the paint store of a set nobody has touched.
+const PLACEHOLDER_SIZE: u32 = 64;
+
 /// Everything that belongs to one texture set while it is not the active one.
 pub struct SetState {
     pub doc: Document,
@@ -20,13 +23,16 @@ pub struct SetState {
     pub bake_rev: u64,
     pub tex_size: u32,
     pub collapsed: HashSet<NodeId>,
+    /// False while the set's paint store is held at the small placeholder size: nothing has been
+    /// painted in it, so it looks the same and costs almost no GPU memory.
+    pub materialized: bool,
 }
 
 impl SetState {
     /// A set restored from a saved project.
     pub fn restored(doc: Document, tex_size: u32, baked: HashMap<MeshMap, BakedMap>) -> Self {
         let selected = doc.nodes.last().map(|n| n.id);
-        Self { doc, selected, undo: Vec::new(), redo: Vec::new(), baked: Arc::new(baked), bake_rev: 1, tex_size, collapsed: HashSet::new() }
+        Self { doc, selected, undo: Vec::new(), redo: Vec::new(), baked: Arc::new(baked), bake_rev: 1, tex_size, collapsed: HashSet::new(), materialized: true }
     }
 
     /// A new set with the default material layer.
@@ -42,6 +48,7 @@ impl SetState {
             bake_rev: 0,
             tex_size,
             collapsed: HashSet::new(),
+            materialized: false,
         }
     }
 }
@@ -66,6 +73,7 @@ impl App {
             bake_rev: self.bake_rev,
             tex_size: self.tex_size,
             collapsed: std::mem::take(&mut self.collapsed),
+            materialized: true,
         }
     }
 
@@ -157,9 +165,10 @@ impl App {
         let first = self.parked[0].take().expect("just created");
         self.put_live(first);
         self.parked[0] = None;
-        for set in 0..n {
-            let doc = if set == 0 { self.doc.clone() } else { Document::with_default_material() };
-            self.enqueue(SetBatch { set, doc, ops: vec![PaintOp::Reset(size)] });
+        self.enqueue(SetBatch { set: 0, doc: self.doc.clone(), ops: vec![PaintOp::Reset(size)] });
+        for set in 1..n {
+            let doc = Document::with_default_material();
+            self.gpu_rebuild(set, &doc, PLACEHOLDER_SIZE);
         }
     }
 
@@ -175,13 +184,37 @@ impl App {
         self.stroke.active = false;
         self.restart_procgen();
         let active = active.min(states.len().saturating_sub(1));
-        for (set, ((size, blobs), st)) in loads.into_iter().zip(&states).enumerate() {
-            self.enqueue(SetBatch { set, doc: st.doc.clone(), ops: vec![PaintOp::Load { size, blobs }] });
+        let mut states = states;
+        for (set, ((size, blobs), st)) in loads.into_iter().zip(states.iter_mut()).enumerate() {
+            if set != active && blobs.is_empty() {
+                // Nothing painted: keep it small until it is opened.
+                st.materialized = false;
+                self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
+            } else {
+                self.enqueue(SetBatch { set, doc: st.doc.clone(), ops: vec![PaintOp::Load { size, blobs }] });
+            }
         }
         self.parked = states.into_iter().map(Some).collect();
         let live = self.parked[active].take().expect("the active set is present");
         self.put_live(live);
         self.active = active;
+    }
+
+    /// Make the texture set under `pos` (a point in the viewport `rect`) the active one.
+    pub(crate) fn pick_set_at(&mut self, rect: egui::Rect, pos: egui::Pos2) {
+        if self.set_ranges_len() < 2 {
+            return;
+        }
+        let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+        let ndc = glam::Vec2::new((pos.x - rect.min.x) / w * 2.0 - 1.0, 1.0 - (pos.y - rect.min.y) / h * 2.0);
+        let inv = self.camera.view_proj(w / h).inverse();
+        // wgpu clip space has depth 0 at the near plane and 1 at the far plane.
+        let near = inv.project_point3(ndc.extend(0.0));
+        let far = inv.project_point3(ndc.extend(1.0));
+        match self.mesh.raycast_set(near, (far - near).normalize_or_zero()) {
+            Some((set, _)) => self.switch_set(set),
+            None => self.status = "No model under the cursor.".into(),
+        }
     }
 
     /// Make set `i` the one being edited.
@@ -195,7 +228,15 @@ impl App {
         self.stroke.active = false;
         self.flush_pending();
         self.restart_procgen();
-        let old = self.take_live();
+        self.ensure_materialized(i);
+        let untouched = self.undo.is_empty() && self.doc == Document::with_default_material();
+        let mut old = self.take_live();
+        if untouched {
+            // Nothing was done here: give its memory back.
+            old.materialized = false;
+            let (a, d) = (self.active, old.doc.clone());
+            self.gpu_rebuild(a, &d, PLACEHOLDER_SIZE);
+        }
         self.parked[self.active] = Some(old);
         let next = self.parked[i].take().expect("a parked set has its state");
         self.put_live(next);
@@ -203,6 +244,37 @@ impl App {
         let view = self.view;
         self.set_view(view);
         self.status = format!("Texture set '{}'.", self.set_name(i));
+    }
+
+    fn gpu_rebuild(&self, set: usize, doc: &Document, size: u32) {
+        if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
+            gpu.rebuild_set(&self.render_state.device, &self.render_state.queue, set, doc, size);
+        }
+    }
+
+    /// Give a parked set its full-size paint store (it starts empty, as it was). The active set always has one.
+    pub(crate) fn ensure_materialized(&mut self, set: usize) {
+        let Some(Some(st)) = self.parked.get(set) else { return };
+        if st.materialized {
+            return;
+        }
+        let (doc, size) = (st.doc.clone(), st.tex_size);
+        self.gpu_rebuild(set, &doc, size);
+        if let Some(Some(st)) = self.parked.get_mut(set) {
+            st.materialized = true;
+        }
+    }
+
+    /// Return a set that was materialised only for reading (export) to the placeholder size.
+    pub(crate) fn release_if_untouched(&mut self, set: usize) {
+        let Some(Some(st)) = self.parked.get(set) else { return };
+        if st.materialized && st.undo.is_empty() && st.doc == Document::with_default_material() {
+            let doc = st.doc.clone();
+            self.gpu_rebuild(set, &doc, PLACEHOLDER_SIZE);
+            if let Some(Some(st)) = self.parked.get_mut(set) {
+                st.materialized = false;
+            }
+        }
     }
 
     /// Apply `f` to a set's state wherever it currently lives.

@@ -38,6 +38,10 @@ impl App {
                         egui::FontId::proportional(10.5),
                         theme::TEXT_DIM,
                     );
+                    if active && self.sets_scrolled != i {
+                        resp.scroll_to_me(Some(egui::Align::Center));
+                        self.sets_scrolled = i;
+                    }
                     if resp.on_hover_text(format!("{}: {} triangles", r.name, r.index_count / 3)).clicked() {
                         pick = Some(i);
                     }
