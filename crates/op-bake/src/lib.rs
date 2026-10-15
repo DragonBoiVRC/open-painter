@@ -431,11 +431,26 @@ fn validate(low: &Mesh, high: Option<&Mesh>, settings: &BakeSettings) -> Result<
 /// Bake `settings.maps` for `low`. When `high` is given, normals, height and opacity are
 /// projected from it, and rays for AO / thickness are cast against it.
 pub fn bake(low: &Mesh, high: Option<&Mesh>, settings: &BakeSettings, progress: &Progress) -> Result<BakeResult, BakeError> {
+    bake_with_occluders(low, high, None, settings, progress)
+}
+
+/// Like [`bake`], for one part of a larger model. `low` is the part being baked and `occluders` the
+/// whole model it sits in: ambient occlusion and thickness rays are cast against the whole model
+/// (so one material is shadowed by its neighbours) and distances are relative to its size.
+/// Ignored when a high-poly mesh is given.
+pub fn bake_with_occluders(
+    low: &Mesh,
+    high: Option<&Mesh>,
+    occluders: Option<&Mesh>,
+    settings: &BakeSettings,
+    progress: &Progress,
+) -> Result<BakeResult, BakeError> {
     validate(low, high, settings)?;
     let geo = Geometry::new(low);
     let high_geo = high.map(Geometry::new);
-    let target_geo = high_geo.as_ref().unwrap_or(&geo);
-    let diag = geo.diagonal();
+    let occluder_geo = occluders.filter(|_| high.is_none()).map(Geometry::new);
+    let target_geo = high_geo.as_ref().or(occluder_geo.as_ref()).unwrap_or(&geo);
+    let diag = occluder_geo.as_ref().map_or_else(|| geo.diagonal(), |g| g.diagonal());
     let ctx = Context {
         geo: &geo,
         high: high_geo.as_ref(),
@@ -617,6 +632,40 @@ mod tests {
         let far = at(&r, MeshMap::AmbientOcclusion, 30, 16)[0];
         assert!(near < far - 0.1, "texels beside the wall must be darker: near {near}, far {far}");
         assert!(far > 0.85, "far from the wall the floor is mostly open: {far}");
+    }
+
+    /// Baking one part of a model: its neighbours still cast shadows on it, and with no
+    /// occluders given the part is baked alone, exactly as before.
+    #[test]
+    fn occluders_shadow_a_part_of_the_model() {
+        let v = |p: [f32; 3], uv: [f32; 2], n: [f32; 3]| Vertex { position: p, normal: n, uv };
+        let floor_v = vec![
+            v([0.0, 0.0, 0.0], [0.0, 1.0], [0.0, 0.0, 1.0]),
+            v([1.0, 0.0, 0.0], [1.0, 1.0], [0.0, 0.0, 1.0]),
+            v([1.0, 1.0, 0.0], [1.0, 0.0], [0.0, 0.0, 1.0]),
+            v([0.0, 1.0, 0.0], [0.0, 0.0], [0.0, 0.0, 1.0]),
+        ];
+        let floor = Mesh { vertices: floor_v.clone(), indices: vec![0, 1, 2, 0, 2, 3], ..Default::default() };
+        let mut all_v = floor_v;
+        all_v.extend([
+            v([0.0, 0.0, 0.0], [5.0, 5.0], [1.0, 0.0, 0.0]),
+            v([0.0, 1.0, 0.0], [5.0, 5.0], [1.0, 0.0, 0.0]),
+            v([0.0, 1.0, 1.0], [5.0, 5.0], [1.0, 0.0, 0.0]),
+            v([0.0, 0.0, 1.0], [5.0, 5.0], [1.0, 0.0, 0.0]),
+        ]);
+        let whole = Mesh { vertices: all_v, indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7], ..Default::default() };
+        let s = BakeSettings { size: 32, maps: vec![MeshMap::AmbientOcclusion], samples: 64, ao_distance: 0.5, ..Default::default() };
+        let progress = Progress::new();
+
+        let alone = bake_with_occluders(&floor, None, None, &s, &progress).unwrap();
+        let shadowed = bake_with_occluders(&floor, None, Some(&whole), &s, &progress).unwrap();
+        let (near_a, far_a) = (at(&alone, MeshMap::AmbientOcclusion, 1, 16)[0], at(&alone, MeshMap::AmbientOcclusion, 30, 16)[0]);
+        let (near_s, far_s) = (at(&shadowed, MeshMap::AmbientOcclusion, 1, 16)[0], at(&shadowed, MeshMap::AmbientOcclusion, 30, 16)[0]);
+        assert!(near_a > 0.95 && far_a > 0.95, "a lone floor is open: {near_a} {far_a}");
+        assert!(near_s < far_s - 0.1, "the wall must shade the floor beside it: {near_s} vs {far_s}");
+        // A high-poly mesh takes precedence over occluders.
+        let with_high = bake_with_occluders(&floor, Some(&floor), Some(&whole), &s, &progress).unwrap();
+        assert!(at(&with_high, MeshMap::AmbientOcclusion, 1, 16)[0] > 0.9);
     }
 
     #[test]

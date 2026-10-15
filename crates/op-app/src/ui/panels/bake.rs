@@ -6,6 +6,9 @@ use op_core::MeshMap;
 impl App {
     pub(crate) fn bake_panel(&mut self, ui: &mut egui::Ui) {
         let busy = self.bake.job.is_some();
+        if self.set_ranges_len() > 1 {
+            ui.label(format!("Texture set: {}", self.set_name(self.active)));
+        }
         ui.label(format!("Resolution: {}x{} (the texture set resolution)", self.tex_size, self.tex_size));
         ui.separator();
         ui.label("Maps:");

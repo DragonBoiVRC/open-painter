@@ -74,6 +74,29 @@ impl Mesh {
         next as usize == self.indices.len()
     }
 
+    /// A mesh made of just texture set `set`: its triangles with the vertices they use, renumbered.
+    /// Returns `None` if there is no such set.
+    pub fn extract_set(&self, set: usize) -> Option<Mesh> {
+        let ranges = self.set_ranges();
+        let r = ranges.get(set)?;
+        let tris = &self.indices[r.first_index as usize..(r.first_index + r.index_count) as usize];
+        let mut remap = vec![u32::MAX; self.vertices.len()];
+        let mut vertices = Vec::new();
+        let indices = tris
+            .iter()
+            .map(|&i| {
+                let slot = &mut remap[i as usize];
+                if *slot == u32::MAX {
+                    *slot = vertices.len() as u32;
+                    vertices.push(self.vertices[i as usize]);
+                }
+                *slot
+            })
+            .collect::<Vec<_>>();
+        let count = indices.len() as u32;
+        Some(Mesh { vertices, indices, sets: vec![SetRange { name: r.name.clone(), first_index: 0, index_count: count }] })
+    }
+
     /// Axis-aligned bounds as (min, max). Returns zeros for an empty mesh.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let mut it = self.vertices.iter().map(|v| Vec3::from(v.position));
@@ -344,6 +367,28 @@ mod tests {
             SetRange { name: "Ünïcode ✓".into(), first_index: half, index_count: total - half },
         ];
         m
+    }
+
+    #[test]
+    fn extracting_a_set_keeps_only_its_triangles_and_renumbers() {
+        let m = two_sets();
+        let (a, b) = (m.extract_set(0).unwrap(), m.extract_set(1).unwrap());
+        assert_eq!(a.indices.len() + b.indices.len(), m.indices.len());
+        assert_eq!(a.sets.len(), 1);
+        assert!(a.sets_are_valid() && b.sets_are_valid());
+        for part in [&a, &b] {
+            assert!(part.indices.iter().all(|&i| (i as usize) < part.vertices.len()));
+            assert!(part.vertices.len() <= m.vertices.len());
+        }
+        // The triangles are the same geometry: compare corner positions in order.
+        let corners = |mesh: &Mesh, tris: &[u32]| -> Vec<[f32; 3]> { tris.iter().map(|&i| mesh.vertices[i as usize].position).collect() };
+        let r1 = &m.sets[1];
+        let want = corners(&m, &m.indices[r1.first_index as usize..(r1.first_index + r1.index_count) as usize]);
+        assert_eq!(corners(&b, &b.indices), want);
+        assert!(m.extract_set(2).is_none());
+        // A mesh without explicit sets is its own single set.
+        let plain = Mesh::uv_sphere(1.0, 8, 4);
+        assert_eq!(plain.extract_set(0).unwrap().indices.len(), plain.indices.len());
     }
 
     #[test]

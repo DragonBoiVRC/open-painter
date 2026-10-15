@@ -41,6 +41,10 @@ impl SetState {
 }
 
 impl App {
+    pub(crate) fn set_ranges_len(&self) -> usize {
+        self.mesh.set_ranges().len()
+    }
+
     pub(crate) fn set_name(&self, i: usize) -> String {
         self.mesh.set_ranges().get(i).map_or_else(|| "?".into(), |s| s.name.clone())
     }

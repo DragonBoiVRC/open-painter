@@ -661,17 +661,21 @@ impl App {
             cage_rear: b.cage_rear_pct / 100.0,
             padding: 16,
         };
-        let low = self.mesh.clone();
+        // Bake this texture set's triangles; the rest of the model still shades them.
+        let Some(low) = self.mesh.extract_set(self.active) else { return };
+        let occluders = (self.set_ranges_len() > 1).then(|| self.mesh.clone());
         let high = b.high.as_ref().map(|(m, _)| m.clone());
         let progress = BakeProgress::new();
         let worker_progress = progress.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = op_bake::bake(&low, high.as_deref(), &settings, &worker_progress).map_err(|e| e.to_string());
+            let result = op_bake::bake_with_occluders(&low, high.as_deref(), occluders.as_ref(), &settings, &worker_progress)
+                .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
         self.bake.job = Some(BakeJob { set: self.active, rx, progress, started: Instant::now() });
-        self.status = format!("Baking {} map(s) at {}x{}...", self.bake.maps.len(), self.tex_size, self.tex_size);
+        let (n, size) = (self.bake.maps.len(), self.tex_size);
+        self.status = format!("Baking {n} map(s) for '{}' at {size}x{size}...", self.set_name(self.active));
     }
 
     fn poll_bake(&mut self, ctx: &egui::Context) {
