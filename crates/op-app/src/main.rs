@@ -3,6 +3,7 @@ mod composite;
 mod files;
 mod gpu_io;
 mod paint;
+mod picker;
 mod procgen;
 mod sets;
 mod ui;
@@ -219,6 +220,7 @@ struct App {
     modified: bool,
     todo: Vec<Todo>,
     dialog: Option<PathDialog>,
+    picker: Option<picker::Picker>,
     confirm: Option<Pending>,
     after_save: Option<Pending>,
     allow_close: bool,
@@ -315,12 +317,13 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             gesture_before: None,
-            status: String::from("Select a layer and paint. Orbit: Alt+left or middle. Drop a .fbx, .glb/.gltf or .opproj to open."),
+            status: String::from("Select a layer and paint. Orbit: Alt+left or middle. Drop a .fbx, .obj, .glb/.gltf or .opproj to open."),
             render_state: rs,
             project_path: None,
             modified: false,
             todo: Vec::new(),
             dialog: None,
+            picker: None,
             confirm: None,
             after_save: None,
             allow_close: false,
@@ -412,8 +415,12 @@ impl App {
     }
 
     fn load_mesh_file(&mut self, path: &Path) {
-        let is_fbx = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fbx"));
-        let loaded = if is_fbx { Mesh::load_fbx(path) } else { Mesh::load_gltf(path) };
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let loaded = match ext.as_str() {
+            "fbx" => Mesh::load_fbx(path),
+            "obj" => Mesh::load_obj(path),
+            _ => Mesh::load_gltf(path),
+        };
         match loaded {
             Ok(mesh) => {
                 let tris = mesh.indices.len() / 3;
@@ -483,7 +490,8 @@ impl App {
     fn perform(&mut self, action: Pending, ctx: &egui::Context) {
         match action {
             Pending::New => self.new_project(),
-            Pending::Open(p) => self.open_path(&p),
+            Pending::Open(p) if is_project(&p) => self.open_path(&p),
+            Pending::Open(p) => self.load_mesh_file(&p),
             Pending::Mesh(p) => self.load_mesh_file(&p),
             Pending::Quit => {
                 self.allow_close = true;
@@ -835,6 +843,7 @@ impl App {
                 Err(mpsc::TryRecvError::Disconnected) => self.autosave_rx = None,
             }
         }
+        self.poll_picker(ctx);
         self.poll_bake(ctx);
         self.drive_procgen(ctx);
         if let Some(rx) = &self.export.running {
@@ -1249,12 +1258,17 @@ impl App {
         if let Some(mut d) = self.dialog.take() {
             let mut keep = true;
             let mut accepted = false;
-            egui::Window::new(if d.save { "Save project as" } else { "Open project" })
+            let mut browse = false;
+            let busy = self.picker.is_some();
+            egui::Window::new(if d.save { "Save project as" } else { "Open project or model" })
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("Path:");
-                    ui.add(egui::TextEdit::singleline(&mut d.path).desired_width(460.0));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut d.path).desired_width(360.0));
+                        browse = picker::browse_button(ui, busy);
+                    });
                     if d.save && Path::new(&d.path).exists() {
                         ui.colored_label(egui::Color32::YELLOW, "This file exists and will be replaced.");
                     }
@@ -1267,6 +1281,10 @@ impl App {
                         }
                     });
                 });
+            if browse {
+                let field = if d.save { picker::Field::SavePath } else { picker::Field::OpenPath };
+                self.browse(field, &d.path);
+            }
             if accepted && !d.path.trim().is_empty() {
                 let path = PathBuf::from(d.path.trim());
                 if d.save {
@@ -1328,7 +1346,13 @@ impl App {
                     ui.small(format!("  {}.{}", m.file, m.format.extension()));
                 }
                 ui.label("Folder:");
-                ui.add(egui::TextEdit::singleline(&mut self.export.dir).desired_width(420.0));
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.export.dir).desired_width(330.0));
+                    if picker::browse_button(ui, self.picker.is_some()) {
+                        let cur = self.export.dir.clone();
+                        self.browse(picker::Field::ExportDir, &cur);
+                    }
+                });
                 let ranges = self.mesh.set_ranges();
                 if ranges.len() > 1 {
                     ui.add_space(4.0);
@@ -1383,7 +1407,13 @@ impl App {
                 }
                 ui.separator();
                 ui.label("Import a Substance Painter preset (.spexp):");
-                ui.add(egui::TextEdit::singleline(&mut self.export.import_path).desired_width(420.0));
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.export.import_path).desired_width(330.0));
+                    if picker::browse_button(ui, self.picker.is_some()) {
+                        let cur = self.export.import_path.clone();
+                        self.browse(picker::Field::PresetImport, &cur);
+                    }
+                });
                 if ui.add_enabled(!self.export.import_path.trim().is_empty(), egui::Button::new("Import preset")).clicked() {
                     self.import_preset();
                 }

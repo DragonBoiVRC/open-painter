@@ -16,6 +16,8 @@ pub enum MeshError {
 }
 
 mod fbx;
+mod obj;
+mod triangulate;
 
 const MESH_MAGIC_V1: &[u8; 8] = b"OPMESH01";
 const MESH_MAGIC: &[u8; 8] = b"OPMESH02";
@@ -232,6 +234,11 @@ impl Mesh {
             return Err(bad("inconsistent material sets"));
         }
         Ok(mesh)
+    }
+
+    /// Load a Wavefront OBJ; each `usemtl` material becomes a texture set.
+    pub fn load_obj(path: impl AsRef<Path>) -> Result<Self, MeshError> {
+        obj::load(path.as_ref())
     }
 
     /// Load every mesh in an FBX file (binary, version 7.x), with its node transforms applied and

@@ -142,14 +142,19 @@ fn scene_fix(doc: &Document) -> DMat4 {
     }
 }
 
-/// Fan triangulation: exact for convex polygons, which is what DCC tools export for quads.
-fn fan(
-    _: &fbxcel_dom::v7400::data::mesh::PolygonVertices<'_>,
+/// Ear-clipping triangulation, so concave n-gons keep their shape.
+fn ear_clip(
+    pv: &fbxcel_dom::v7400::data::mesh::PolygonVertices<'_>,
     poly: &[fbxcel_dom::v7400::data::mesh::PolygonVertexIndex],
     out: &mut Vec<[fbxcel_dom::v7400::data::mesh::PolygonVertexIndex; 3]>,
 ) -> anyhow::Result<()> {
-    for i in 1..poly.len().saturating_sub(1) {
-        out.push([poly[0], poly[i], poly[i + 1]]);
+    let mut pts = Vec::with_capacity(poly.len());
+    for &i in poly {
+        let p = pv.control_point(i).ok_or_else(|| anyhow::anyhow!("a polygon refers to a missing control point"))?;
+        pts.push(DVec3::new(p.x, p.y, p.z));
+    }
+    for t in crate::triangulate::triangulate(&pts) {
+        out.push(t.map(|k| poly[k]));
     }
     Ok(())
 }
@@ -193,7 +198,7 @@ fn add_geometry(
     world: DMat4,
 ) -> Result<(), MeshError> {
     let polys = geometry.polygon_vertices().map_err(err)?;
-    let tris = polys.triangulate_each(fan).map_err(err)?;
+    let tris = polys.triangulate_each(ear_clip).map_err(err)?;
 
     let (mut normals, mut uvs, mut mats) = (None, None, None);
     for layer in geometry.layers() {

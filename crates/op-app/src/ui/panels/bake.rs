@@ -31,7 +31,13 @@ impl App {
             ui.add(egui::Slider::new(&mut self.bake.curvature_strength, 0.1..=8.0).logarithmic(true).text("Curvature strength"));
             ui.separator();
             ui.label("High-poly source (optional): normals, height and opacity are projected from it.");
-            ui.add(egui::TextEdit::singleline(&mut self.bake.high_path).desired_width(420.0));
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.bake.high_path).desired_width(ui.available_width() - 100.0));
+                if crate::picker::browse_button(ui, self.picker.is_some()) {
+                    let cur = self.bake.high_path.clone();
+                    self.browse(crate::picker::Field::HighPoly, &cur);
+                }
+            });
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.bake.high_path.trim().is_empty(), egui::Button::new("Load high-poly")).clicked() {
                     self.load_high_poly();
