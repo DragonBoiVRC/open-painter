@@ -1,21 +1,67 @@
 //! Export presets: which files to write and how channels are packed into them.
-//! This is our own schema (JSON-serializable); it is not an Adobe `.spexp`.
+//! This is our own schema (JSON-serializable). Adobe `.spexp` files are converted into it
+//! by [`crate::import`].
 
 use crate::ExportError;
+use op_core::MeshMap;
 use serde::{Deserialize, Serialize};
+
+/// A component of a color-like map. `L` is luminance (Rec. 709 weights).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Comp {
+    R,
+    G,
+    B,
+    L,
+}
+
+impl Comp {
+    pub fn index(self) -> Option<usize> {
+        match self {
+            Comp::R => Some(0),
+            Comp::G => Some(1),
+            Comp::B => Some(2),
+            Comp::L => None,
+        }
+    }
+}
+
+/// Color maps derived from the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorMap {
+    Base,
+    /// Diffuse color of the specular/glossiness workflow: `base * (1 - metallic)`.
+    Diffuse,
+    /// Specular color (F0) of the specular/glossiness workflow: `lerp(0.04, base, metallic)`.
+    Specular,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ChannelSrc {
-    /// Base color channels (linear in the document; sRGB-encoded on output if `srgb`).
-    BaseR,
-    BaseG,
-    BaseB,
+    Color { map: ColorMap, comp: Comp },
     Metallic,
     Roughness,
-    /// `1 - roughness`, for engines that store smoothness.
+    /// `1 - roughness`, for engines that store smoothness / glossiness.
     Smoothness,
-    /// A fixed value, e.g. a white ambient-occlusion placeholder (there is no AO channel yet).
+    /// A baked mesh map. Scalar maps ignore the component.
+    Mesh { map: MeshMap, comp: Comp },
+    /// Tangent-space normal map (baked). `directx` flips the green channel.
+    Normal { directx: bool, comp: Comp },
+    /// Ambient occlusion. There is no painted AO channel yet, so this is the baked AO.
+    AoMixed,
+    /// A fixed value, e.g. a white placeholder or an unsupported source replaced by black.
     Constant(f32),
+}
+
+impl ChannelSrc {
+    pub fn base(comp: Comp) -> Self {
+        ChannelSrc::Color { map: ColorMap::Base, comp }
+    }
+
+    /// Color-like sources are sRGB-encoded in 8/16-bit files when the map asks for it.
+    pub fn is_color(self) -> bool {
+        matches!(self, ChannelSrc::Color { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,13 +90,13 @@ pub enum BitDepth {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MapSpec {
-    /// File name without extension. May contain `$project` and `$textureSet`.
+    /// File name template without extension. See [`crate::expand_template`].
     pub file: String,
     /// 1 (gray), 3 (RGB) or 4 (RGBA) sources, in output channel order.
     pub channels: Vec<ChannelSrc>,
     pub format: FileFormat,
     pub bit_depth: BitDepth,
-    /// Encode base-color sources as sRGB (ignored for EXR, which is always linear).
+    /// Encode color-like sources as sRGB (ignored for EXR, which is always linear).
     pub srgb: bool,
 }
 
@@ -72,6 +118,14 @@ impl MapSpec {
         let f = &self.file;
         if f.is_empty() || f.contains(['/', '\\', ':', '\0']) || f.contains("..") || f.starts_with('.') {
             return bad("file name must be a plain name (no path separators or '..')".into());
+        }
+        crate::template::check_template(f).or_else(|e| bad(e))?;
+        for c in &self.channels {
+            if let ChannelSrc::Constant(v) = c {
+                if !v.is_finite() {
+                    return bad("constant channel is not a finite number".into());
+                }
+            }
         }
         Ok(())
     }
@@ -99,9 +153,9 @@ fn map(file: &str, channels: &[ChannelSrc], format: FileFormat, bit_depth: BitDe
 pub fn builtin_presets() -> Vec<ExportPreset> {
     use ChannelSrc::*;
     let png8 = |file: &str, ch: &[ChannelSrc], srgb: bool| map(file, ch, FileFormat::Png, BitDepth::U8, srgb);
-    let color = [BaseR, BaseG, BaseB];
-    // Occlusion has no channel yet, so packed maps carry a white placeholder.
-    let orm = [Constant(1.0), Roughness, Metallic];
+    let color = [ChannelSrc::base(Comp::R), ChannelSrc::base(Comp::G), ChannelSrc::base(Comp::B)];
+    // Occlusion has no painted channel yet, so packed maps carry the baked AO (white if not baked).
+    let orm = [AoMixed, Roughness, Metallic];
     vec![
         ExportPreset {
             name: "PBR Metallic Roughness".into(),
@@ -123,13 +177,27 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
             maps: vec![
                 png8("$project_$textureSet_BaseColor", &color, true),
                 png8("$project_$textureSet_OcclusionRoughnessMetallic", &orm, false),
+                png8(
+                    "$project_$textureSet_Normal",
+                    &[Normal { directx: true, comp: Comp::R }, Normal { directx: true, comp: Comp::G }, Normal { directx: true, comp: Comp::B }],
+                    false,
+                ),
             ],
         },
         ExportPreset {
             name: "Unity Standard (Metallic Smoothness)".into(),
             maps: vec![
-                png8("$project_$textureSet_AlbedoTransparency", &[BaseR, BaseG, BaseB, Constant(1.0)], true),
+                png8(
+                    "$project_$textureSet_AlbedoTransparency",
+                    &[ChannelSrc::base(Comp::R), ChannelSrc::base(Comp::G), ChannelSrc::base(Comp::B), Constant(1.0)],
+                    true,
+                ),
                 png8("$project_$textureSet_MetallicSmoothness", &[Metallic, Constant(0.0), Constant(0.0), Smoothness], false),
+                png8(
+                    "$project_$textureSet_Normal",
+                    &[Normal { directx: false, comp: Comp::R }, Normal { directx: false, comp: Comp::G }, Normal { directx: false, comp: Comp::B }],
+                    false,
+                ),
             ],
         },
         ExportPreset {

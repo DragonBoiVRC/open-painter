@@ -1,13 +1,20 @@
 //! Texture export: turn the composited channels of a texture set into image files
 //! according to an export preset. Pure CPU, no GPU or UI.
 
+mod import;
 mod preset;
+mod spexp;
+mod template;
 mod uv;
 
-pub use preset::{builtin_presets, BitDepth, ChannelSrc, ExportPreset, FileFormat, MapSpec};
+pub use import::{import_spexp, ImportError, ImportedPreset};
+pub use preset::{builtin_presets, BitDepth, ChannelSrc, ColorMap, Comp, ExportPreset, FileFormat, MapSpec};
+pub use spexp::{decode_spexp, MapId, SpexpChannel, SpexpError, SpexpMap, SpexpPreset};
+pub use template::{expand_template, variables as template_variables, Vars, KNOWN_VARS};
 pub use uv::uv_coverage;
 
-use op_core::{FALLBACK_BASE, FALLBACK_METALLIC, FALLBACK_ROUGHNESS};
+use op_core::{BakedMap, MeshMap, FALLBACK_BASE, FALLBACK_METALLIC, FALLBACK_ROUGHNESS};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +37,8 @@ pub struct TextureSetData {
     pub base: Vec<[f32; 3]>,
     pub metallic: Vec<f32>,
     pub roughness: Vec<f32>,
+    /// Baked mesh maps, each exactly `size` x `size`.
+    pub baked: HashMap<MeshMap, BakedMap>,
 }
 
 impl TextureSetData {
@@ -64,7 +73,24 @@ impl TextureSetData {
             base,
             metallic: resolve(metal_rg8, FALLBACK_METALLIC),
             roughness: resolve(rough_rg8, FALLBACK_ROUGHNESS),
+            baked: HashMap::new(),
         })
+    }
+
+    /// Attach a baked map. Rejected if its size does not match the texture set.
+    pub fn set_baked(&mut self, map: MeshMap, baked: BakedMap) -> Result<(), ExportError> {
+        if baked.size != self.size {
+            return Err(ExportError::Data(format!(
+                "{} was baked at {}x{} but the texture set is {}x{}",
+                map.label(),
+                baked.size,
+                baked.size,
+                self.size,
+                self.size
+            )));
+        }
+        self.baked.insert(map, baked);
+        Ok(())
     }
 
     /// Bleed colors outward from covered texels into the empty space around UV islands,
@@ -83,7 +109,8 @@ impl TextureSetData {
                     if covered[i] {
                         continue;
                     }
-                    let (mut n, mut b, mut m, mut r) = (0.0f32, [0.0f32; 3], 0.0f32, 0.0f32);
+                    let mut nbrs = [0usize; 8];
+                    let mut n = 0;
                     for dy in -1..=1i64 {
                         for dx in -1..=1i64 {
                             let (nx, ny) = (x + dx, y + dy);
@@ -92,20 +119,37 @@ impl TextureSetData {
                             }
                             let j = (ny * s + nx) as usize;
                             if covered[j] {
-                                n += 1.0;
-                                for c in 0..3 {
-                                    b[c] += self.base[j][c];
-                                }
-                                m += self.metallic[j];
-                                r += self.roughness[j];
+                                nbrs[n] = j;
+                                n += 1;
                             }
                         }
                     }
-                    if n > 0.0 {
+                    if n > 0 {
                         // Only previously-covered texels are read, so writing in place is safe.
-                        self.base[i] = [b[0] / n, b[1] / n, b[2] / n];
-                        self.metallic[i] = m / n;
-                        self.roughness[i] = r / n;
+                        let nf = n as f32;
+                        let avg3 = |v: &[[f32; 3]]| {
+                            let mut a = [0.0f32; 3];
+                            for &j in &nbrs[..n] {
+                                for c in 0..3 {
+                                    a[c] += v[j][c];
+                                }
+                            }
+                            [a[0] / nf, a[1] / nf, a[2] / nf]
+                        };
+                        let avg1 = |v: &[f32]| nbrs[..n].iter().map(|&j| v[j]).sum::<f32>() / nf;
+                        self.base[i] = avg3(&self.base);
+                        self.metallic[i] = avg1(&self.metallic);
+                        self.roughness[i] = avg1(&self.roughness);
+                        for map in self.baked.values_mut() {
+                            let mut a = [0.0f32; 3];
+                            for &j in &nbrs[..n] {
+                                let t = map.texel(j);
+                                for c in 0..3 {
+                                    a[c] += t[c];
+                                }
+                            }
+                            map.set_texel(i, [a[0] / nf, a[1] / nf, a[2] / nf]);
+                        }
                         grown[i] = true;
                         any = true;
                     }
@@ -122,18 +166,16 @@ impl TextureSetData {
 pub struct ExportContext<'a> {
     pub project: &'a str,
     pub texture_set: &'a str,
+    pub mesh: &'a str,
     pub out_dir: &'a Path,
 }
 
-/// Keep only characters that are safe in a file name; everything else becomes `_`.
-fn sanitize(s: &str) -> String {
-    let cleaned: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || "-_ ".contains(c) { c } else { '_' }).collect();
-    let cleaned = cleaned.trim().to_string();
-    if cleaned.is_empty() { "untitled".into() } else { cleaned }
-}
-
-fn expand(template: &str, ctx: &ExportContext) -> String {
-    template.replace("$project", &sanitize(ctx.project)).replace("$textureSet", &sanitize(ctx.texture_set))
+/// What an export wrote, and anything the user should know about how it was produced.
+#[derive(Debug, Default)]
+pub struct ExportOutcome {
+    pub files: Vec<PathBuf>,
+    /// For example "Ambient occlusion was not baked: used the neutral default."
+    pub notes: Vec<String>,
 }
 
 fn srgb_encode(c: f32) -> f32 {
@@ -141,23 +183,62 @@ fn srgb_encode(c: f32) -> f32 {
     if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
-fn sample(src: ChannelSrc, i: usize, data: &TextureSetData, encode: bool) -> f32 {
-    let base = |c: usize| {
-        let v = data.base[i][c];
-        if encode { srgb_encode(v) } else { v }
+fn luma(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+fn comp_of(c: [f32; 3], comp: Comp) -> f32 {
+    match comp.index() {
+        Some(i) => c[i],
+        None => luma(c),
+    }
+}
+
+/// Value of one source at texel `i`. Missing baked maps fall back to their neutral default
+/// and are recorded in `missing`.
+fn sample(src: ChannelSrc, i: usize, data: &TextureSetData, encode: bool, missing: &mut BTreeSet<MeshMap>) -> f32 {
+    let enc = |v: f32| if encode { srgb_encode(v) } else { v };
+    let mut baked = |map: MeshMap| -> [f32; 3] {
+        match data.baked.get(&map) {
+            Some(t) => t.texel(i),
+            None => {
+                missing.insert(map);
+                map.default_value()
+            }
+        }
     };
     match src {
-        ChannelSrc::BaseR => base(0),
-        ChannelSrc::BaseG => base(1),
-        ChannelSrc::BaseB => base(2),
+        ChannelSrc::Color { map, comp } => {
+            let (b, m) = (data.base[i], data.metallic[i]);
+            let c = match map {
+                ColorMap::Base => b,
+                ColorMap::Diffuse => [b[0] * (1.0 - m), b[1] * (1.0 - m), b[2] * (1.0 - m)],
+                ColorMap::Specular => [0, 1, 2].map(|k| 0.04 + (b[k] - 0.04) * m),
+            };
+            enc(comp_of(c, comp))
+        }
         ChannelSrc::Metallic => data.metallic[i],
         ChannelSrc::Roughness => data.roughness[i],
         ChannelSrc::Smoothness => 1.0 - data.roughness[i],
+        ChannelSrc::Mesh { map, comp } => comp_of(baked(map), if map.is_scalar() { Comp::R } else { comp }),
+        ChannelSrc::Normal { directx, comp } => {
+            let mut n = baked(MeshMap::NormalBase);
+            if directx {
+                n[1] = 1.0 - n[1];
+            }
+            comp_of(n, comp)
+        }
+        ChannelSrc::AoMixed => baked(MeshMap::AmbientOcclusion)[0],
         ChannelSrc::Constant(v) => v,
     }
 }
 
-fn write_map(path: &Path, spec: &MapSpec, data: &TextureSetData) -> Result<(), ExportError> {
+fn write_map(
+    path: &Path,
+    spec: &MapSpec,
+    data: &TextureSetData,
+    missing: &mut BTreeSet<MeshMap>,
+) -> Result<(), ExportError> {
     use image::{ColorType, ImageFormat};
     let n = data.size as usize * data.size as usize;
     let ch = spec.channels.len();
@@ -168,14 +249,18 @@ fn write_map(path: &Path, spec: &MapSpec, data: &TextureSetData) -> Result<(), E
         FileFormat::Exr => ImageFormat::OpenExr,
     };
     let wrap = |source| ExportError::Write { path: path.to_path_buf(), source };
-    let values = |i: usize, c: usize| sample(spec.channels[c], i, data, encode).clamp(0.0, 1.0);
+    // sRGB applies per source: only color-like sources are encoded.
+    let mut value = |i: usize, c: usize, linear_only: bool| {
+        let src = spec.channels[c];
+        sample(src, i, data, encode && src.is_color() && !linear_only, missing)
+    };
 
     match spec.bit_depth {
         BitDepth::U8 => {
             let mut buf = Vec::with_capacity(n * ch);
             for i in 0..n {
                 for c in 0..ch {
-                    buf.push((values(i, c) * 255.0).round() as u8);
+                    buf.push((value(i, c, false).clamp(0.0, 1.0) * 255.0).round() as u8);
                 }
             }
             let color = match ch {
@@ -189,7 +274,7 @@ fn write_map(path: &Path, spec: &MapSpec, data: &TextureSetData) -> Result<(), E
             let mut buf: Vec<u16> = Vec::with_capacity(n * ch);
             for i in 0..n {
                 for c in 0..ch {
-                    buf.push((values(i, c) * 65535.0).round() as u16);
+                    buf.push((value(i, c, false).clamp(0.0, 1.0) * 65535.0).round() as u16);
                 }
             }
             let color = match ch {
@@ -207,8 +292,7 @@ fn write_map(path: &Path, spec: &MapSpec, data: &TextureSetData) -> Result<(), E
             let mut buf: Vec<f32> = Vec::with_capacity(n * out_ch);
             for i in 0..n {
                 for c in 0..out_ch {
-                    let src = if ch == 1 { 0 } else { c };
-                    buf.push(sample(spec.channels[src], i, data, false));
+                    buf.push(value(i, if ch == 1 { 0 } else { c }, true));
                 }
             }
             let color = if out_ch == 4 { ColorType::Rgba32F } else { ColorType::Rgb32F };
@@ -218,22 +302,38 @@ fn write_map(path: &Path, spec: &MapSpec, data: &TextureSetData) -> Result<(), E
     }
 }
 
-/// Write every map of `preset` into `ctx.out_dir`. Returns the files written.
-pub fn export(preset: &ExportPreset, data: &TextureSetData, ctx: &ExportContext) -> Result<Vec<PathBuf>, ExportError> {
+/// Write every map of `preset` into `ctx.out_dir`.
+pub fn export(preset: &ExportPreset, data: &TextureSetData, ctx: &ExportContext) -> Result<ExportOutcome, ExportError> {
     preset.validate()?;
     let n = data.size as usize * data.size as usize;
     if data.base.len() != n || data.metallic.len() != n || data.roughness.len() != n {
         return Err(ExportError::Data("channel lengths do not match size".into()));
     }
-    std::fs::create_dir_all(ctx.out_dir)?;
-    let mut written = Vec::new();
+    // Expand every file name first so a bad template fails before anything is written.
+    let vars = Vars { project: ctx.project, texture_set: ctx.texture_set, mesh: ctx.mesh };
+    let mut names = Vec::new();
     for spec in &preset.maps {
-        let name = format!("{}.{}", expand(&spec.file, ctx), spec.format.extension());
-        let path = ctx.out_dir.join(name);
-        write_map(&path, spec, data)?;
-        written.push(path);
+        let stem = expand_template(&spec.file, &vars).map_err(ExportError::Preset)?;
+        names.push(format!("{stem}.{}", spec.format.extension()));
     }
-    Ok(written)
+    let mut seen = BTreeSet::new();
+    for name in &names {
+        if !seen.insert(name.to_lowercase()) {
+            return Err(ExportError::Preset(format!("two maps would both be written to '{name}'")));
+        }
+    }
+    std::fs::create_dir_all(ctx.out_dir)?;
+    let mut outcome = ExportOutcome::default();
+    let mut missing = BTreeSet::new();
+    for (spec, name) in preset.maps.iter().zip(&names) {
+        let path = ctx.out_dir.join(name);
+        write_map(&path, spec, data, &mut missing)?;
+        outcome.files.push(path);
+    }
+    for map in missing {
+        outcome.notes.push(format!("{} has not been baked: the neutral default value was used.", map.label()));
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -243,11 +343,17 @@ mod tests {
 
     fn data(size: u32, base: [f32; 3], metallic: f32, roughness: f32) -> TextureSetData {
         let n = (size * size) as usize;
-        TextureSetData { size, base: vec![base; n], metallic: vec![metallic; n], roughness: vec![roughness; n] }
+        TextureSetData {
+            size,
+            base: vec![base; n],
+            metallic: vec![metallic; n],
+            roughness: vec![roughness; n],
+            baked: HashMap::new(),
+        }
     }
 
     fn ctx<'a>(dir: &'a Path) -> ExportContext<'a> {
-        ExportContext { project: "proj", texture_set: "set", out_dir: dir }
+        ExportContext { project: "proj", texture_set: "set", mesh: "mesh", out_dir: dir }
     }
 
     fn preset(name: &str) -> ExportPreset {
@@ -280,8 +386,9 @@ mod tests {
     fn png8_basecolor_is_srgb_encoded_and_data_maps_are_not() {
         let dir = tempfile::tempdir().unwrap();
         let d = data(4, [0.2, 0.5, 0.05], 0.3, 0.8);
-        let files = export(&preset("PBR Metallic Roughness"), &d, &ctx(dir.path())).unwrap();
-        assert_eq!(files.len(), 3);
+        let out = export(&preset("PBR Metallic Roughness"), &d, &ctx(dir.path())).unwrap();
+        assert_eq!(out.files.len(), 3);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
         let base = image::open(dir.path().join("proj_set_BaseColor.png")).unwrap().to_rgb8();
         for (got, lin) in base.get_pixel(1, 1).0.iter().zip([0.2f32, 0.5, 0.05]) {
             assert_eq!(*got, (srgb_encode(lin) * 255.0).round() as u8);
@@ -293,13 +400,33 @@ mod tests {
     }
 
     #[test]
-    fn packed_orm_uses_the_documented_channel_order() {
+    fn packed_orm_uses_baked_ao_when_present_and_reports_when_not() {
         let dir = tempfile::tempdir().unwrap();
-        let d = data(2, [0.5; 3], 0.25, 0.75);
-        export(&preset("glTF Metallic-Roughness"), &d, &ctx(dir.path())).unwrap();
+        let mut d = data(2, [0.5; 3], 0.25, 0.75);
+        let out = export(&preset("glTF Metallic-Roughness"), &d, &ctx(dir.path())).unwrap();
+        assert_eq!(out.notes.len(), 1, "AO was not baked, the user must be told: {:?}", out.notes);
         let mr = image::open(dir.path().join("proj_set_MetallicRoughness.png")).unwrap().to_rgb8();
-        // glTF: R = occlusion (white placeholder), G = roughness, B = metalness.
+        // glTF: R = occlusion (white default), G = roughness, B = metalness.
         assert_eq!(mr.get_pixel(0, 0).0, [255, (0.75f32 * 255.0).round() as u8, (0.25f32 * 255.0).round() as u8]);
+
+        d.set_baked(MeshMap::AmbientOcclusion, BakedMap::filled(2, 1, [0.5; 3])).unwrap();
+        let out = export(&preset("glTF Metallic-Roughness"), &d, &ctx(dir.path())).unwrap();
+        assert!(out.notes.is_empty());
+        let mr = image::open(dir.path().join("proj_set_MetallicRoughness.png")).unwrap().to_rgb8();
+        assert_eq!(mr.get_pixel(1, 1).0[0], 128, "baked AO lands in the red channel");
+    }
+
+    #[test]
+    fn normal_maps_follow_the_requested_convention() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = data(2, [0.5; 3], 0.0, 0.5);
+        d.set_baked(MeshMap::NormalBase, BakedMap::filled(2, 3, [0.25, 0.75, 1.0])).unwrap();
+        export(&preset("Unreal Engine (ORM packed)"), &d, &ctx(dir.path())).unwrap(); // DirectX
+        let dx = image::open(dir.path().join("proj_set_Normal.png")).unwrap().to_rgb8().get_pixel(0, 0).0;
+        assert_eq!(dx, [64, 64, 255], "DirectX flips green");
+        export(&preset("Unity Standard (Metallic Smoothness)"), &d, &ctx(dir.path())).unwrap(); // OpenGL
+        let gl = image::open(dir.path().join("proj_set_Normal.png")).unwrap().to_rgb8().get_pixel(0, 0).0;
+        assert_eq!(gl, [64, 191, 255], "OpenGL keeps green");
     }
 
     #[test]
@@ -310,6 +437,19 @@ mod tests {
         let p = img.get_pixel(1, 0).0;
         assert_eq!(p[0], (0.4f32 * 255.0).round() as u8, "R = metallic");
         assert_eq!(p[3], ((1.0f32 - 0.7) * 255.0).round() as u8, "A = smoothness = 1 - roughness");
+    }
+
+    #[test]
+    fn derived_diffuse_and_specular_follow_the_standard_conversion() {
+        let d = data(1, [0.8, 0.4, 0.2], 0.5, 0.5);
+        let mut missing = BTreeSet::new();
+        let mut at = |src| sample(src, 0, &d, false, &mut missing);
+        let diffuse = |c| ChannelSrc::Color { map: ColorMap::Diffuse, comp: c };
+        let specular = |c| ChannelSrc::Color { map: ColorMap::Specular, comp: c };
+        assert!((at(diffuse(Comp::R)) - 0.4).abs() < 1e-6, "base * (1 - metallic)");
+        assert!((at(specular(Comp::R)) - (0.04 + (0.8 - 0.04) * 0.5)).abs() < 1e-6, "lerp(0.04, base, metallic)");
+        let l = at(ChannelSrc::base(Comp::L));
+        assert!((l - (0.2126 * 0.8 + 0.7152 * 0.4 + 0.0722 * 0.2)).abs() < 1e-6, "Rec.709 luminance");
     }
 
     #[test]
@@ -341,9 +481,9 @@ mod tests {
     fn project_names_cannot_escape_the_output_directory() {
         let dir = tempfile::tempdir().unwrap();
         let inner = dir.path().join("out");
-        let evil = ExportContext { project: "../../evil/..\\x", texture_set: "a/b", out_dir: &inner };
-        let files = export(&preset("PBR Metallic Roughness"), &data(2, [0.5; 3], 0.5, 0.5), &evil).unwrap();
-        for f in files {
+        let evil = ExportContext { project: "../../evil/..\\x", texture_set: "a/b", mesh: "m", out_dir: &inner };
+        let out = export(&preset("PBR Metallic Roughness"), &data(2, [0.5; 3], 0.5, 0.5), &evil).unwrap();
+        for f in out.files {
             assert_eq!(f.parent().unwrap(), inner, "{f:?} escaped");
             assert!(f.exists());
         }
@@ -351,21 +491,33 @@ mod tests {
     }
 
     #[test]
+    fn colliding_output_names_are_refused_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = preset("PBR Metallic Roughness");
+        p.maps[1].file = p.maps[0].file.clone();
+        assert!(export(&p, &data(2, [0.5; 3], 0.5, 0.5), &ctx(dir.path())).is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
     fn dilation_fills_exactly_the_requested_width_and_keeps_covered_texels() {
         // 8x8, only the left column covered with distinct values.
         let size = 8u32;
         let mut d = data(size, [0.0; 3], 0.0, 0.0);
+        d.set_baked(MeshMap::AmbientOcclusion, BakedMap::filled(8, 1, [0.0; 3])).unwrap();
         let mut covered = vec![false; 64];
         for y in 0..8usize {
             covered[y * 8] = true;
             d.metallic[y * 8] = 1.0;
             d.base[y * 8] = [1.0, 0.5, 0.25];
+            d.baked.get_mut(&MeshMap::AmbientOcclusion).unwrap().set_texel(y * 8, [0.9; 3]);
         }
         d.dilate(&covered, 3);
         for y in 0..8usize {
             assert_eq!(d.metallic[y * 8], 1.0, "covered texel changed");
             for x in 1..=3usize {
                 assert!(d.metallic[y * 8 + x] > 0.99 && d.base[y * 8 + x][1] > 0.49, "({x},{y}) not padded");
+                assert!(d.baked[&MeshMap::AmbientOcclusion].texel(y * 8 + x)[0] > 0.89, "baked maps are padded too");
             }
             assert_eq!(d.metallic[y * 8 + 4], 0.0, "padding went further than requested");
         }
@@ -398,13 +550,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = data(2, [0.5; 3], 0.5, 0.5);
         let mut p = preset("PBR Metallic Roughness");
-        p.maps[0].channels = vec![ChannelSrc::BaseR, ChannelSrc::BaseG]; // 2 channels
+        p.maps[0].channels.pop(); // 2 channels
         assert!(export(&p, &d, &ctx(dir.path())).is_err());
         let mut p = preset("PBR Metallic Roughness");
         p.maps[0].file = "../escape".into();
         assert!(export(&p, &d, &ctx(dir.path())).is_err());
         let mut p = preset("PBR Metallic Roughness");
         p.maps[0].format = FileFormat::Exr; // exr needs f32
+        assert!(export(&p, &d, &ctx(dir.path())).is_err());
+        let mut p = preset("PBR Metallic Roughness");
+        p.maps[0].channels[0] = ChannelSrc::Constant(f32::NAN);
         assert!(export(&p, &d, &ctx(dir.path())).is_err());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "nothing should be written");
     }

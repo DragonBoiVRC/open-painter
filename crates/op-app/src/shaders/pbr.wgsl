@@ -17,6 +17,11 @@ struct Globals {
 @group(1) @binding(2) var paint_rough: texture_2d<f32>;
 @group(1) @binding(3) var paint_samp: sampler;
 
+// Baked map preview. light_dir.w selects the mode: 0 shaded, 1 show the map as-is,
+// 2 shaded with the map (ambient occlusion) multiplied into the ambient light.
+@group(2) @binding(0) var preview_tex: texture_2d<f32>;
+@group(2) @binding(1) var preview_samp: sampler;
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -78,6 +83,11 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(g.light_dir.xyz);
     let h = normalize(v + l);
 
+    let pv = textureSample(preview_tex, preview_samp, i.uv);
+    if (g.light_dir.w > 0.5 && g.light_dir.w < 1.5) {
+        return vec4<f32>(pv.rgb, 1.0);
+    }
+    let ao = select(1.0, pv.r, g.light_dir.w >= 1.5);
     let pb = textureSample(paint_base, paint_samp, i.uv);
     let pm = textureSample(paint_metal, paint_samp, i.uv);
     let pr = textureSample(paint_rough, paint_samp, i.uv);
@@ -104,7 +114,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let r = reflect(-v, n);
     let env_spec = mix(ground, sky, r.y * 0.5 + 0.5);
     let f_amb = fresnel_schlick(n_dot_v, f0) * (1.0 - roughness * 0.7);
-    color += kd * albedo * hemi + env_spec * f_amb;
+    color += (kd * albedo * hemi + env_spec * f_amb) * ao;
 
     return vec4<f32>(to_srgb(tonemap(color)), 1.0);
 }

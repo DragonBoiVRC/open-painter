@@ -26,6 +26,35 @@ struct Offscreen {
     blit_bind: wgpu::BindGroup,
 }
 
+fn preview_texture_desc(size: u32) -> wgpu::TextureDescriptor<'static> {
+    wgpu::TextureDescriptor {
+        label: Some("preview"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    }
+}
+
+fn make_preview_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("preview_bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
+}
+
 /// GPU objects shared between frames; lives in egui's callback resources.
 pub struct ViewportGpu {
     pbr: wgpu::RenderPipeline,
@@ -39,10 +68,13 @@ pub struct ViewportGpu {
     index_count: u32,
     offscreen: Option<Offscreen>,
     pub paint: PaintGpu,
+    preview_layout: wgpu::BindGroupLayout,
+    preview_sampler: wgpu::Sampler,
+    preview_bind: wgpu::BindGroup,
 }
 
 impl ViewportGpu {
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, target_format: wgpu::TextureFormat) -> Self {
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -69,10 +101,48 @@ impl ViewportGpu {
         });
 
         let paint = PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE);
+        let preview_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("preview_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let preview_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            ..Default::default()
+        });
+        // Until a map is chosen the preview is a 1x1 white texel (also what AO mode multiplies by).
+        let white_view = device
+            .create_texture_with_data(
+                queue,
+                &preview_texture_desc(1),
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[255, 255, 255, 255],
+            )
+            .create_view(&Default::default());
+        let preview_bind = make_preview_bind(device, &preview_layout, &white_view, &preview_sampler);
         let pbr_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/pbr.wgsl"));
         let pbr_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pbr_pl"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&paint.material_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&paint.material_layout), Some(&preview_layout)],
             immediate_size: 0,
         });
         let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
@@ -177,7 +247,29 @@ impl ViewportGpu {
             index_count: 0,
             offscreen: None,
             paint,
+            preview_layout,
+            preview_sampler,
+            preview_bind,
         }
+    }
+
+    /// Show `rgba8` (a `size` x `size` image) on the model, or go back to the neutral preview.
+    pub fn set_preview(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: Option<(u32, &[u8])>) {
+        let tex = match image {
+            Some((size, rgba8)) if rgba8.len() == (size * size * 4) as usize => device.create_texture_with_data(
+                queue,
+                &preview_texture_desc(size),
+                wgpu::util::TextureDataOrder::LayerMajor,
+                rgba8,
+            ),
+            _ => device.create_texture_with_data(
+                queue,
+                &preview_texture_desc(1),
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[255, 255, 255, 255],
+            ),
+        };
+        self.preview_bind = make_preview_bind(device, &self.preview_layout, &tex.create_view(&Default::default()), &self.preview_sampler);
     }
 
     pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: &Mesh) {
@@ -206,7 +298,8 @@ impl ViewportGpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // COPY_SRC lets tests and screenshots read the rendered frame back.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let depth = device.create_texture(&wgpu::TextureDescriptor {
@@ -286,6 +379,7 @@ impl ViewportGpu {
             pass.set_pipeline(&self.pbr);
             pass.set_bind_group(0, &self.globals_bind, &[]);
             pass.set_bind_group(1, self.paint.material_bind(), &[]);
+            pass.set_bind_group(2, &self.preview_bind, &[]);
             pass.set_vertex_buffer(0, v.slice(..));
             pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.index_count, 0, 0..1);
@@ -358,7 +452,7 @@ mod tests {
     impl Rig {
         fn new() -> Option<Self> {
             let (device, queue) = gpu_device()?;
-            let mut gpu = ViewportGpu::new(&device, COLOR_FORMAT);
+            let mut gpu = ViewportGpu::new(&device, &queue, COLOR_FORMAT);
             gpu.set_mesh(&device, &Mesh::uv_sphere(1.0, 96, 48));
             let mut cam = OrbitCamera::default();
             cam.frame(Vec3::splat(-1.0), Vec3::splat(1.0));
@@ -625,6 +719,7 @@ mod tests {
             mesh_name: "sphere".into(),
             mesh: Mesh::uv_sphere(1.0, 96, 48),
             blobs: blobs.clone(),
+            baked: Default::default(),
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.opproj");
@@ -659,7 +754,7 @@ mod tests {
         let data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
         let preset = op_export::builtin_presets().remove(0);
         let dir = tempfile::tempdir().unwrap();
-        let ctx = op_export::ExportContext { project: "p", texture_set: "s", out_dir: dir.path() };
+        let ctx = op_export::ExportContext { project: "p", texture_set: "s", mesh: "m", out_dir: dir.path() };
         op_export::export(&preset, &data, &ctx).unwrap();
 
         let near = |a: u8, b: f32| (a as f32 - b * 255.0).abs() <= 1.5;
@@ -669,5 +764,48 @@ mod tests {
         let r = image::open(dir.path().join("p_s_Roughness.png")).unwrap().to_luma8();
         let m = image::open(dir.path().join("p_s_Metallic.png")).unwrap().to_luma8();
         assert!(near(r.get_pixel(3, 3).0[0], 0.6) && near(m.get_pixel(3, 3).0[0], 0.25));
+    }
+
+    /// The center pixel of the last rendered frame (RGBA8).
+    fn center_pixel(rig: &Rig) -> [u8; 4] {
+        let tex = &rig.gpu.offscreen.as_ref().expect("a frame was rendered").color;
+        let px = crate::gpu_io::read_texture(&rig.device, &rig.queue, tex, SIZE, 4);
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    }
+
+    /// Preview modes: 0 shaded, 1 the map as-is, 2 shaded with the map darkening the ambient light.
+    #[test]
+    fn baked_map_preview_modes_render_as_documented() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let doc = Document::with_default_material();
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let shaded = center_pixel(&rig);
+
+        // Mode 1 shows the image exactly.
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(4);
+        rig.gpu.set_preview(&rig.device, &rig.queue, Some((2, &red)));
+        rig.globals.light_dir[3] = 1.0;
+        rig.run(&doc, &[]);
+        assert_eq!(center_pixel(&rig), [255, 0, 0, 255], "mode 1 shows the map unchanged");
+
+        // Mode 2 with a dark map must darken the shaded result; with no map it must not change it.
+        let dark: Vec<u8> = [64, 64, 64, 255].repeat(4);
+        rig.gpu.set_preview(&rig.device, &rig.queue, Some((2, &dark)));
+        rig.globals.light_dir[3] = 2.0;
+        rig.run(&doc, &[]);
+        let occluded = center_pixel(&rig);
+        let lum = |p: [u8; 4]| p[0] as u32 + p[1] as u32 + p[2] as u32;
+        assert!(lum(occluded) < lum(shaded), "baked AO must darken: {occluded:?} vs {shaded:?}");
+
+        rig.gpu.set_preview(&rig.device, &rig.queue, None);
+        rig.run(&doc, &[]);
+        assert_eq!(center_pixel(&rig), shaded, "mode 2 without a map is the plain shaded view");
+
+        // Mode 0 ignores whatever preview is bound.
+        rig.gpu.set_preview(&rig.device, &rig.queue, Some((2, &red)));
+        rig.globals.light_dir[3] = 0.0;
+        rig.run(&doc, &[]);
+        assert_eq!(center_pixel(&rig), shaded);
     }
 }

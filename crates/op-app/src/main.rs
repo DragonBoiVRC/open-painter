@@ -8,16 +8,19 @@ mod viewport;
 use camera::OrbitCamera;
 use eframe::{egui, egui_wgpu};
 use glam::Vec3;
+use op_bake::{BakeSettings, Progress as BakeProgress};
 use op_core::{
-    srgb_to_linear, BlendMode, Document, FillParams, Mask, Node, NodeId, NodeKind, FALLBACK_BASE, FALLBACK_METALLIC,
-    FALLBACK_ROUGHNESS,
+    srgb_to_linear, BakedMap, BlendMode, Document, FillParams, Mask, MeshMap, Node, NodeId, NodeKind, FALLBACK_BASE,
+    FALLBACK_METALLIC, FALLBACK_ROUGHNESS,
 };
-use op_export::{ExportContext, ExportPreset, TextureSetData};
+use op_export::{ExportContext, ExportOutcome, ExportPreset, TextureSetData};
 use op_mesh::Mesh;
 use op_project::Project;
 use paint::{PaintOp, Stamp, Target, DEFAULT_TEXTURE_SIZE, MAX_STAMPS};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use viewport::{Globals, ViewportCallback, ViewportGpu};
 
@@ -97,7 +100,42 @@ struct ExportUi {
     dir: String,
     padding: u32,
     set_name: String,
-    running: Option<Receiver<Result<Vec<PathBuf>, String>>>,
+    running: Option<Receiver<Result<ExportOutcome, String>>>,
+    /// Path typed into the "import a Painter preset" field, and what the last import did.
+    import_path: String,
+    report: Vec<String>,
+    /// Notes from the last export (for example maps that were not baked).
+    last_notes: Vec<String>,
+}
+
+/// What the viewport shows.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Shaded,
+    /// Shaded, with the baked ambient occlusion darkening the ambient light.
+    ShadedAo,
+    /// A baked map, shown as-is.
+    Map(MeshMap),
+}
+
+struct BakeJob {
+    rx: Receiver<Result<op_bake::BakeResult, String>>,
+    progress: Arc<BakeProgress>,
+    started: Instant,
+}
+
+struct BakeUi {
+    open: bool,
+    maps: Vec<MeshMap>,
+    samples: u32,
+    ao_distance_pct: f32,
+    thickness_pct: f32,
+    curvature_strength: f32,
+    cage_front_pct: f32,
+    cage_rear_pct: f32,
+    high_path: String,
+    high: Option<(Arc<Mesh>, String)>,
+    job: Option<BakeJob>,
 }
 
 struct App {
@@ -134,6 +172,9 @@ struct App {
     presets: Vec<ExportPreset>,
     preset_warnings: Vec<String>,
     export: ExportUi,
+    baked: Arc<HashMap<MeshMap, BakedMap>>,
+    bake: BakeUi,
+    view: View,
 }
 
 fn is_project(p: &Path) -> bool {
@@ -143,7 +184,7 @@ fn is_project(p: &Path) -> bool {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         let rs = cc.wgpu_render_state.clone().expect("wgpu backend required");
-        let gpu = ViewportGpu::new(&rs.device, rs.target_format);
+        let gpu = ViewportGpu::new(&rs.device, &rs.queue, rs.target_format);
         rs.renderer.write().callback_resources.insert(gpu);
 
         let (user_presets, preset_warnings) = files::load_user_presets(&files::presets_dir());
@@ -202,7 +243,25 @@ impl App {
                 padding: DEFAULT_PADDING,
                 set_name: "default".into(),
                 running: None,
+                import_path: String::new(),
+                report: Vec::new(),
+                last_notes: Vec::new(),
             },
+            baked: Arc::new(HashMap::new()),
+            bake: BakeUi {
+                open: false,
+                maps: MeshMap::ALL.to_vec(),
+                samples: 32,
+                ao_distance_pct: 10.0,
+                thickness_pct: 25.0,
+                curvature_strength: 1.0,
+                cage_front_pct: 5.0,
+                cage_rear_pct: 5.0,
+                high_path: String::new(),
+                high: None,
+                job: None,
+            },
+            view: View::Shaded,
         };
         app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
         app.pending.push(PaintOp::Reset(app.tex_size));
@@ -251,6 +310,7 @@ impl App {
 
     fn new_project(&mut self) {
         self.reset_document();
+        self.clear_baked();
         self.project_path = None;
         self.modified = false;
         self.status = "New project.".into();
@@ -281,6 +341,8 @@ impl App {
         self.stroke.active = false;
         self.pending.clear();
         self.pending.push(PaintOp::Load { size: p.texture_size, blobs: p.blobs });
+        self.baked = Arc::new(p.baked);
+        self.set_view(View::Shaded);
         self.project_path = path;
         self.modified = modified;
     }
@@ -341,6 +403,7 @@ impl App {
             mesh_name: self.mesh_name.clone(),
             mesh: self.mesh.clone(),
             blobs,
+            baked: (*self.baked).clone(),
         })
     }
 
@@ -403,21 +466,196 @@ impl App {
         let dir = PathBuf::from(&self.export.dir);
         let (project, set, padding) = (self.project_name(), self.export.set_name.clone(), self.export.padding);
         let mesh = self.mesh.clone();
+        let mesh_name = self.mesh_name.clone();
+        let baked = self.baked.clone();
         let (tx, rx) = mpsc::channel();
         self.export.running = Some(rx);
         self.status = format!("Exporting '{}' to {} ...", preset.name, dir.display());
         // Padding and encoding are CPU-heavy; keep them off the UI thread.
         std::thread::spawn(move || {
-            let result = (|| -> Result<Vec<PathBuf>, String> {
+            let result = (|| -> Result<ExportOutcome, String> {
                 let mut data = TextureSetData::from_composite(size, &base, &metal, &rough).map_err(|e| e.to_string())?;
+                let mut stale = Vec::new();
+                for (map, b) in baked.iter() {
+                    if b.size == size {
+                        data.set_baked(*map, b.clone()).map_err(|e| e.to_string())?;
+                    } else {
+                        stale.push(format!(
+                            "{} was baked at {}x{}, not {size}x{size}: bake it again to use it.",
+                            map.label(),
+                            b.size,
+                            b.size
+                        ));
+                    }
+                }
                 if padding > 0 {
                     data.dilate(&op_export::uv_coverage(&mesh, size), padding);
                 }
-                let ctx = ExportContext { project: &project, texture_set: &set, out_dir: &dir };
-                op_export::export(&preset, &data, &ctx).map_err(|e| e.to_string())
+                let ctx = ExportContext { project: &project, texture_set: &set, mesh: &mesh_name, out_dir: &dir };
+                let mut outcome = op_export::export(&preset, &data, &ctx).map_err(|e| e.to_string())?;
+                outcome.notes.extend(stale);
+                Ok(outcome)
             })();
             let _ = tx.send(result);
         });
+    }
+
+    // ---- baking -----------------------------------------------------------------------
+
+    fn clear_baked(&mut self) {
+        if !self.baked.is_empty() {
+            self.baked = Arc::new(HashMap::new());
+        }
+        self.set_view(View::Shaded);
+    }
+
+    /// Switch what the viewport shows, uploading the baked map it needs.
+    fn set_view(&mut self, view: View) {
+        let source = match view {
+            View::Shaded => None,
+            View::ShadedAo => self.baked.get(&MeshMap::AmbientOcclusion),
+            View::Map(m) => self.baked.get(&m),
+        };
+        // A view whose map is no longer baked falls back to the normal shaded view.
+        let view = if source.is_none() { View::Shaded } else { view };
+        let image = source.map(|b| {
+            let mut rgba = Vec::with_capacity(b.texels() * 4);
+            for i in 0..b.texels() {
+                let t = b.texel(i);
+                rgba.extend([t[0], t[1], t[2]].map(|v| (v * 255.0 + 0.5) as u8));
+                rgba.push(255);
+            }
+            (b.size, rgba)
+        });
+        if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
+            gpu.set_preview(
+                &self.render_state.device,
+                &self.render_state.queue,
+                image.as_ref().map(|(size, px)| (*size, px.as_slice())),
+            );
+        }
+        self.view = view;
+    }
+
+    fn load_high_poly(&mut self) {
+        let path = PathBuf::from(self.bake.high_path.trim());
+        match Mesh::load_gltf(&path) {
+            Ok(mesh) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.status = format!("High-poly '{name}' loaded ({} tris).", mesh.indices.len() / 3);
+                self.bake.high = Some((Arc::new(mesh), name));
+            }
+            Err(e) => self.status = format!("Could not load the high-poly mesh: {e}"),
+        }
+    }
+
+    fn start_bake(&mut self) {
+        if self.bake.job.is_some() {
+            return;
+        }
+        if self.bake.maps.is_empty() {
+            self.status = "Select at least one map to bake.".into();
+            return;
+        }
+        let b = &self.bake;
+        let settings = BakeSettings {
+            size: self.tex_size,
+            maps: b.maps.clone(),
+            samples: b.samples,
+            ao_distance: b.ao_distance_pct / 100.0,
+            thickness_distance: b.thickness_pct / 100.0,
+            curvature_strength: b.curvature_strength,
+            cage_front: b.cage_front_pct / 100.0,
+            cage_rear: b.cage_rear_pct / 100.0,
+        };
+        let low = self.mesh.clone();
+        let high = b.high.as_ref().map(|(m, _)| m.clone());
+        let progress = BakeProgress::new();
+        let worker_progress = progress.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = op_bake::bake(&low, high.as_deref(), &settings, &worker_progress).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+        self.bake.job = Some(BakeJob { rx, progress, started: Instant::now() });
+        self.status = format!("Baking {} map(s) at {}x{}...", self.bake.maps.len(), self.tex_size, self.tex_size);
+    }
+
+    fn poll_bake(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.bake.job else { return };
+        match job.rx.try_recv() {
+            Ok(Ok(result)) => {
+                let secs = job.started.elapsed().as_secs_f32();
+                let mut maps = (*self.baked).clone();
+                maps.retain(|_, b| b.size == result.size); // older bakes at another resolution are stale
+                let n = result.maps.len();
+                maps.extend(result.maps);
+                self.baked = Arc::new(maps);
+                self.bake.job = None;
+                self.modified = true;
+                let view = self.view;
+                self.set_view(view);
+                self.status = format!("Baked {n} map(s) in {secs:.1} s ({} texels shaded).", result.covered);
+            }
+            Ok(Err(e)) => {
+                self.bake.job = None;
+                self.status = format!("Bake stopped: {e}");
+            }
+            Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.bake.job = None;
+                self.status = "The bake ended unexpectedly.".into();
+            }
+        }
+    }
+
+    fn import_preset(&mut self) {
+        let path = PathBuf::from(self.export.import_path.trim());
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.export.report = vec![format!("Could not read {}: {e}", path.display())];
+                return;
+            }
+        };
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "preset".into());
+        match op_export::import_spexp(&bytes, &stem) {
+            Err(e) => self.export.report = vec![format!("Import failed: {e}")],
+            Ok(mut imp) => {
+                // Never shadow a built-in preset.
+                let builtin: Vec<String> = op_export::builtin_presets().into_iter().map(|p| p.name).collect();
+                if builtin.contains(&imp.preset.name) {
+                    imp.preset.name.push_str(" (imported)");
+                }
+                let mut report = vec![format!("Imported '{}' with {} map(s).", imp.preset.name, imp.preset.maps.len())];
+                report.extend(imp.warnings.iter().cloned());
+                let file_stem: String = imp
+                    .preset
+                    .name
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || "-_ ".contains(c) { c } else { '_' })
+                    .collect();
+                let dir = files::presets_dir();
+                let file = dir.join(format!("{}.json", file_stem.trim()));
+                let saved = std::fs::create_dir_all(&dir)
+                    .and_then(|()| std::fs::write(&file, serde_json::to_vec_pretty(&imp.preset).unwrap_or_default()));
+                report.push(match saved {
+                    Ok(()) => format!("Saved a copy to {} so it is available next time.", file.display()),
+                    Err(e) => format!("Could not save a copy ({e}); the preset stays available until you close the app."),
+                });
+                match self.presets.iter().position(|p| p.name == imp.preset.name) {
+                    Some(i) => {
+                        self.presets[i] = imp.preset;
+                        self.export.preset = i;
+                    }
+                    None => {
+                        self.presets.push(imp.preset);
+                        self.export.preset = self.presets.len() - 1;
+                    }
+                }
+                self.export.report = report;
+            }
+        }
     }
 
     /// Runs at the start of every frame: queued GPU reads, autosave timer, background results.
@@ -449,11 +687,16 @@ impl App {
                 Err(mpsc::TryRecvError::Disconnected) => self.autosave_rx = None,
             }
         }
+        self.poll_bake(ctx);
         if let Some(rx) = &self.export.running {
             match rx.try_recv() {
                 Ok(result) => {
                     self.status = match result {
-                        Ok(files) => format!("Exported {} file(s) to {}", files.len(), self.export.dir),
+                        Ok(out) => {
+                            let extra = if out.notes.is_empty() { String::new() } else { format!(" ({} note(s): see Export window)", out.notes.len()) };
+                            self.export.last_notes = out.notes;
+                            format!("Exported {} file(s) to {}{extra}", out.files.len(), self.export.dir)
+                        }
                         Err(e) => format!("Export failed: {e}"),
                     };
                     self.export.running = None;
@@ -878,6 +1121,30 @@ impl App {
                 self.recover();
             }
             ui.separator();
+            if ui.button("Bake...").clicked() {
+                self.bake.open = true;
+            }
+            let mut view = self.view;
+            let label = |v: View| match v {
+                View::Shaded => "Shaded".to_string(),
+                View::ShadedAo => "Shaded + baked AO".to_string(),
+                View::Map(m) => m.label().to_string(),
+            };
+            egui::ComboBox::from_id_salt("viewmode").selected_text(format!("View: {}", label(self.view))).show_ui(ui, |ui| {
+                ui.selectable_value(&mut view, View::Shaded, "Shaded");
+                if self.baked.contains_key(&MeshMap::AmbientOcclusion) {
+                    ui.selectable_value(&mut view, View::ShadedAo, "Shaded + baked AO");
+                }
+                for m in MeshMap::ALL {
+                    if self.baked.contains_key(&m) {
+                        ui.selectable_value(&mut view, View::Map(m), m.label());
+                    }
+                }
+            });
+            if view != self.view {
+                self.set_view(view);
+            }
+            ui.separator();
             if ui.button("Export...").clicked() {
                 if self.export.dir.is_empty() {
                     self.export.dir = self.default_export_dir().display().to_string();
@@ -974,6 +1241,72 @@ impl App {
             });
         }
 
+        if self.bake.open {
+            let mut open = true;
+            egui::Window::new("Bake mesh maps").open(&mut open).collapsible(false).show(ctx, |ui| {
+                let busy = self.bake.job.is_some();
+                ui.label(format!("Resolution: {}x{} (the texture set resolution)", self.tex_size, self.tex_size));
+                ui.separator();
+                ui.label("Maps:");
+                ui.horizontal_wrapped(|ui| {
+                    for m in MeshMap::ALL {
+                        let mut on = self.bake.maps.contains(&m);
+                        if ui.add_enabled(!busy, egui::Checkbox::new(&mut on, m.label())).changed() {
+                            if on {
+                                self.bake.maps.push(m);
+                            } else {
+                                self.bake.maps.retain(|x| *x != m);
+                            }
+                        }
+                    }
+                });
+                ui.add_enabled_ui(!busy, |ui| {
+                    ui.add(egui::Slider::new(&mut self.bake.samples, 4..=256).logarithmic(true).text("Rays per texel"));
+                    ui.add(egui::Slider::new(&mut self.bake.ao_distance_pct, 1.0..=100.0).text("AO distance (% of size)"));
+                    ui.add(egui::Slider::new(&mut self.bake.thickness_pct, 1.0..=100.0).text("Thickness distance (% of size)"));
+                    ui.add(egui::Slider::new(&mut self.bake.curvature_strength, 0.1..=8.0).logarithmic(true).text("Curvature strength"));
+                    ui.separator();
+                    ui.label("High-poly source (optional): normals, height and opacity are projected from it.");
+                    ui.add(egui::TextEdit::singleline(&mut self.bake.high_path).desired_width(420.0));
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!self.bake.high_path.trim().is_empty(), egui::Button::new("Load high-poly")).clicked() {
+                            self.load_high_poly();
+                        }
+                        if self.bake.high.is_some() && ui.button("Remove").clicked() {
+                            self.bake.high = None;
+                        }
+                    });
+                    match &self.bake.high {
+                        Some((m, name)) => ui.label(format!("Using {name} ({} triangles)", m.indices.len() / 3)),
+                        None => ui.label("None: maps come from the low-poly mesh itself."),
+                    };
+                    ui.add(egui::Slider::new(&mut self.bake.cage_front_pct, 0.5..=50.0).text("Search in front (% of size)"));
+                    ui.add(egui::Slider::new(&mut self.bake.cage_rear_pct, 0.5..=50.0).text("Search behind (% of size)"));
+                });
+                ui.separator();
+                match &self.bake.job {
+                    Some(job) => {
+                        ui.add(egui::ProgressBar::new(job.progress.fraction()).show_percentage());
+                        ui.label(format!("{:.0} s elapsed", job.started.elapsed().as_secs_f32()));
+                        if ui.button("Cancel").clicked() {
+                            job.progress.cancel();
+                        }
+                    }
+                    None => {
+                        if ui.add_enabled(!self.bake.maps.is_empty(), egui::Button::new("Bake")).clicked() {
+                            self.start_bake();
+                        }
+                    }
+                }
+                if !self.baked.is_empty() {
+                    let mut names: Vec<_> = self.baked.keys().map(|m| m.label()).collect();
+                    names.sort_unstable();
+                    ui.small(format!("Baked: {}", names.join(", ")));
+                }
+            });
+            self.bake.open = open;
+        }
+
         if self.export.open {
             let mut open = true;
             egui::Window::new("Export textures").open(&mut open).collapsible(false).show(ctx, |ui| {
@@ -1004,6 +1337,26 @@ impl App {
                 }
                 for w in &self.preset_warnings {
                     ui.colored_label(egui::Color32::YELLOW, format!("Preset skipped: {w}"));
+                }
+                for n in &self.export.last_notes {
+                    ui.colored_label(egui::Color32::YELLOW, n);
+                }
+                ui.separator();
+                ui.label("Import a Substance Painter preset (.spexp):");
+                ui.add(egui::TextEdit::singleline(&mut self.export.import_path).desired_width(420.0));
+                if ui.add_enabled(!self.export.import_path.trim().is_empty(), egui::Button::new("Import preset")).clicked() {
+                    self.import_preset();
+                }
+                if !self.export.report.is_empty() {
+                    egui::ScrollArea::vertical().id_salt("import_report").max_height(180.0).show(ui, |ui| {
+                        for (i, line) in self.export.report.iter().enumerate() {
+                            if i == 0 {
+                                ui.label(line);
+                            } else {
+                                ui.colored_label(egui::Color32::YELLOW, line);
+                            }
+                        }
+                    });
                 }
             });
             self.export.open = open;
@@ -1071,6 +1424,8 @@ impl eframe::App for App {
                     self.undo.clear();
                     self.redo.clear();
                     self.pending.push(PaintOp::Reset(self.tex_size));
+                    // Baked maps are tied to the resolution they were baked at.
+                    self.clear_baked();
                     self.modified = true;
                 }
             });
@@ -1168,7 +1523,16 @@ impl eframe::App for App {
             let globals = Globals {
                 view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).to_cols_array_2d(),
                 camera_pos: [cam.x, cam.y, cam.z, 1.0],
-                light_dir: [light.x, light.y, light.z, 0.0],
+                light_dir: [
+                    light.x,
+                    light.y,
+                    light.z,
+                    match self.view {
+                        View::Shaded => 0.0,
+                        View::Map(_) => 1.0,
+                        View::ShadedAo => 2.0,
+                    },
+                ],
                 // Shown only where the layer stack leaves a pixel uncovered.
                 base_color: srgb_for_display(FALLBACK_BASE),
                 params: [FALLBACK_METALLIC, FALLBACK_ROUGHNESS, near, far],

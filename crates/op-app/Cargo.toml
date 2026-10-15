@@ -10,6 +10,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 egui = "0.37.0"
 glam = "0.34.1"
+op-bake = { version = "0.0.1", path = "../op-bake" }
 op-core = { version = "0.0.1", path = "../op-core" }
 op-export = { version = "0.0.1", path = "../op-export" }
 op-mesh = { version = "0.0.1", path = "../op-mesh" }

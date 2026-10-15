@@ -8,6 +8,140 @@ use serde::{Deserialize, Serialize};
 
 pub type NodeId = u64;
 
+/// One baked map: 16-bit normalised texels, either 1 channel (scalar) or 3 (vector/color).
+/// Compact on purpose: baked maps are the largest data in a project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BakedMap {
+    pub size: u32,
+    pub channels: u8,
+    pub data: Vec<u16>,
+}
+
+impl BakedMap {
+    pub fn new(size: u32, channels: u8, data: Vec<u16>) -> Result<Self, String> {
+        if !matches!(channels, 1 | 3) {
+            return Err(format!("a baked map has 1 or 3 channels, not {channels}"));
+        }
+        let want = size as usize * size as usize * channels as usize;
+        if size == 0 || data.len() != want {
+            return Err(format!("{size}x{size}x{channels} needs {want} values, got {}", data.len()));
+        }
+        Ok(Self { size, channels, data })
+    }
+
+    /// A map filled with one value, for tests and neutral defaults.
+    pub fn filled(size: u32, channels: u8, value: [f32; 3]) -> Self {
+        let n = size as usize * size as usize;
+        let mut data = Vec::with_capacity(n * channels as usize);
+        for _ in 0..n {
+            for c in 0..channels as usize {
+                data.push(Self::quantize(value[c]));
+            }
+        }
+        Self { size, channels, data }
+    }
+
+    pub fn quantize(v: f32) -> u16 {
+        (v.clamp(0.0, 1.0) * 65535.0).round() as u16
+    }
+
+    pub fn texels(&self) -> usize {
+        self.size as usize * self.size as usize
+    }
+
+    /// Texel `i` as RGB; scalar maps repeat their value.
+    pub fn texel(&self, i: usize) -> [f32; 3] {
+        let f = |v: u16| v as f32 / 65535.0;
+        match self.channels {
+            1 => {
+                let v = f(self.data[i]);
+                [v, v, v]
+            }
+            _ => [f(self.data[i * 3]), f(self.data[i * 3 + 1]), f(self.data[i * 3 + 2])],
+        }
+    }
+
+    pub fn set_texel(&mut self, i: usize, v: [f32; 3]) {
+        match self.channels {
+            1 => self.data[i] = Self::quantize(v[0]),
+            _ => {
+                for c in 0..3 {
+                    self.data[i * 3 + c] = Self::quantize(v[c]);
+                }
+            }
+        }
+    }
+}
+
+/// Maps that are baked from the mesh (and optionally a high-poly source) rather than painted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum MeshMap {
+    Id,
+    AmbientOcclusion,
+    Curvature,
+    WorldSpaceNormal,
+    Position,
+    Thickness,
+    /// Tangent-space normal map (OpenGL convention, +Y up), encoded 0..1.
+    NormalBase,
+    HeightBase,
+    BentNormals,
+    OpacityBase,
+}
+
+impl MeshMap {
+    pub const ALL: [MeshMap; 10] = [
+        MeshMap::Id,
+        MeshMap::AmbientOcclusion,
+        MeshMap::Curvature,
+        MeshMap::WorldSpaceNormal,
+        MeshMap::Position,
+        MeshMap::Thickness,
+        MeshMap::NormalBase,
+        MeshMap::HeightBase,
+        MeshMap::BentNormals,
+        MeshMap::OpacityBase,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MeshMap::Id => "ID",
+            MeshMap::AmbientOcclusion => "Ambient occlusion",
+            MeshMap::Curvature => "Curvature",
+            MeshMap::WorldSpaceNormal => "World space normal",
+            MeshMap::Position => "Position",
+            MeshMap::Thickness => "Thickness",
+            MeshMap::NormalBase => "Normal (tangent space)",
+            MeshMap::HeightBase => "Height",
+            MeshMap::BentNormals => "Bent normals",
+            MeshMap::OpacityBase => "Opacity",
+        }
+    }
+
+    /// Value used where nothing has been baked: a neutral, "no detail" result.
+    pub fn default_value(self) -> [f32; 3] {
+        match self {
+            MeshMap::Id | MeshMap::Position | MeshMap::Thickness => [0.0; 3],
+            MeshMap::AmbientOcclusion | MeshMap::OpacityBase => [1.0; 3],
+            MeshMap::Curvature | MeshMap::HeightBase | MeshMap::WorldSpaceNormal => [0.5; 3],
+            MeshMap::NormalBase | MeshMap::BentNormals => [0.5, 0.5, 1.0],
+        }
+    }
+
+    /// Channel count of the baked map.
+    pub fn channels(self) -> u8 {
+        if self.is_scalar() { 1 } else { 3 }
+    }
+
+    /// True for maps that are a single value per texel.
+    pub fn is_scalar(self) -> bool {
+        matches!(
+            self,
+            MeshMap::AmbientOcclusion | MeshMap::Curvature | MeshMap::Thickness | MeshMap::HeightBase | MeshMap::OpacityBase
+        )
+    }
+}
+
 /// What the viewport and exporters show where the layer stack leaves a texel uncovered.
 pub const FALLBACK_BASE: [f32; 3] = [0.18, 0.18, 0.18];
 pub const FALLBACK_METALLIC: f32 = 0.0;
@@ -283,6 +417,22 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn baked_map_validates_and_roundtrips_values() {
+        assert!(BakedMap::new(2, 2, vec![0; 8]).is_err(), "channel count");
+        assert!(BakedMap::new(2, 1, vec![0; 3]).is_err(), "length");
+        assert!(BakedMap::new(0, 1, vec![]).is_err(), "size");
+        let mut m = BakedMap::filled(2, 3, [0.25, 0.5, 1.0]);
+        let t = m.texel(3);
+        assert!((t[0] - 0.25).abs() < 1e-4 && (t[1] - 0.5).abs() < 1e-4 && t[2] == 1.0);
+        m.set_texel(1, [2.0, -1.0, 0.5]); // out of range values clamp
+        assert_eq!(m.texel(1)[..2], [1.0, 0.0]);
+        let s = BakedMap::filled(2, 1, [0.5; 3]);
+        assert_eq!(s.texel(2)[0], s.texel(2)[2], "scalar maps replicate");
+        assert_eq!(MeshMap::AmbientOcclusion.channels(), 1);
+        assert_eq!(MeshMap::NormalBase.channels(), 3);
+    }
 
     fn names(nodes: &[Node]) -> Vec<&str> {
         nodes.iter().map(|n| n.name.as_str()).collect()

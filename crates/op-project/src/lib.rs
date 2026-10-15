@@ -5,24 +5,27 @@
 //!   manifest.json                     format id, version, texture size, document, blob index
 //!   mesh.bin                          `op_mesh::Mesh::to_bytes`
 //!   textures/<node>_<kind>.raw        one entry per paint channel / mask
+//!   bakes/<map>.raw                   one entry per baked mesh map (u16 little endian, version 2)
 //!
 //! Saving is atomic (temp file + rename) so a crash or full disk while saving, or
 //! autosaving, never destroys the previous good file. Loading treats the file as
 //! untrusted: every size is checked against what the manifest implies before any
 //! allocation, and entry names are derived by us, never taken from the file.
 
-use op_core::{Document, Node, NodeId, NodeKind};
+use op_core::{BakedMap, Document, MeshMap, Node, NodeId, NodeKind};
 use op_mesh::Mesh;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_ID: &str = "open-painter-project";
-pub const FORMAT_VERSION: u32 = 1;
+/// Version 2 adds baked mesh maps; version 1 files remain readable.
+pub const FORMAT_VERSION: u32 = 2;
 pub const EXTENSION: &str = "opproj";
 const MAX_TEXTURE_SIZE: u32 = 8192;
+const MAX_BAKE_BYTES: usize = 8192 * 8192 * 3 * 2;
 const MAX_MANIFEST_BYTES: u64 = 64 << 20;
 const MAX_MESH_BYTES: u64 = 1 << 30;
 
@@ -88,12 +91,21 @@ pub struct Project {
     pub mesh_name: String,
     pub mesh: Mesh,
     pub blobs: Vec<TextureBlob>,
+    /// Baked mesh maps; each carries its own resolution.
+    pub baked: HashMap<MeshMap, BakedMap>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct BlobEntry {
     node: NodeId,
     kind: BlobKind,
+}
+
+#[derive(Serialize, Deserialize)]
+struct BakeEntry {
+    map: MeshMap,
+    size: u32,
+    channels: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -104,10 +116,17 @@ struct Manifest {
     mesh_name: String,
     document: Document,
     blobs: Vec<BlobEntry>,
+    /// Absent in version 1 files.
+    #[serde(default)]
+    bakes: Vec<BakeEntry>,
 }
 
 fn blob_path(node: NodeId, kind: BlobKind) -> String {
     format!("textures/{node}_{}.raw", kind.name())
+}
+
+fn bake_path(map: MeshMap) -> String {
+    format!("bakes/{map:?}.raw")
 }
 
 fn expected_len(size: u32, kind: BlobKind) -> usize {
@@ -149,6 +168,15 @@ impl Project {
                 return invalid(format!("{} texture of layer {} has {} bytes, expected {want}", b.kind.name(), b.node, b.bytes.len()));
             }
         }
+        for (map, b) in &self.baked {
+            check_size(b.size)?;
+            if b.channels != map.channels() {
+                return invalid(format!("{} must have {} channel(s), not {}", map.label(), map.channels(), b.channels));
+            }
+            if b.data.len() != b.texels() * b.channels as usize {
+                return invalid(format!("baked {} has {} values, expected {}", map.label(), b.data.len(), b.texels() * b.channels as usize));
+            }
+        }
         Ok(())
     }
 }
@@ -184,6 +212,7 @@ fn write_zip(path: &Path, project: &Project) -> Result<(), ProjectError> {
         mesh_name: project.mesh_name.clone(),
         document: project.document.clone(),
         blobs: project.blobs.iter().map(|b| BlobEntry { node: b.node, kind: b.kind }).collect(),
+        bakes: baked_sorted(&project.baked).iter().map(|(m, b)| BakeEntry { map: *m, size: b.size, channels: b.channels }).collect(),
     };
     zip.start_file("manifest.json", deflate)?;
     zip.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
@@ -193,9 +222,21 @@ fn write_zip(path: &Path, project: &Project) -> Result<(), ProjectError> {
         zip.start_file(blob_path(b.node, b.kind), deflate)?;
         zip.write_all(&b.bytes)?;
     }
+    for (map, b) in baked_sorted(&project.baked) {
+        zip.start_file(bake_path(map), deflate)?;
+        let bytes: Vec<u8> = b.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        zip.write_all(&bytes)?;
+    }
     let file = zip.finish()?;
     file.sync_all()?;
     Ok(())
+}
+
+/// Baked maps in a stable order so identical projects produce identical files.
+fn baked_sorted(baked: &HashMap<MeshMap, BakedMap>) -> Vec<(MeshMap, &BakedMap)> {
+    let mut v: Vec<_> = baked.iter().map(|(m, b)| (*m, b)).collect();
+    v.sort_by_key(|(m, _)| *m);
+    v
 }
 
 /// Read up to `limit` bytes from an entry; error if the entry is larger.
@@ -247,7 +288,30 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
         blobs.push(TextureBlob { node: b.node, kind: b.kind, bytes });
     }
 
+    let mut baked = HashMap::new();
+    for e in &manifest.bakes {
+        check_size(e.size)?;
+        if e.channels != e.map.channels() {
+            return invalid(format!("{} must have {} channel(s)", e.map.label(), e.map.channels()));
+        }
+        if baked.contains_key(&e.map) {
+            return invalid(format!("duplicate baked {}", e.map.label()));
+        }
+        let want = e.size as usize * e.size as usize * e.channels as usize * 2;
+        if want > MAX_BAKE_BYTES {
+            return invalid("baked map is implausibly large");
+        }
+        let mut entry = zip.by_name(&bake_path(e.map))?;
+        let bytes = read_limited(&mut entry, want as u64, "baked map")?;
+        if bytes.len() != want {
+            return invalid(format!("baked {} is truncated ({} of {want} bytes)", e.map.label(), bytes.len()));
+        }
+        let data: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        baked.insert(e.map, BakedMap::new(e.size, e.channels, data).map_err(ProjectError::Invalid)?);
+    }
+
     Ok(Project {
+        baked,
         texture_size: manifest.texture_size,
         document: manifest.document,
         mesh_name: manifest.mesh_name,
@@ -289,7 +353,10 @@ mod tests {
             TextureBlob { node: paint, kind: BlobKind::Rough, bytes: pattern(expected_len(SIZE, BlobKind::Rough), 3) },
             TextureBlob { node: paint, kind: BlobKind::Mask, bytes: pattern(expected_len(SIZE, BlobKind::Mask), 4) },
         ];
-        Project { texture_size: SIZE, document: doc, mesh_name: "sphere".into(), mesh: Mesh::uv_sphere(1.0, 12, 6), blobs }
+        let mut baked = HashMap::new();
+        baked.insert(MeshMap::AmbientOcclusion, BakedMap::new(4, 1, (0..16).map(|i| i * 4000).collect()).unwrap());
+        baked.insert(MeshMap::NormalBase, BakedMap::new(2, 3, (0..12).map(|i| 65535 - i * 5000).collect()).unwrap());
+        Project { texture_size: SIZE, document: doc, mesh_name: "sphere".into(), mesh: Mesh::uv_sphere(1.0, 12, 6), blobs, baked }
     }
 
     #[test]
@@ -303,6 +370,7 @@ mod tests {
         assert_eq!((q.texture_size, q.mesh_name.as_str()), (SIZE, "sphere"));
         assert_eq!(q.mesh.to_bytes(), p.mesh.to_bytes());
         assert_eq!(q.blobs, p.blobs);
+        assert_eq!(q.baked, p.baked, "baked maps come back bit for bit, each at its own size");
         let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(leftovers.len(), 1, "temp file left behind: {leftovers:?}");
     }
@@ -330,6 +398,9 @@ mod tests {
         let mut huge = sample();
         huge.texture_size = 1 << 20;
         assert!(save(&path, &huge).is_err(), "absurd size");
+        let mut wrong = sample();
+        wrong.baked.insert(MeshMap::Curvature, BakedMap::new(2, 3, vec![0; 12]).unwrap()); // curvature is scalar
+        assert!(save(&path, &wrong).is_err(), "channel count must match the map kind");
 
         assert_eq!(std::fs::read(&path).unwrap(), before, "previous file was modified");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
@@ -374,6 +445,7 @@ mod tests {
             mesh_name: "m".into(),
             document: p.document.clone(),
             blobs: p.blobs.iter().map(|b| BlobEntry { node: b.node, kind: b.kind }).collect(),
+            bakes: Vec::new(),
         };
         let mut entries: Vec<(String, Vec<u8>)> = vec![("mesh.bin".into(), p.mesh.to_bytes())];
         for b in &p.blobs {
@@ -434,6 +506,61 @@ mod tests {
         // Corrupt mesh.
         handmade(&path, |_, e| e[0].1.truncate(20));
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn version_1_files_without_bakes_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.opproj");
+        handmade(&path, |m, _| m.version = 1);
+        let p = load(&path).unwrap();
+        assert!(p.baked.is_empty());
+    }
+
+    #[test]
+    fn loader_validates_baked_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b.opproj");
+        let entry = |map, size, channels| BakeEntry { map, size, channels };
+        let ao_bytes = |n: usize| vec![7u8; n * 2];
+
+        handmade(&path, |m, e| {
+            m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 1));
+            e.push((bake_path(MeshMap::AmbientOcclusion), ao_bytes(16)));
+        });
+        assert_eq!(load(&path).unwrap().baked[&MeshMap::AmbientOcclusion].texels(), 16);
+
+        handmade(&path, |m, e| {
+            m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 3)); // AO is scalar
+            e.push((bake_path(MeshMap::AmbientOcclusion), ao_bytes(48)));
+        });
+        assert!(load(&path).is_err(), "wrong channel count");
+
+        handmade(&path, |m, e| {
+            m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 1));
+            e.push((bake_path(MeshMap::AmbientOcclusion), ao_bytes(15)));
+        });
+        assert!(load(&path).unwrap_err().to_string().contains("truncated"));
+
+        handmade(&path, |m, e| {
+            m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 1));
+            e.push((bake_path(MeshMap::AmbientOcclusion), ao_bytes(1 << 20))); // far larger than declared
+        });
+        assert!(load(&path).unwrap_err().to_string().contains("larger"), "zip-bomb guard");
+
+        handmade(&path, |m, _| m.bakes.push(entry(MeshMap::AmbientOcclusion, 4, 1)));
+        assert!(load(&path).is_err(), "declared but missing entry");
+
+        handmade(&path, |m, e| {
+            for _ in 0..2 {
+                m.bakes.push(entry(MeshMap::AmbientOcclusion, 2, 1));
+            }
+            e.push((bake_path(MeshMap::AmbientOcclusion), ao_bytes(4)));
+        });
+        assert!(load(&path).is_err(), "duplicate bake");
+
+        handmade(&path, |m, _| m.bakes.push(entry(MeshMap::AmbientOcclusion, 1 << 20, 1)));
+        assert!(load(&path).is_err(), "absurd size must fail before allocating");
     }
 
     #[test]
