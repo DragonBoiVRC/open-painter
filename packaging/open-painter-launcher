@@ -1,0 +1,61 @@
+#!/bin/sh
+# open-painter launcher: starts the installed program and, in the background, keeps the source
+# checkout it was built from up to date (see packaging/install.sh and README.md).
+#
+# Opt out with OPEN_PAINTER_NO_UPDATE=1, or by writing "off" to ~/.config/open-painter/auto-update.
+
+data="${XDG_DATA_HOME:-$HOME/.local/share}/open-painter"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/open-painter"
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/open-painter/auto-update"
+prog="$data/open-painter-bin"
+interval=21600   # seconds between update checks
+
+if [ ! -x "$prog" ]; then
+    echo "open-painter: $prog is missing; run packaging/install.sh again." >&2
+    exit 1
+fi
+
+update() {
+    src=$(cat "$data/source" 2>/dev/null) || return 0
+    [ -d "$src/.git" ] || return 0
+    mkdir -p "$state"
+    log="$state/update.log"
+    # One updater at a time (a lock left behind by a crash expires after an hour).
+    find "$state/lock" -maxdepth 0 -mmin +60 -exec rmdir {} \; 2>/dev/null
+    mkdir "$state/lock" 2>/dev/null || return 0
+    trap 'rmdir "$state/lock"' EXIT
+    export PATH="$HOME/.cargo/bin:$PATH"
+    touch "$state/last-check"
+
+    git -C "$src" fetch --quiet origin >>"$log" 2>&1 || return 0
+    behind=$(git -C "$src" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)
+    [ "$behind" -gt 0 ] || return 0
+    if [ -n "$(git -C "$src" status --porcelain --untracked-files=no)" ]; then
+        echo "$(date -Is) update skipped: $src has uncommitted changes" >>"$log"
+        return 0
+    fi
+    echo "$(date -Is) updating: $behind new commit(s)" >>"$log"
+    if git -C "$src" pull --ff-only --quiet >>"$log" 2>&1 && "$src/packaging/install.sh" --update >>"$log" 2>&1; then
+        echo "$(date -Is) updated to $(git -C "$src" rev-parse --short HEAD)" >>"$log"
+        command -v notify-send >/dev/null 2>&1 &&
+            notify-send -i open-painter "open-painter updated" "The new version starts the next time you open it."
+    else
+        echo "$(date -Is) update FAILED" >>"$log"
+        command -v notify-send >/dev/null 2>&1 &&
+            notify-send -u low -i open-painter "open-painter update failed" "Details: $log"
+    fi
+}
+
+enabled=1
+[ -n "${OPEN_PAINTER_NO_UPDATE:-}" ] && enabled=0
+[ "$(cat "$conf" 2>/dev/null)" = "off" ] && enabled=0
+
+if [ "$enabled" = 1 ]; then
+    last=$(stat -c %Y "$state/last-check" 2>/dev/null || echo 0)
+    if [ $(( $(date +%s) - last )) -ge "$interval" ]; then
+        # Detached, so it never delays or ties up the program.
+        ( update ) </dev/null >/dev/null 2>&1 &
+    fi
+fi
+
+exec "$prog" "$@"
