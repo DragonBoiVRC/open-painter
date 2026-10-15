@@ -9,7 +9,11 @@ pub enum MeshError {
     Gltf(#[from] gltf::Error),
     #[error("file contains no triangle geometry")]
     Empty,
+    #[error("invalid mesh data: {0}")]
+    Format(String),
 }
+
+const MESH_MAGIC: &[u8; 8] = b"OPMESH01";
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -82,6 +86,39 @@ impl Mesh {
             }
         }
         Self { vertices, indices }
+    }
+
+    /// Compact binary form used inside project files: magic, counts, vertices, indices.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 + self.vertices.len() * 32 + self.indices.len() * 4);
+        out.extend_from_slice(MESH_MAGIC);
+        out.extend_from_slice(&(self.vertices.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(self.indices.len() as u32).to_le_bytes());
+        out.extend_from_slice(bytemuck::cast_slice(&self.vertices));
+        out.extend_from_slice(bytemuck::cast_slice(&self.indices));
+        out
+    }
+
+    /// Inverse of [`Mesh::to_bytes`]. Rejects truncated data, trailing bytes and
+    /// indices that point outside the vertex list.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MeshError> {
+        let bad = |why: &str| MeshError::Format(why.to_string());
+        if bytes.len() < 16 || &bytes[..8] != MESH_MAGIC {
+            return Err(bad("not a mesh blob"));
+        }
+        let nv = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let ni = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let vbytes = nv.checked_mul(std::mem::size_of::<Vertex>()).ok_or_else(|| bad("vertex count overflow"))?;
+        let ibytes = ni.checked_mul(4).ok_or_else(|| bad("index count overflow"))?;
+        if bytes.len() != 16 + vbytes + ibytes {
+            return Err(bad("length does not match header"));
+        }
+        let vertices: Vec<Vertex> = bytemuck::pod_collect_to_vec(&bytes[16..16 + vbytes]);
+        let indices: Vec<u32> = bytemuck::pod_collect_to_vec(&bytes[16 + vbytes..]);
+        if ni % 3 != 0 || indices.iter().any(|&i| i as usize >= nv) {
+            return Err(bad("invalid indices"));
+        }
+        Ok(Self { vertices, indices })
     }
 
     /// Load every triangle primitive in the default scene of a glTF/GLB file,
@@ -172,5 +209,31 @@ mod tests {
         for v in m.vertices.iter().filter(|v| v.position[1].abs() < 0.95) {
             assert!(Vec3::from(v.normal).dot(Vec3::from(v.position)) > 0.99);
         }
+    }
+
+    #[test]
+    fn bytes_roundtrip_is_exact() {
+        let m = Mesh::uv_sphere(2.0, 16, 8);
+        let back = Mesh::from_bytes(&m.to_bytes()).unwrap();
+        assert_eq!(back.indices, m.indices);
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&back.vertices), bytemuck::cast_slice::<_, u8>(&m.vertices));
+    }
+
+    #[test]
+    fn from_bytes_rejects_malformed_input() {
+        let good = Mesh::uv_sphere(1.0, 8, 4).to_bytes();
+        assert!(Mesh::from_bytes(&[]).is_err());
+        assert!(Mesh::from_bytes(b"NOTAMESHxxxxxxxxxxxx").is_err());
+        assert!(Mesh::from_bytes(&good[..good.len() - 1]).is_err(), "truncated");
+        let mut longer = good.clone();
+        longer.push(0);
+        assert!(Mesh::from_bytes(&longer).is_err(), "trailing byte");
+        let mut huge = good.clone();
+        huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Mesh::from_bytes(&huge).is_err(), "absurd vertex count");
+        let mut oob = good.clone();
+        let n = oob.len();
+        oob[n - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Mesh::from_bytes(&oob).is_err(), "index out of range");
     }
 }

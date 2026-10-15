@@ -382,26 +382,7 @@ mod tests {
 
         /// Raw bytes of a SIZE x SIZE texture with `bpp` bytes per texel.
         fn read(&self, tex: &wgpu::Texture, bpp: u32) -> Vec<u8> {
-            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: (SIZE * SIZE * bpp) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let mut enc = self.device.create_command_encoder(&Default::default());
-            enc.copy_texture_to_buffer(
-                tex.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buf,
-                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(SIZE * bpp), rows_per_image: Some(SIZE) },
-                },
-                wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
-            );
-            self.queue.submit([enc.finish()]);
-            buf.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let data = buf.slice(..).get_mapped_range().unwrap().to_vec();
-            data
+            crate::gpu_io::read_texture(&self.device, &self.queue, tex, SIZE, bpp)
         }
 
         fn metal(&self) -> Vec<u8> {
@@ -604,5 +585,89 @@ mod tests {
         assert!(rig.gpu.paint.store.contains_key(&p), "referenced node was freed");
         rig.run(&gone, &[PaintOp::Gc(vec![])]);
         assert!(!rig.gpu.paint.store.contains_key(&p), "unreferenced node was kept");
+    }
+
+    fn output_bytes(rig: &Rig) -> [Vec<u8>; 3] {
+        rig.gpu.paint.capture_output(&rig.device, &rig.queue)
+    }
+
+    /// Paint, save to disk, load into a fresh GPU context: the composited result and
+    /// every stored texture must come back bit-for-bit.
+    #[test]
+    fn saved_project_reloads_to_an_identical_result() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::with_default_material();
+        let paint = doc.add(None, None, "paint", NodeKind::Paint);
+        doc.find_mut(paint).unwrap().mask = Some(Mask { enabled: true, init_white: false });
+        doc.find_mut(paint).unwrap().blend = BlendMode::Multiply;
+        doc.find_mut(paint).unwrap().opacity = 0.8;
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let blank = output_bytes(&rig);
+
+        let content = Stamp {
+            brush: [SIZE as f32 / 2.0, SIZE as f32 / 2.0, 40.0, 0.5],
+            color: [0.2, 0.5, 0.9, 0.0],
+            values: [0.7, 0.3, 0.9, 0.0],
+            enables: [1.0, 1.0, 1.0, 0.0],
+        };
+        let reveal = Stamp { brush: [SIZE as f32 / 2.0 + 10.0, SIZE as f32 / 2.0, 30.0, 0.3], color: [0.0; 4], values: [1.0, 0.0, 0.8, 0.0], enables: [0.0; 4] };
+        rig.run(&doc, &[PaintOp::Stamps { layer: paint, target: Target::Content, stamps: vec![content] }]);
+        rig.run(&doc, &[PaintOp::Stamps { layer: paint, target: Target::Mask, stamps: vec![reveal] }]);
+        let before = output_bytes(&rig);
+        assert_ne!(before[0], blank[0], "painting did not change the composited base color");
+        assert_ne!(before[2], blank[2], "painting did not change the composited roughness");
+
+        let blobs = rig.gpu.paint.capture_blobs(&rig.device, &rig.queue, &doc);
+        assert_eq!(blobs.len(), 4, "base, metal, rough and mask of the paint layer");
+        let project = op_project::Project {
+            texture_size: SIZE,
+            document: doc.clone(),
+            mesh_name: "sphere".into(),
+            mesh: Mesh::uv_sphere(1.0, 96, 48),
+            blobs: blobs.clone(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.opproj");
+        op_project::save(&path, &project).unwrap();
+        let loaded = op_project::load(&path).unwrap();
+        assert_eq!(loaded.document, doc);
+
+        let mut fresh = Rig::new().unwrap();
+        fresh.run(&loaded.document, &[PaintOp::Load { size: loaded.texture_size, blobs: loaded.blobs }]);
+        // Compare piecewise so a failure says which texture differs, not a wall of bytes.
+        let recaptured = fresh.gpu.paint.capture_blobs(&fresh.device, &fresh.queue, &loaded.document);
+        assert_eq!(recaptured.len(), blobs.len());
+        for (a, b) in recaptured.iter().zip(&blobs) {
+            let diff = a.bytes.iter().zip(&b.bytes).filter(|(x, y)| x != y).count();
+            assert_eq!(diff, 0, "stored {:?} texture differs in {diff} bytes after reload", b.kind);
+        }
+        let after = output_bytes(&fresh);
+        for (i, name) in ["base", "metal", "rough"].iter().enumerate() {
+            let diff = after[i].iter().zip(&before[i]).filter(|(x, y)| x != y).count();
+            assert_eq!(diff, 0, "composited {name} differs in {diff} of {} bytes after reload", before[i].len());
+        }
+    }
+
+    /// GPU composite -> CPU export -> PNG on disk must reproduce the document's values.
+    #[test]
+    fn exported_pngs_match_the_document() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        doc.add(None, None, "fill", fill(Some([0.8, 0.55, 0.30]), Some(0.25), Some(0.6)));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let [base, metal, rough] = output_bytes(&rig);
+        let data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
+        let preset = op_export::builtin_presets().remove(0);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = op_export::ExportContext { project: "p", texture_set: "s", out_dir: dir.path() };
+        op_export::export(&preset, &data, &ctx).unwrap();
+
+        let near = |a: u8, b: f32| (a as f32 - b * 255.0).abs() <= 1.5;
+        let img = image::open(dir.path().join("p_s_BaseColor.png")).unwrap().to_rgb8();
+        let px = img.get_pixel(SIZE / 2, SIZE / 2).0;
+        assert!(near(px[0], 0.8) && near(px[1], 0.55) && near(px[2], 0.30), "base color {px:?}");
+        let r = image::open(dir.path().join("p_s_Roughness.png")).unwrap().to_luma8();
+        let m = image::open(dir.path().join("p_s_Metallic.png")).unwrap().to_luma8();
+        assert!(near(r.get_pixel(3, 3).0[0], 0.6) && near(m.get_pixel(3, 3).0[0], 0.25));
     }
 }

@@ -9,6 +9,7 @@ use crate::composite::Compositor;
 use eframe::egui_wgpu::wgpu;
 use op_core::{Document, Node, NodeId, NodeKind};
 use op_mesh::Vertex;
+use op_project::{BlobKind, TextureBlob};
 use std::collections::{HashMap, HashSet};
 
 pub const BASE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -19,6 +20,10 @@ pub const MAX_STAMPS: usize = 4096;
 /// GPU memory we allow undo snapshots to use.
 const HISTORY_BUDGET_BYTES: u64 = 512 << 20;
 pub const DEFAULT_TEXTURE_SIZE: u32 = 2048;
+
+fn expected_bytes(size: u32, kind: BlobKind) -> usize {
+    size as usize * size as usize * kind.bytes_per_texel()
+}
 
 /// One brush dab. Layout must match the instance attributes in `stamp.wgsl`.
 #[repr(C)]
@@ -80,6 +85,8 @@ pub enum PaintOp {
     Gc(Vec<NodeId>),
     /// Drop all paint and stroke history and (re)allocate at this resolution.
     Reset(u32),
+    /// Like `Reset`, then restore saved texture contents (opening a project).
+    Load { size: u32, blobs: Vec<TextureBlob> },
 }
 
 /// The three paintable channels of a layer (and the compositor's working buffers).
@@ -469,6 +476,74 @@ impl PaintGpu {
         Some(current)
     }
 
+    /// Drop all paint and history; reallocate everything at `size`.
+    fn reset(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, doc: &Document, size: u32) {
+        self.size = size;
+        self.store.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.output = Layer::new(device, size);
+        self.output.clear(encoder);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output);
+        self.compositor.set_size(size);
+        self.last_doc = None;
+        self.ensure_store(device, encoder, doc);
+    }
+
+    fn texture_for(&self, node: NodeId, kind: BlobKind) -> Option<&wgpu::Texture> {
+        let g = self.store.get(&node)?;
+        match kind {
+            BlobKind::Base => g.content.as_ref().map(|c| &c.base),
+            BlobKind::Metal => g.content.as_ref().map(|c| &c.metal),
+            BlobKind::Rough => g.content.as_ref().map(|c| &c.rough),
+            BlobKind::Mask => g.mask.as_ref(),
+        }
+    }
+
+    fn upload(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, blob: &TextureBlob) {
+        if let Some(tex) = self.texture_for(blob.node, blob.kind) {
+            if blob.bytes.len() == expected_bytes(self.size, blob.kind) {
+                crate::gpu_io::write_texture(device, encoder, tex, self.size, blob.kind.bytes_per_texel() as u32, &blob.bytes);
+            }
+        }
+    }
+
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
+    /// Read back every paint layer's channels and every mask of `doc` for saving.
+    pub fn capture_blobs(&self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document) -> Vec<TextureBlob> {
+        let mut out = Vec::new();
+        for id in doc.ids() {
+            let Some(node) = doc.find(id) else { continue };
+            let mut kinds = Vec::new();
+            if matches!(node.kind, NodeKind::Paint) {
+                kinds.extend([BlobKind::Base, BlobKind::Metal, BlobKind::Rough]);
+            }
+            if node.mask.is_some() {
+                kinds.push(BlobKind::Mask);
+            }
+            for kind in kinds {
+                if let Some(tex) = self.texture_for(id, kind) {
+                    let bytes = crate::gpu_io::read_texture(device, queue, tex, self.size, kind.bytes_per_texel() as u32);
+                    out.push(TextureBlob { node: id, kind, bytes });
+                }
+            }
+        }
+        out
+    }
+
+    /// Read back the composited result: (base RGBA16F, metal RG8, rough RG8).
+    pub fn capture_output(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> [Vec<u8>; 3] {
+        let s = self.size;
+        [
+            crate::gpu_io::read_texture(device, queue, &self.output.base, s, 8),
+            crate::gpu_io::read_texture(device, queue, &self.output.metal, s, 2),
+            crate::gpu_io::read_texture(device, queue, &self.output.rough, s, 2),
+        ]
+    }
+
     fn trim_history(&mut self) {
         let size = self.size;
         let mut total: u64 = self.undo.iter().map(|s| s.bytes(size)).sum();
@@ -543,16 +618,14 @@ impl PaintGpu {
                 PaintOp::DropRedo => self.redo.clear(),
                 PaintOp::Gc(keep) => self.gc(doc, keep),
                 PaintOp::Reset(size) => {
-                    self.size = *size;
-                    self.store.clear();
-                    self.undo.clear();
-                    self.redo.clear();
-                    self.output = Layer::new(device, *size);
-                    self.output.clear(encoder);
-                    self.material_bind =
-                        Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output);
-                    self.compositor.set_size(*size);
-                    self.ensure_store(device, encoder, doc);
+                    self.reset(device, encoder, doc, *size);
+                    dirty = true;
+                }
+                PaintOp::Load { size, blobs } => {
+                    self.reset(device, encoder, doc, *size);
+                    for b in blobs {
+                        self.upload(device, encoder, b);
+                    }
                     dirty = true;
                 }
                 PaintOp::Stamps { layer, target, stamps } => {

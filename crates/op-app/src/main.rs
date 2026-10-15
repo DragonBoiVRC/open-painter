@@ -1,19 +1,30 @@
 mod camera;
 mod composite;
+mod files;
+mod gpu_io;
 mod paint;
 mod viewport;
 
 use camera::OrbitCamera;
 use eframe::{egui, egui_wgpu};
 use glam::Vec3;
-use op_core::{srgb_to_linear, BlendMode, Document, FillParams, Mask, Node, NodeId, NodeKind};
+use op_core::{
+    srgb_to_linear, BlendMode, Document, FillParams, Mask, Node, NodeId, NodeKind, FALLBACK_BASE, FALLBACK_METALLIC,
+    FALLBACK_ROUGHNESS,
+};
+use op_export::{ExportContext, ExportPreset, TextureSetData};
 use op_mesh::Mesh;
+use op_project::Project;
 use paint::{PaintOp, Stamp, Target, DEFAULT_TEXTURE_SIZE, MAX_STAMPS};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 use viewport::{Globals, ViewportCallback, ViewportGpu};
 
 const TEXTURE_SIZES: [u32; 4] = [512, 1024, 2048, 4096];
 const MAX_HISTORY: usize = 300;
+const DEFAULT_AUTOSAVE_SECS: u64 = 120;
+const DEFAULT_PADDING: u32 = 8;
 
 struct Brush {
     radius_pts: f32,
@@ -59,9 +70,41 @@ enum Act {
     Visible(NodeId, bool),
 }
 
+/// Actions that would discard unsaved work, held until the user confirms.
+#[derive(Clone)]
+enum Pending {
+    New,
+    Open(PathBuf),
+    Mesh(PathBuf),
+    Quit,
+}
+
+/// Work that reads GPU state. Runs at the start of the next frame, when every op queued
+/// so far has been applied, so it never sees a half-updated scene.
+enum Todo {
+    Save(PathBuf),
+    Export,
+}
+
+struct PathDialog {
+    save: bool,
+    path: String,
+}
+
+struct ExportUi {
+    open: bool,
+    preset: usize,
+    dir: String,
+    padding: u32,
+    set_name: String,
+    running: Option<Receiver<Result<Vec<PathBuf>, String>>>,
+}
+
 struct App {
     camera: OrbitCamera,
     doc: Document,
+    mesh: Mesh,
+    mesh_name: String,
     selected: Option<NodeId>,
     target: Target,
     tool: Tool,
@@ -76,36 +119,49 @@ struct App {
     gesture_before: Option<Document>,
     status: String,
     render_state: egui_wgpu::RenderState,
+
+    project_path: Option<PathBuf>,
+    modified: bool,
+    todo: Vec<Todo>,
+    dialog: Option<PathDialog>,
+    confirm: Option<Pending>,
+    after_save: Option<Pending>,
+    allow_close: bool,
+    title: String,
+    last_autosave: Instant,
+    autosave_every: Duration,
+    autosave_rx: Option<Receiver<Result<(), String>>>,
+    presets: Vec<ExportPreset>,
+    preset_warnings: Vec<String>,
+    export: ExportUi,
+}
+
+fn is_project(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case(op_project::EXTENSION))
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         let rs = cc.wgpu_render_state.clone().expect("wgpu backend required");
-        let mut gpu = ViewportGpu::new(&rs.device, rs.target_format);
-        let mut camera = OrbitCamera::default();
-        let mut status = String::from("Select a layer and paint. Orbit: Alt+left or middle. Drop a .glb/.gltf to load.");
-
-        let mesh = match initial.as_deref().map(|p| (p, Mesh::load_gltf(p))) {
-            Some((p, Ok(m))) => {
-                status = format!("Loaded {} ({} tris)", p.display(), m.indices.len() / 3);
-                m
-            }
-            Some((p, Err(e))) => {
-                status = format!("Failed to load {}: {e}", p.display());
-                Mesh::uv_sphere(1.0, 96, 48)
-            }
-            None => Mesh::uv_sphere(1.0, 96, 48),
-        };
-        let (lo, hi) = mesh.bounds();
-        camera.frame(lo, hi);
-        gpu.set_mesh(&rs.device, &mesh);
+        let gpu = ViewportGpu::new(&rs.device, rs.target_format);
         rs.renderer.write().callback_resources.insert(gpu);
+
+        let (user_presets, preset_warnings) = files::load_user_presets(&files::presets_dir());
+        let mut presets = op_export::builtin_presets();
+        presets.extend(user_presets);
+        let autosave_every = std::env::var("OPEN_PAINTER_AUTOSAVE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(DEFAULT_AUTOSAVE_SECS);
 
         let doc = Document::with_default_material();
         let selected = doc.nodes.last().map(|n| n.id);
-        Self {
-            camera,
+        let mut app = Self {
+            camera: OrbitCamera::default(),
             doc,
+            mesh: Mesh::default(),
+            mesh_name: "sphere".into(),
             selected,
             target: Target::Content,
             tool: Tool::Paint,
@@ -124,25 +180,62 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             gesture_before: None,
-            status,
+            status: String::from("Select a layer and paint. Orbit: Alt+left or middle. Drop a .glb/.gltf or .opproj to open."),
             render_state: rs,
+            project_path: None,
+            modified: false,
+            todo: Vec::new(),
+            dialog: None,
+            confirm: None,
+            after_save: None,
+            allow_close: false,
+            title: String::new(),
+            last_autosave: Instant::now(),
+            autosave_every: Duration::from_secs(autosave_every),
+            autosave_rx: None,
+            presets,
+            preset_warnings,
+            export: ExportUi {
+                open: false,
+                preset: 0,
+                dir: String::new(),
+                padding: DEFAULT_PADDING,
+                set_name: "default".into(),
+                running: None,
+            },
+        };
+        app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
+        app.pending.push(PaintOp::Reset(app.tex_size));
+        if let Some(p) = initial {
+            if is_project(&p) {
+                app.open_path(&p);
+            } else {
+                app.load_mesh_file(&p);
+            }
+        } else if files::data_dir().join(op_project::autosave_path(None, Path::new("")).file_name().unwrap()).exists() {
+            app.status = "An autosave from a previous session exists: use 'Recover autosave'.".into();
         }
+        app
     }
 
-    fn load(&mut self, path: PathBuf) {
-        match Mesh::load_gltf(&path) {
-            Ok(mesh) => {
-                let (lo, hi) = mesh.bounds();
-                self.camera.frame(lo, hi);
-                if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
-                    gpu.set_mesh(&self.render_state.device, &mesh);
-                }
-                // Paint belongs to the old mesh's UVs: start a fresh document.
-                self.reset_document();
-                self.status = format!("Loaded {} ({} tris)", path.display(), mesh.indices.len() / 3);
-            }
-            Err(e) => self.status = format!("Failed to load {}: {e}", path.display()),
+    // ---- project lifecycle -----------------------------------------------------------
+
+    fn set_mesh(&mut self, mesh: Mesh, name: String) {
+        let (lo, hi) = mesh.bounds();
+        self.camera.frame(lo, hi);
+        if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
+            gpu.set_mesh(&self.render_state.device, &mesh);
         }
+        self.mesh = mesh;
+        self.mesh_name = name;
+    }
+
+    fn project_name(&self) -> String {
+        self.project_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled".into())
     }
 
     fn reset_document(&mut self) {
@@ -151,7 +244,238 @@ impl App {
         self.undo.clear();
         self.redo.clear();
         self.gesture_before = None;
+        self.stroke.active = false;
+        self.pending.clear();
         self.pending.push(PaintOp::Reset(self.tex_size));
+    }
+
+    fn new_project(&mut self) {
+        self.reset_document();
+        self.project_path = None;
+        self.modified = false;
+        self.status = "New project.".into();
+    }
+
+    fn load_mesh_file(&mut self, path: &Path) {
+        match Mesh::load_gltf(path) {
+            Ok(mesh) => {
+                let tris = mesh.indices.len() / 3;
+                let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "mesh".into());
+                self.set_mesh(mesh, name);
+                // Paint belongs to the old mesh's UVs: start a fresh project.
+                self.new_project();
+                self.status = format!("Loaded {} ({tris} tris)", path.display());
+            }
+            Err(e) => self.status = format!("Failed to load {}: {e}", path.display()),
+        }
+    }
+
+    fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {
+        self.set_mesh(p.mesh, p.mesh_name);
+        self.doc = p.document;
+        self.tex_size = p.texture_size;
+        self.selected = self.doc.nodes.last().map(|n| n.id);
+        self.undo.clear();
+        self.redo.clear();
+        self.gesture_before = None;
+        self.stroke.active = false;
+        self.pending.clear();
+        self.pending.push(PaintOp::Load { size: p.texture_size, blobs: p.blobs });
+        self.project_path = path;
+        self.modified = modified;
+    }
+
+    fn open_path(&mut self, path: &Path) {
+        match op_project::load(path) {
+            Ok(p) => {
+                self.apply_project(p, Some(path.to_path_buf()), false);
+                self.status = format!("Opened {}", path.display());
+            }
+            Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
+        }
+    }
+
+    fn recover_path(&self) -> PathBuf {
+        op_project::autosave_path(self.project_path.as_deref(), &files::data_dir())
+    }
+
+    fn recover(&mut self) {
+        let path = self.recover_path();
+        match op_project::load(&path) {
+            Ok(p) => {
+                let original = self.project_path.clone();
+                self.apply_project(p, original, true);
+                self.status = format!("Recovered autosave {}. Save to keep it.", path.display());
+            }
+            Err(e) => self.status = format!("Could not recover {}: {e}", path.display()),
+        }
+    }
+
+    fn request(&mut self, action: Pending, ctx: &egui::Context) {
+        if self.modified {
+            self.confirm = Some(action);
+        } else {
+            self.perform(action, ctx);
+        }
+    }
+
+    fn perform(&mut self, action: Pending, ctx: &egui::Context) {
+        match action {
+            Pending::New => self.new_project(),
+            Pending::Open(p) => self.open_path(&p),
+            Pending::Mesh(p) => self.load_mesh_file(&p),
+            Pending::Quit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    fn capture_project(&self) -> Result<Project, String> {
+        let renderer = self.render_state.renderer.read();
+        let gpu = renderer.callback_resources.get::<ViewportGpu>().ok_or("viewport not ready")?;
+        let blobs = gpu.paint.capture_blobs(&self.render_state.device, &self.render_state.queue, &self.doc);
+        Ok(Project {
+            texture_size: gpu.paint.size(),
+            document: self.doc.clone(),
+            mesh_name: self.mesh_name.clone(),
+            mesh: self.mesh.clone(),
+            blobs,
+        })
+    }
+
+    fn do_save(&mut self, mut path: PathBuf, ctx: &egui::Context) {
+        if path.extension().is_none() {
+            path.set_extension(op_project::EXTENSION);
+        }
+        let result = self.capture_project().and_then(|p| op_project::save(&path, &p).map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => {
+                // The explicit save supersedes any autosave of this project (or of the untitled one).
+                let _ = std::fs::remove_file(self.recover_path());
+                self.project_path = Some(path.clone());
+                let _ = std::fs::remove_file(self.recover_path());
+                self.modified = false;
+                self.status = format!("Saved {}", path.display());
+                if let Some(next) = self.after_save.take() {
+                    self.perform(next, ctx);
+                }
+            }
+            Err(e) => {
+                self.after_save = None;
+                self.status = format!("Save failed: {e}");
+            }
+        }
+    }
+
+    fn start_autosave(&mut self) {
+        self.last_autosave = Instant::now();
+        let path = self.recover_path();
+        let project = match self.capture_project() {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("Autosave failed: {e}");
+                return;
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        self.autosave_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .map_err(|e| e.to_string())
+                .and_then(|()| op_project::save(&path, &project).map_err(|e| e.to_string()));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn start_export(&mut self) {
+        if self.export.running.is_some() {
+            return;
+        }
+        let Some(preset) = self.presets.get(self.export.preset).cloned() else { return };
+        let (size, [base, metal, rough]) = {
+            let renderer = self.render_state.renderer.read();
+            let Some(gpu) = renderer.callback_resources.get::<ViewportGpu>() else { return };
+            (gpu.paint.size(), gpu.paint.capture_output(&self.render_state.device, &self.render_state.queue))
+        };
+        let dir = PathBuf::from(&self.export.dir);
+        let (project, set, padding) = (self.project_name(), self.export.set_name.clone(), self.export.padding);
+        let mesh = self.mesh.clone();
+        let (tx, rx) = mpsc::channel();
+        self.export.running = Some(rx);
+        self.status = format!("Exporting '{}' to {} ...", preset.name, dir.display());
+        // Padding and encoding are CPU-heavy; keep them off the UI thread.
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Vec<PathBuf>, String> {
+                let mut data = TextureSetData::from_composite(size, &base, &metal, &rough).map_err(|e| e.to_string())?;
+                if padding > 0 {
+                    data.dilate(&op_export::uv_coverage(&mesh, size), padding);
+                }
+                let ctx = ExportContext { project: &project, texture_set: &set, out_dir: &dir };
+                op_export::export(&preset, &data, &ctx).map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Runs at the start of every frame: queued GPU reads, autosave timer, background results.
+    fn housekeeping(&mut self, ctx: &egui::Context) {
+        for t in std::mem::take(&mut self.todo) {
+            match t {
+                Todo::Save(p) => self.do_save(p, ctx),
+                Todo::Export => self.start_export(),
+            }
+        }
+        if self.modified
+            && !self.stroke.active
+            && self.autosave_rx.is_none()
+            && self.last_autosave.elapsed() >= self.autosave_every
+        {
+            self.start_autosave();
+        }
+        if let Some(rx) = &self.autosave_rx {
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    self.status = format!("Autosaved to {}", self.recover_path().display());
+                    self.autosave_rx = None;
+                }
+                Ok(Err(e)) => {
+                    self.status = format!("Autosave failed: {e}");
+                    self.autosave_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(250)),
+                Err(mpsc::TryRecvError::Disconnected) => self.autosave_rx = None,
+            }
+        }
+        if let Some(rx) = &self.export.running {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.status = match result {
+                        Ok(files) => format!("Exported {} file(s) to {}", files.len(), self.export.dir),
+                        Err(e) => format!("Export failed: {e}"),
+                    };
+                    self.export.running = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(250)),
+                Err(mpsc::TryRecvError::Disconnected) => self.export.running = None,
+            }
+        }
+        // Keep the autosave timer ticking even when the user is idle.
+        if self.modified {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+
+        let title = format!("{}{} - open-painter", self.project_name(), if self.modified { " *" } else { "" });
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.modified && !self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.confirm = Some(Pending::Quit);
+        }
     }
 
     // ---- history -------------------------------------------------------------------
@@ -169,6 +493,7 @@ impl App {
             self.undo.remove(0);
         }
         self.clear_redo();
+        self.modified = true;
     }
 
     /// Tell the GPU which node ids history may still resurrect, so it can free the rest.
@@ -213,10 +538,12 @@ impl App {
                 self.redo.push(Hist::Doc { before, after });
                 self.fix_selection();
                 self.send_gc();
+                self.modified = true;
             }
             Some(Hist::Stroke) => {
                 self.pending.push(PaintOp::UndoStroke);
                 self.redo.push(Hist::Stroke);
+                self.modified = true;
             }
             None => {}
         }
@@ -229,10 +556,12 @@ impl App {
                 self.undo.push(Hist::Doc { before, after });
                 self.fix_selection();
                 self.send_gc();
+                self.modified = true;
             }
             Some(Hist::Stroke) => {
                 self.pending.push(PaintOp::RedoStroke);
                 self.undo.push(Hist::Stroke);
+                self.modified = true;
             }
             None => {}
         }
@@ -519,27 +848,203 @@ impl App {
             }
         }
     }
+
+    // ---- file bar and dialogs -----------------------------------------------------------
+
+    fn file_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            if ui.button("New").clicked() {
+                self.request(Pending::New, &ctx);
+            }
+            if ui.button("Open...").clicked() {
+                let start = self.project_path.clone().map(|p| p.display().to_string()).unwrap_or_default();
+                self.dialog = Some(PathDialog { save: false, path: start });
+            }
+            if ui.button("Save").clicked() {
+                match self.project_path.clone() {
+                    Some(p) => {
+                        self.todo.push(Todo::Save(p));
+                        ctx.request_repaint();
+                    }
+                    None => self.dialog = Some(PathDialog { save: true, path: self.default_save_path() }),
+                }
+            }
+            if ui.button("Save as...").clicked() {
+                self.dialog = Some(PathDialog { save: true, path: self.default_save_path() });
+            }
+            let recoverable = self.recover_path().exists();
+            if ui.add_enabled(recoverable, egui::Button::new("Recover autosave")).clicked() {
+                self.recover();
+            }
+            ui.separator();
+            if ui.button("Export...").clicked() {
+                if self.export.dir.is_empty() {
+                    self.export.dir = self.default_export_dir().display().to_string();
+                }
+                self.export.open = true;
+            }
+        });
+    }
+
+    fn default_save_path(&self) -> String {
+        match &self.project_path {
+            Some(p) => p.display().to_string(),
+            None => std::env::current_dir()
+                .unwrap_or_default()
+                .join(format!("untitled.{}", op_project::EXTENSION))
+                .display()
+                .to_string(),
+        }
+    }
+
+    fn default_export_dir(&self) -> PathBuf {
+        match self.project_path.as_ref().and_then(|p| p.parent()) {
+            Some(d) => d.join("export"),
+            None => std::env::current_dir().unwrap_or_default().join("export"),
+        }
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(mut d) = self.dialog.take() {
+            let mut keep = true;
+            let mut accepted = false;
+            egui::Window::new(if d.save { "Save project as" } else { "Open project" })
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Path:");
+                    ui.add(egui::TextEdit::singleline(&mut d.path).desired_width(460.0));
+                    if d.save && Path::new(&d.path).exists() {
+                        ui.colored_label(egui::Color32::YELLOW, "This file exists and will be replaced.");
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button(if d.save { "Save" } else { "Open" }).clicked() {
+                            accepted = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+            if accepted && !d.path.trim().is_empty() {
+                let path = PathBuf::from(d.path.trim());
+                if d.save {
+                    self.todo.push(Todo::Save(path));
+                    ctx.request_repaint();
+                } else {
+                    self.request(Pending::Open(path), ctx);
+                }
+            } else if keep && !accepted {
+                self.dialog = Some(d);
+            } else if !keep {
+                self.after_save = None;
+            }
+        }
+
+        if let Some(action) = self.confirm.clone() {
+            let what = match action {
+                Pending::Quit => "quit",
+                Pending::New => "start a new project",
+                _ => "open another file",
+            };
+            egui::Window::new("Unsaved changes").collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.label(format!("The project has unsaved changes. Save before you {what}?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.confirm = None;
+                        self.after_save = Some(action.clone());
+                        match self.project_path.clone() {
+                            Some(p) => {
+                                self.todo.push(Todo::Save(p));
+                                ctx.request_repaint();
+                            }
+                            None => self.dialog = Some(PathDialog { save: true, path: self.default_save_path() }),
+                        }
+                    }
+                    if ui.button("Discard changes").clicked() {
+                        self.confirm = None;
+                        self.modified = false;
+                        self.perform(action.clone(), ctx);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm = None;
+                    }
+                });
+            });
+        }
+
+        if self.export.open {
+            let mut open = true;
+            egui::Window::new("Export textures").open(&mut open).collapsible(false).show(ctx, |ui| {
+                let idx = self.export.preset.min(self.presets.len() - 1);
+                egui::ComboBox::from_label("Preset").selected_text(&self.presets[idx].name).show_ui(ui, |ui| {
+                    for (i, p) in self.presets.iter().enumerate() {
+                        ui.selectable_value(&mut self.export.preset, i, &p.name);
+                    }
+                });
+                ui.small("Files:");
+                for m in &self.presets[idx].maps {
+                    ui.small(format!("  {}.{}", m.file, m.format.extension()));
+                }
+                ui.label("Folder:");
+                ui.add(egui::TextEdit::singleline(&mut self.export.dir).desired_width(420.0));
+                ui.horizontal(|ui| {
+                    ui.label("Texture set name:");
+                    ui.text_edit_singleline(&mut self.export.set_name);
+                });
+                ui.add(egui::Slider::new(&mut self.export.padding, 0..=64).text("Edge padding (texels)"));
+                let busy = self.export.running.is_some();
+                if ui.add_enabled(!busy && !self.export.dir.trim().is_empty(), egui::Button::new("Export")).clicked() {
+                    self.todo.push(Todo::Export);
+                    ctx.request_repaint();
+                }
+                if busy {
+                    ui.label("Exporting...");
+                }
+                for w in &self.preset_warnings {
+                    ui.colored_label(egui::Color32::YELLOW, format!("Preset skipped: {w}"));
+                }
+            });
+            self.export.open = open;
+        }
+    }
+}
+
+fn srgb_for_display(c: [f32; 3]) -> [f32; 4] {
+    [c[0], c[1], c[2], 1.0]
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let dropped = ui.ctx().input(|i| i.raw.dropped_files.iter().find_map(|f| Some(f.path().to_path_buf())));
+        let ctx = ui.ctx().clone();
+        self.housekeeping(&ctx);
+
+        let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| Some(f.path().to_path_buf())));
         if let Some(p) = dropped {
-            self.load(p);
+            let action = if is_project(&p) { Pending::Open(p) } else { Pending::Mesh(p) };
+            self.request(action, &ctx);
         }
 
-        // Shortcuts: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, [ ] brush size.
-        let (undo, redo, smaller, larger) = ui.input_mut(|i| {
+        // Shortcuts: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, Ctrl+S save, [ ] brush size.
+        let (undo, redo, save, smaller, larger) = ui.input_mut(|i| {
             let redo = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
                 || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
             let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            (undo, redo, i.key_pressed(egui::Key::OpenBracket), i.key_pressed(egui::Key::CloseBracket))
+            let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
+            (undo, redo, save, i.key_pressed(egui::Key::OpenBracket), i.key_pressed(egui::Key::CloseBracket))
         });
         if undo {
             self.do_undo();
         }
         if redo {
             self.do_redo();
+        }
+        if save {
+            match self.project_path.clone() {
+                Some(p) => self.todo.push(Todo::Save(p)),
+                None => self.dialog = Some(PathDialog { save: true, path: self.default_save_path() }),
+            }
         }
         if smaller {
             self.brush.radius_pts = (self.brush.radius_pts * 0.85).max(2.0);
@@ -548,16 +1053,17 @@ impl eframe::App for App {
             self.brush.radius_pts = (self.brush.radius_pts / 0.85).min(300.0);
         }
 
+        egui::Panel::top("file_bar").show(ui, |ui| self.file_bar(ui));
         egui::Panel::left("properties").default_size(250.0).show(ui, |ui| {
             ui.heading("Texture set");
             ui.horizontal(|ui| {
                 ui.label("Resolution");
                 let before = self.tex_size;
                 egui::ComboBox::from_id_salt("tex_size")
-                    .selected_text(format!("{0}×{0}", self.tex_size))
+                    .selected_text(format!("{0}x{0}", self.tex_size))
                     .show_ui(ui, |ui| {
                         for s in TEXTURE_SIZES {
-                            ui.selectable_value(&mut self.tex_size, s, format!("{s}×{s}"));
+                            ui.selectable_value(&mut self.tex_size, s, format!("{s}x{s}"));
                         }
                     });
                 if self.tex_size != before {
@@ -565,6 +1071,7 @@ impl eframe::App for App {
                     self.undo.clear();
                     self.redo.clear();
                     self.pending.push(PaintOp::Reset(self.tex_size));
+                    self.modified = true;
                 }
             });
             ui.horizontal(|ui| {
@@ -603,13 +1110,14 @@ impl eframe::App for App {
             ui.add_enabled(self.channels.rough, egui::Slider::new(&mut self.channels.roughness, 0.0..=1.0));
 
             ui.separator();
-            ui.small("Paint: left drag\nOrbit: Alt+left / middle drag\nPan: right drag\nZoom: scroll\nBrush size: [ ]\nUndo/Redo: Ctrl+Z / Ctrl+Y");
+            ui.small("Paint: left drag\nOrbit: Alt+left / middle drag\nPan: right drag\nZoom: scroll\nBrush size: [ ]\nUndo/Redo: Ctrl+Z / Ctrl+Y\nSave: Ctrl+S");
         });
         egui::Panel::right("layers").default_size(290.0).show(ui, |ui| self.layer_panel(ui));
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.label(&self.status);
         });
         self.commit_gesture(ui);
+        self.dialogs(&ctx);
 
         egui::CentralPanel::default().show(ui, |ui| {
             let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -629,7 +1137,9 @@ impl eframe::App for App {
 
             let mut stamps = Vec::new();
             let mut stamp_target = None;
-            let painting = resp.is_pointer_button_down_on() && primary_down && !alt;
+            // A modal dialog must not paint through to the viewport underneath.
+            let modal_open = self.dialog.is_some() || self.confirm.is_some();
+            let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !modal_open;
             match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
                 (true, Some(pos)) => match self.paint_target() {
                     Ok((layer, target)) => {
@@ -660,15 +1170,15 @@ impl eframe::App for App {
                 camera_pos: [cam.x, cam.y, cam.z, 1.0],
                 light_dir: [light.x, light.y, light.z, 0.0],
                 // Shown only where the layer stack leaves a pixel uncovered.
-                base_color: [0.18, 0.18, 0.18, 1.0],
-                params: [0.0, 0.5, near, far],
+                base_color: srgb_for_display(FALLBACK_BASE),
+                params: [FALLBACK_METALLIC, FALLBACK_ROUGHNESS, near, far],
             };
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 rect,
                 ViewportCallback { globals, size_px, doc: self.doc.clone(), ops },
             ));
 
-            if let (true, Some(pos)) = (!alt, resp.hover_pos()) {
+            if let (true, Some(pos)) = (!alt && !modal_open, resp.hover_pos()) {
                 ui.painter().circle_stroke(pos, self.brush.radius_pts, egui::Stroke::new(1.0, egui::Color32::WHITE));
             }
         });

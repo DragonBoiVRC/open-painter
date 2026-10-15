@@ -11,7 +11,12 @@ eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "de
 egui = "0.37.0"
 glam = "0.34.1"
 op-core = { version = "0.0.1", path = "../op-core" }
+op-export = { version = "0.0.1", path = "../op-export" }
 op-mesh = { version = "0.0.1", path = "../op-mesh" }
+op-project = { version = "0.0.1", path = "../op-project" }
+serde_json = "1.0.154"
 
 [dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 pollster = "1.0.1"
+tempfile = "3.27.0"

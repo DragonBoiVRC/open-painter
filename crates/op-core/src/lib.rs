@@ -4,9 +4,16 @@
 
 pub mod blend;
 
+use serde::{Deserialize, Serialize};
+
 pub type NodeId = u64;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What the viewport and exporters show where the layer stack leaves a texel uncovered.
+pub const FALLBACK_BASE: [f32; 3] = [0.18, 0.18, 0.18];
+pub const FALLBACK_METALLIC: f32 = 0.0;
+pub const FALLBACK_ROUGHNESS: f32 = 0.5;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlendMode {
     #[default]
     Normal,
@@ -54,7 +61,7 @@ impl BlendMode {
 }
 
 /// A fill layer writes constants. `None` leaves that channel untouched.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FillParams {
     /// sRGB color.
     pub base: Option<[f32; 3]>,
@@ -62,14 +69,14 @@ pub struct FillParams {
     pub roughness: Option<f32>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
     pub enabled: bool,
     /// Initial content: white reveals everything, black hides everything.
     pub init_white: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     /// Owns paintable base/metal/rough textures.
     Paint,
@@ -78,7 +85,7 @@ pub enum NodeKind {
     Group { children: Vec<Node> },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
     pub name: String,
@@ -89,7 +96,7 @@ pub struct Node {
     pub kind: NodeKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub nodes: Vec<Node>,
     next_id: NodeId,
