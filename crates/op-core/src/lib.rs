@@ -564,6 +564,63 @@ impl MaskAdjust {
     }
 }
 
+/// How one channel of a layer is mixed into the stack, on top of the layer's own blend mode and
+/// opacity: it can be switched off, blended differently or made more transparent.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChannelMix {
+    pub enabled: bool,
+    /// `None` follows the layer's blend mode.
+    pub blend: Option<BlendMode>,
+    /// Multiplies the layer's opacity, 0..1.
+    pub opacity: f32,
+}
+
+impl Default for ChannelMix {
+    fn default() -> Self {
+        Self { enabled: true, blend: None, opacity: 1.0 }
+    }
+}
+
+impl ChannelMix {
+    /// The blend mode this channel uses given the layer's.
+    pub fn mode(&self, layer: BlendMode) -> BlendMode {
+        self.blend.unwrap_or(layer)
+    }
+
+    /// The opacity multiplier: 0 when the channel is off.
+    pub fn factor(&self) -> f32 {
+        if !self.enabled {
+            0.0
+        } else if self.opacity.is_finite() {
+            self.opacity.clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Per-channel mixing for a layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChannelMixes {
+    pub base: ChannelMix,
+    pub metallic: ChannelMix,
+    pub roughness: ChannelMix,
+    pub height: ChannelMix,
+    /// The normal map a fill layer brings along; its blend mode does not matter (normals replace).
+    pub normal: ChannelMix,
+}
+
+impl ChannelMixes {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The four blended channels in the order the compositor uses: base, metallic, roughness, height.
+    pub fn blended(&self) -> [&ChannelMix; 4] {
+        [&self.base, &self.metallic, &self.roughness, &self.height]
+    }
+}
+
 /// A filter applied to what a paint layer or group puts down, before it is blended. Filters run in
 /// the order they are listed.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -629,6 +686,9 @@ pub struct Node {
     /// Filters on paint layers and groups (fill layers are constants, so there is nothing to filter).
     #[serde(default)]
     pub filters: Vec<Filter>,
+    /// Per-channel blend mode, opacity and on/off.
+    #[serde(default)]
+    pub channels: ChannelMixes,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -803,6 +863,7 @@ impl Document {
             kind,
             adjust: ColorAdjust::default(),
             filters: Vec::new(),
+            channels: ChannelMixes::default(),
         };
         let list = match parent.and_then(|p| self.find_mut(p)) {
             Some(Node { kind: NodeKind::Group { children }, .. }) => children,
@@ -1277,5 +1338,23 @@ mod tests {
         assert_eq!(Filter::Blur { radius: 1e9 }.sanitized(), Filter::Blur { radius: 64.0 });
         assert_eq!(Filter::Sharpen { amount: -3.0, radius: 0.0 }.sanitized(), Filter::Sharpen { amount: 0.0, radius: 0.5 });
         assert_eq!(Filter::Levels { black: f32::INFINITY, white: 2.0, gamma: 0.0 }.sanitized(), Filter::Levels { black: 0.0, white: 1.0, gamma: 0.1 });
+    }
+
+    #[test]
+    fn channel_mixes_round_trip_and_default_when_missing() {
+        let (mut d, a, ..) = doc_abc();
+        assert!(d.find(a).unwrap().channels.is_default());
+        d.find_mut(a).unwrap().channels.roughness = ChannelMix { enabled: false, blend: Some(BlendMode::Screen), opacity: 0.25 };
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(serde_json::from_str::<Document>(&json).unwrap(), d);
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for n in v["nodes"].as_array_mut().unwrap() {
+            n.as_object_mut().unwrap().remove("channels");
+        }
+        let old: Document = serde_json::from_value(v).unwrap();
+        assert!(old.find(a).unwrap().channels.is_default());
+        assert_eq!(ChannelMix { opacity: f32::NAN, ..Default::default() }.factor(), 1.0);
+        assert_eq!(ChannelMix { enabled: false, ..Default::default() }.factor(), 0.0);
+        assert_eq!(ChannelMix { blend: None, ..Default::default() }.mode(BlendMode::Multiply), BlendMode::Multiply);
     }
 }

@@ -1208,6 +1208,54 @@ mod tests {
         assert_eq!(texel_rg(&m, (0.1, 0.1)).0, 0, "hidden outside");
     }
 
+    /// Channel mixes (blend mode, opacity, on/off per channel) composite like the CPU reference.
+    #[test]
+    fn channel_mixes_match_the_cpu_reference() {
+        use op_core::ChannelMix;
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let both = |b, m, r, h| NodeKind::Fill(FillParams { base: b, metallic: m, roughness: r, height: h, ..Default::default() });
+        doc.add(None, None, "bg", both(Some([0.9, 0.4, 0.2]), Some(0.8), Some(0.3), Some(0.7)));
+        let top = doc.add(None, None, "top", both(Some([0.5, 0.7, 0.9]), Some(0.4), Some(0.6), Some(0.35)));
+        {
+            let n = doc.find_mut(top).unwrap();
+            n.blend = BlendMode::Overlay;
+            n.opacity = 0.8;
+            n.channels.base = ChannelMix { enabled: true, blend: Some(BlendMode::Multiply), opacity: 0.5 };
+            n.channels.metallic = ChannelMix { enabled: false, blend: None, opacity: 1.0 };
+            n.channels.roughness = ChannelMix { enabled: true, blend: Some(BlendMode::Screen), opacity: 0.8 };
+            n.channels.height = ChannelMix { enabled: true, blend: None, opacity: 0.3 };
+        }
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let want = op_core::blend::eval_fill_only(&doc);
+        let base = rig.read(&rig.gpu.paint().output.base, 8);
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 8) as usize;
+        for c in 0..4 {
+            let got = f16_to_f32(u16::from_le_bytes([base[i + c * 2], base[i + c * 2 + 1]]));
+            assert!((got - want.base[c]).abs() < 2e-3, "base[{c}] gpu {got} cpu {}", want.base[c]);
+        }
+        let j = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;
+        for (name, bytes, w) in [
+            ("metal", rig.metal(), want.metal),
+            ("rough", rig.read(&rig.gpu.paint().output.rough, 2), want.rough),
+            ("height", rig.read(&rig.gpu.paint().output.height, 2), want.height),
+        ] {
+            for c in 0..2 {
+                let got = bytes[j + c] as f32 / 255.0;
+                assert!((got - w[c]).abs() < 3.0 / 255.0, "{name}[{c}] gpu {got} cpu {}", w[c]);
+            }
+        }
+        // The switched-off metallic channel left the background's value alone.
+        assert!((want.metal[0] - 0.8).abs() < 1e-6);
+        // And it matters: the channels differ from a plain overlay at 80%.
+        let plain = {
+            let mut d2 = doc.clone();
+            d2.find_mut(top).unwrap().channels = Default::default();
+            op_core::blend::eval_fill_only(&d2)
+        };
+        assert!((plain.rough[0] - want.rough[0]).abs() > 0.02 && (plain.base[0] - want.base[0]).abs() > 0.02);
+    }
+
     #[test]
     fn projective_brush_paints_visible_side_only_and_undoes() {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };

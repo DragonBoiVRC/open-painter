@@ -141,15 +141,17 @@ fn over_scalar(mode: BlendMode, backdrop: [f32; 2], value: f32, a_s: f32) -> [f3
     [o[0], o[3]]
 }
 
-fn apply_layer(mode: BlendMode, k: f32, bk: PixelSet, src: PixelSet) -> PixelSet {
+fn apply_layer(node: &Node, bk: PixelSet, src: PixelSet) -> PixelSet {
+    let (mode, k) = (node.blend, node.opacity);
+    let [mb, mm, mr, mh] = node.channels.blended().map(|c| (c.mode(mode), k * c.factor()));
     // Un-premultiply the source, then composite each channel with its own coverage.
     let straight = |v: f32, a: f32| if a > 0.0 { v / a } else { 0.0 };
     let base_c = [straight(src.base[0], src.base[3]), straight(src.base[1], src.base[3]), straight(src.base[2], src.base[3])];
     PixelSet {
-        base: over(mode, bk.base, base_c, src.base[3] * k),
-        metal: over_scalar(mode, bk.metal, straight(src.metal[0], src.metal[1]), src.metal[1] * k),
-        rough: over_scalar(mode, bk.rough, straight(src.rough[0], src.rough[1]), src.rough[1] * k),
-        height: over_scalar(mode, bk.height, straight(src.height[0], src.height[1]), src.height[1] * k),
+        base: over(mb.0, bk.base, base_c, src.base[3] * mb.1),
+        metal: over_scalar(mm.0, bk.metal, straight(src.metal[0], src.metal[1]), src.metal[1] * mm.1),
+        rough: over_scalar(mr.0, bk.rough, straight(src.rough[0], src.rough[1]), src.rough[1] * mr.1),
+        height: over_scalar(mh.0, bk.height, straight(src.height[0], src.height[1]), src.height[1] * mh.1),
     }
 }
 
@@ -180,7 +182,7 @@ fn eval_nodes(nodes: &[Node]) -> PixelSet {
             NodeKind::Fill(f) => fill_pixel(f),
             NodeKind::Group { children } => eval_nodes(children),
         };
-        acc = apply_layer(n.blend, n.opacity, acc, src);
+        acc = apply_layer(n, acc, src);
     }
     acc
 }

@@ -15,6 +15,9 @@ struct Params {
     dims: vec4<f32>,    // texture size in pixels
     lv: vec4<f32>,      // mask levels: black, white, gamma, invert
     adj: vec4<f32>,     // colour adjustment: hue (radians), saturation, brightness, contrast (tex.w: on)
+    chan_mode: vec4<u32>, // blend mode of base, metallic, roughness, height
+    chan_k: vec4<f32>,  // opacity multiplier of those channels (0 when a channel is off)
+    chan_n: vec4<f32>,  // x: opacity multiplier of the normal map
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -277,13 +280,13 @@ fn fs_main(i: FsIn) -> Out {
     }
     let k = p.vals.x * mask;
 
-    let b = over(textureLoad(bk_base, xy, 0), color, cov.x * k, p.mode.z);
+    let b = over(textureLoad(bk_base, xy, 0), color, cov.x * k * p.chan_k.x, p.chan_mode.x);
     let bm = textureLoad(bk_metal, xy, 0);
     let br = textureLoad(bk_rough, xy, 0);
-    let m = over(vec4<f32>(vec3<f32>(bm.r), bm.g), vec3<f32>(metal), cov.y * k, p.mode.z);
-    let r = over(vec4<f32>(vec3<f32>(br.r), br.g), vec3<f32>(rough), cov.z * k, p.mode.z);
+    let m = over(vec4<f32>(vec3<f32>(bm.r), bm.g), vec3<f32>(metal), cov.y * k * p.chan_k.y, p.chan_mode.y);
+    let r = over(vec4<f32>(vec3<f32>(br.r), br.g), vec3<f32>(rough), cov.z * k * p.chan_k.z, p.chan_mode.z);
     let bh = textureLoad(bk_height, xy, 0);
-    let h = over(vec4<f32>(vec3<f32>(bh.r), bh.g), vec3<f32>(height), cov.w * k, p.mode.z);
+    let h = over(vec4<f32>(vec3<f32>(bh.r), bh.g), vec3<f32>(height), cov.w * k * p.chan_k.w, p.chan_mode.w);
 
     var o: Out;
     o.base = b;
@@ -294,7 +297,7 @@ fn fs_main(i: FsIn) -> Out {
     // Normals combine by replacing: where the source covers, its normal takes over in proportion to its
     // coverage and the layer's opacity.
     let bn = textureLoad(bk_normal, xy, 0);
-    let a_n = n_cov * k;
+    let a_n = n_cov * k * p.chan_n.x;
     let cov_out = a_n + bn.a * (1.0 - a_n);
     var n_out = vec3<f32>(0.0, 0.0, 1.0);
     if (cov_out > 0.0) {

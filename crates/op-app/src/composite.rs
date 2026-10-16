@@ -26,6 +26,12 @@ struct Params {
     lv: [f32; 4],
     /// Colour adjustment: hue (radians), saturation, brightness, contrast.
     adj: [f32; 4],
+    /// The blend mode of each channel: base, metallic, roughness, height.
+    chan_mode: [u32; 4],
+    /// The opacity multiplier of each of those channels (0 when switched off).
+    chan_k: [f32; 4],
+    /// x: the opacity multiplier of the normal map.
+    chan_n: [f32; 4],
 }
 
 #[repr(C)]
@@ -408,6 +414,9 @@ impl Compositor {
             color: [color[0], color[1], color[2], 0.0],
             vals: [node.opacity, metal, rough, height],
             mode: [is_fill, mask.is_some() as u32, node.blend.index(), bits],
+            chan_mode: node.channels.blended().map(|c| c.mode(node.blend).index()),
+            chan_k: node.channels.blended().map(|c| c.factor()),
+            chan_n: [node.channels.normal.factor(), 0.0, 0.0, 0.0],
             tex: [tex_bits, invert_bits, flip, (!node.adjust.is_identity()) as u32],
             xf: xf.0,
             xf2: [xf.1[0], xf.1[1], self.tile[0], self.tile[1]],

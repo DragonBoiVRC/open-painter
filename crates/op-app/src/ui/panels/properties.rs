@@ -35,7 +35,44 @@ impl App {
                 }
             });
 
-            if !matches!(node.kind, NodeKind::Fill(_)) {
+            let is_fill = matches!(node.kind, NodeKind::Fill(_));
+            egui::CollapsingHeader::new("Channels").id_salt("layer_channels").default_open(!node.channels.is_default()).show(ui, |ui| {
+                let layer_blend = node.blend;
+                let rows: [(&str, &mut op_core::ChannelMix, bool); 5] = [
+                    ("Base color", &mut node.channels.base, true),
+                    ("Metallic", &mut node.channels.metallic, true),
+                    ("Roughness", &mut node.channels.roughness, true),
+                    ("Height", &mut node.channels.height, true),
+                    ("Normal", &mut node.channels.normal, false),
+                ];
+                for (i, (label, mix, has_blend)) in rows.into_iter().enumerate() {
+                    if i == 4 && !is_fill {
+                        break;
+                    }
+                    ui.push_id(i, |ui| {
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut mix.enabled, label).changed();
+                            if has_blend {
+                                let shown = mix.blend.map(|b| b.name()).unwrap_or("Layer");
+                                egui::ComboBox::from_id_salt("chan_blend").selected_text(shown).width(90.0).show_ui(ui, |ui| {
+                                    changed |= ui.selectable_value(&mut mix.blend, None, format!("Layer ({})", layer_blend.name())).changed();
+                                    for m in BlendMode::ALL {
+                                        changed |= ui.selectable_value(&mut mix.blend, Some(m), m.name()).changed();
+                                    }
+                                });
+                            }
+                            changed |= ui.add(egui::Slider::new(&mut mix.opacity, 0.0..=1.0).show_value(true)).changed();
+                        });
+                    });
+                }
+                if ui.add_enabled(!node.channels.is_default(), egui::Button::new("Reset")).clicked() {
+                    node.channels = Default::default();
+                    changed = true;
+                }
+                super::hint(ui, "Each channel can be switched off, blended differently from the layer, or made more transparent.");
+            });
+
+            if !is_fill {
                 egui::CollapsingHeader::new("Filters").id_salt("layer_filters").default_open(!node.filters.is_empty()).show(ui, |ui| {
                     changed |= filters_ui(ui, &mut node.filters);
                 });
