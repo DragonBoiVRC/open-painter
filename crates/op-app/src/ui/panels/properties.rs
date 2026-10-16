@@ -25,38 +25,8 @@ impl App {
             changed |= ui.add(egui::Slider::new(&mut node.opacity, 0.0..=1.0).text("Opacity")).changed();
 
             if let NodeKind::Fill(f) = &mut node.kind {
-                let mut on = f.base.is_some();
-                if ui.checkbox(&mut on, "Base color").changed() {
-                    f.base = on.then(|| f.base.unwrap_or([0.8, 0.8, 0.8]));
-                    changed = true;
-                }
-                if let Some(c) = &mut f.base {
-                    changed |= ui.color_edit_button_rgb(c).changed();
-                }
-                let mut on = f.metallic.is_some();
-                if ui.checkbox(&mut on, "Metallic").changed() {
-                    f.metallic = on.then(|| f.metallic.unwrap_or(0.0));
-                    changed = true;
-                }
-                if let Some(v) = &mut f.metallic {
-                    changed |= ui.add(egui::Slider::new(v, 0.0..=1.0)).changed();
-                }
-                let mut on = f.roughness.is_some();
-                if ui.checkbox(&mut on, "Roughness").changed() {
-                    f.roughness = on.then(|| f.roughness.unwrap_or(0.5));
-                    changed = true;
-                }
-                if let Some(v) = &mut f.roughness {
-                    changed |= ui.add(egui::Slider::new(v, 0.0..=1.0)).changed();
-                }
-                let mut on = f.height.is_some();
-                if ui.checkbox(&mut on, "Height (normal map)").changed() {
-                    f.height = on.then(|| f.height.unwrap_or(0.5));
-                    changed = true;
-                }
-                if let Some(v) = &mut f.height {
-                    changed |= ui.add(egui::Slider::new(v, 0.0..=1.0)).on_hover_text("0 digs in, 0.5 is flat, 1 raises").changed();
-                }
+                ui.add_space(4.0);
+                changed |= super::fill::fill_controls(ui, f, &self.assets, &self.tex_thumbs);
             }
 
             ui.separator();

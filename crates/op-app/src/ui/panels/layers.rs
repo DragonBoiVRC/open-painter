@@ -85,6 +85,7 @@ impl App {
                                 self.selected,
                                 &mut self.renaming,
                                 &self.thumbs,
+                                &self.tex_thumbs,
                                 node,
                                 row,
                                 dragging,
@@ -122,12 +123,19 @@ impl App {
             if ui.ctx().input(|i| i.pointer.any_released()) {
                 let in_list = pointer.is_some_and(|p| ui.min_rect().contains(p));
                 if in_list && !matches!(asset, Asset::Brush(_)) {
-                    if let Some((id, _)) = over {
-                        self.selected = Some(id);
+                    match (&asset, over) {
+                        // A texture dropped on empty space becomes a new fill layer of its own.
+                        (Asset::Texture(id), None) => self.use_texture_on_new_layer(id),
+                        (_, Some((id, _))) => {
+                            self.selected = Some(id);
+                            self.use_asset(asset);
+                        }
+                        (_, None) => self.use_asset(asset),
                     }
-                    self.use_asset(asset);
                 }
-                egui::DragAndDrop::clear_payload(ui.ctx());
+                if in_list {
+                    egui::DragAndDrop::clear_payload(ui.ctx());
+                }
             }
         }
 
@@ -271,6 +279,7 @@ fn layer_row(
     selected: Option<NodeId>,
     renaming: &mut Option<(NodeId, String)>,
     thumbs: &std::collections::HashMap<(NodeId, bool), egui::TextureHandle>,
+    tex_thumbs: &std::collections::HashMap<String, egui::TextureHandle>,
     node: &Node,
     row: &Row,
     dragging: Option<NodeId>,
@@ -336,7 +345,7 @@ fn layer_row(
 
     // Thumbnails.
     let thumb = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - THUMB / 2.0), egui::vec2(THUMB, THUMB));
-    paint_thumb(&p, thumb, node, dim, thumbs.get(&(node.id, false)));
+    paint_thumb(&p, thumb, node, dim, thumbs.get(&(node.id, false)), tex_thumbs);
     x += THUMB + 4.0;
     if let Some(mask) = &node.mask {
         let m = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - THUMB / 2.0), egui::vec2(THUMB, THUMB));
@@ -531,7 +540,14 @@ fn checker(p: &egui::Painter, rect: egui::Rect) {
 
 /// A stand-in preview of what the layer holds: a swatch for fills, a folder for groups, a checker
 /// with a brush for paint layers.
-fn paint_thumb(p: &egui::Painter, rect: egui::Rect, node: &Node, dim: bool, image: Option<&egui::TextureHandle>) {
+fn paint_thumb(
+    p: &egui::Painter,
+    rect: egui::Rect,
+    node: &Node,
+    dim: bool,
+    image: Option<&egui::TextureHandle>,
+    tex_thumbs: &std::collections::HashMap<String, egui::TextureHandle>,
+) {
     let fade = |c: egui::Color32| if dim { c.gamma_multiply(0.45) } else { c };
     match &node.kind {
         NodeKind::Fill(f) => {
@@ -541,6 +557,14 @@ fn paint_thumb(p: &egui::Painter, rect: egui::Rect, node: &Node, dim: bool, imag
                 .unwrap_or(op_core::FALLBACK_BASE)
                 .map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             p.rect_filled(rect, 2.0, fade(egui::Color32::from_rgb(r, g, b)));
+            // A fill with a base colour texture shows that picture.
+            if let Some(h) = f.maps.base.as_ref().and_then(|t| tex_thumbs.get(&t.id)) {
+                let tint = if dim { egui::Color32::WHITE.gamma_multiply(0.45) } else { egui::Color32::WHITE };
+                p.image(h.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+            } else if f.maps.base.is_none() && !f.maps.is_empty() {
+                // Textured, but not the colour: a small mark says there are textures.
+                p.text(rect.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(14.0), fade(theme::TEXT));
+            }
         }
         NodeKind::Group { .. } => {
             p.rect_filled(rect, 2.0, fade(theme::CONTROL));

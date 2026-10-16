@@ -485,6 +485,13 @@ impl ViewportGpu {
         let mut lib = self.images.lock().expect("image library lock");
         if !lib.contains(id) {
             lib.insert(id, crate::images::upload_image(device, queue, image));
+            drop(lib);
+            // Layers that were composited without it must be composited again.
+            for set in &mut self.sets {
+                for tile in &mut set.tiles {
+                    tile.invalidate();
+                }
+            }
         }
     }
 
@@ -1046,6 +1053,7 @@ mod tests {
             active: 0,
             udim: false,
             hidden_sets: Vec::new(),
+            images: Vec::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("p.opproj");
@@ -1549,6 +1557,7 @@ mod tests {
             active: 1,
             udim: false,
             hidden_sets: Vec::new(),
+            images: Vec::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("two.opproj");

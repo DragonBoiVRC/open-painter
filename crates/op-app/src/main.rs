@@ -8,6 +8,7 @@ mod normal_gpu;
 mod picker;
 mod procgen;
 mod sets;
+mod textures;
 mod thumbs;
 mod uvview;
 mod ui;
@@ -227,6 +228,10 @@ struct App {
     parked: Vec<Option<sets::SetState>>,
     active: usize,
     shelf: ui::panels::ShelfState,
+    /// The texture library: images imported into the shelf.
+    assets: Vec<textures::TextureAsset>,
+    tex_thumbs: HashMap<String, egui::TextureHandle>,
+    import_rx: Option<Receiver<Vec<PathBuf>>>,
     /// Groups folded shut in the layers panel.
     collapsed: std::collections::HashSet<NodeId>,
     /// Layer being renamed in place, with its draft name.
@@ -345,6 +350,9 @@ impl App {
             parked: Vec::new(),
             active: 0,
             shelf: Default::default(),
+            assets: Vec::new(),
+            tex_thumbs: HashMap::new(),
+            import_rx: None,
             collapsed: Default::default(),
             renaming: None,
             target: Target::Content,
@@ -431,6 +439,7 @@ impl App {
             layout_check: Instant::now(),
             show_shortcuts: false,
         };
+        app.load_texture_library();
         app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
         app.init_sets();
         if let Some(p) = initial {
@@ -523,6 +532,12 @@ impl App {
 
     fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {
         self.udim = p.udim;
+        // The project's textures join the library (the id is the content hash, so a mismatch is ignored).
+        for img in p.images {
+            if op_image::content_id(&img.bytes) == img.id {
+                let _ = self.add_texture(&img.name, img.bytes);
+            }
+        }
         self.set_mesh(p.mesh, p.mesh_name);
         let mut states = Vec::new();
         let mut loads = Vec::new();
@@ -616,7 +631,21 @@ impl App {
         }
         let mut hidden_sets: Vec<usize> = self.hidden_sets.iter().copied().collect();
         hidden_sets.sort_unstable();
-        Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active, udim: self.udim, hidden_sets })
+        // Embed the textures any layer uses, so the project does not depend on this machine's library.
+        let mut used: Vec<String> = self.doc.texture_ids();
+        for st in self.parked.iter().flatten() {
+            for id in st.doc.texture_ids() {
+                if !used.contains(&id) {
+                    used.push(id);
+                }
+            }
+        }
+        let images = used
+            .iter()
+            .filter_map(|id| self.texture(id))
+            .map(|a| op_project::ImageData { id: a.id.clone(), name: a.name.clone(), bytes: (*a.bytes).clone() })
+            .collect();
+        Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active, udim: self.udim, hidden_sets, images })
     }
 
     fn do_save(&mut self, mut path: PathBuf, ctx: &egui::Context) {
@@ -1008,6 +1037,9 @@ impl App {
             }
         }
         self.poll_picker(ctx);
+        self.poll_texture_import(ctx);
+        let used = self.doc.texture_ids();
+        self.ensure_tex_thumbs(ctx, &used);
         self.refresh_thumbs(ctx);
         self.poll_bake(ctx);
         self.drive_procgen(ctx);
@@ -1400,6 +1432,7 @@ impl App {
 
     /// The operations to send with this frame: those for the whole set, then those for single tiles.
     fn take_batches(&mut self, mut ops: Vec<PaintOp>) -> Vec<viewport::SetBatch> {
+        self.ensure_doc_images(&self.doc);
         ops.splice(0..0, std::mem::take(&mut self.pending));
         let mut batches = vec![viewport::SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
         for (tile, op) in std::mem::take(&mut self.pending_tiles) {
@@ -1797,14 +1830,23 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.housekeeping(&ctx);
 
-        let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| Some(f.path().to_path_buf())));
-        if let Some(p) = dropped {
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| Some(f.path().to_path_buf())).collect());
+        // Image files go to the texture library; the first other file is a model or project to open.
+        let (images, others): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(|p| textures::is_image_path(p));
+        if !images.is_empty() {
+            self.import_texture_files(&images);
+        }
+        if let Some(p) = others.into_iter().next() {
             let action = if is_project(&p) { Pending::Open(p) } else { Pending::Mesh(p) };
             self.request(action, &ctx);
         }
 
         self.handle_shortcuts(ui, &ctx);
         self.ui_frame(ui);
+        // A drag that ended anywhere that did not take it is over.
+        if ctx.input(|i| !i.pointer.any_down()) {
+            egui::DragAndDrop::clear_payload(&ctx);
+        }
     }
 }
 

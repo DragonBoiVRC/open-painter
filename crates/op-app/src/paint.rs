@@ -610,6 +610,11 @@ impl PaintGpu {
         self.size
     }
 
+    /// Forget the last composite, so the next frame composites again (an image arrived, say).
+    pub fn invalidate(&mut self) {
+        self.last_doc = None;
+    }
+
     /// Let fill layers read from the shared image library.
     pub fn set_images(&mut self, images: crate::images::SharedImages) {
         self.compositor.set_images(images);

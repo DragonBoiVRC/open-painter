@@ -33,6 +33,8 @@ const MAX_BAKE_BYTES: usize = 8192 * 8192 * 3 * 2;
 const MAX_MANIFEST_BYTES: u64 = 64 << 20;
 const MAX_MESH_BYTES: u64 = 1 << 30;
 const MAX_SETS: usize = 4096;
+const MAX_IMAGES: usize = 4096;
+const MAX_IMAGE_BYTES: u64 = 256 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -121,6 +123,25 @@ pub struct Project {
     pub udim: bool,
     /// Texture sets hidden in the 3D view (a view setting, remembered with the project).
     pub hidden_sets: Vec<usize>,
+    /// The texture images the layers use, as the original files, so the project is self-contained.
+    pub images: Vec<ImageData>,
+}
+
+/// One embedded texture image.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageData {
+    /// The library id: the content hash of `bytes`.
+    pub id: String,
+    /// The original file name, shown in the shelf.
+    pub name: String,
+    /// The file as it was imported (PNG, JPEG, ...).
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ImageEntry {
+    id: String,
+    name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -161,6 +182,8 @@ struct Manifest {
     udim: bool,
     #[serde(default)]
     hidden: Vec<usize>,
+    #[serde(default)]
+    images: Vec<ImageEntry>,
     sets: Vec<SetEntry>,
 }
 
@@ -227,6 +250,10 @@ impl Place {
 
 fn blob_path(at: Place, node: NodeId, kind: BlobKind) -> String {
     format!("{}textures/{node}_{}.raw", at.dir(), kind.name())
+}
+
+fn image_path(id: &str) -> String {
+    format!("images/{id}.bin")
 }
 
 fn bake_path(at: Place, map: MeshMap) -> String {
@@ -308,6 +335,15 @@ impl Project {
         if self.active >= self.sets.len() {
             return invalid("the active texture set does not exist");
         }
+        if self.images.len() > MAX_IMAGES {
+            return invalid("too many texture images");
+        }
+        let mut seen = HashSet::new();
+        for img in &self.images {
+            if !op_core::is_valid_texture_id(&img.id) || !seen.insert(img.id.as_str()) {
+                return invalid(format!("texture image '{}' has an unusable or repeated id", img.name));
+            }
+        }
         for (i, s) in self.sets.iter().enumerate() {
             s.validate().map_err(|e| ProjectError::Invalid(format!("texture set {i}: {e}")))?;
             let tiles = expected_tiles(&self.mesh, i, self.udim);
@@ -350,6 +386,7 @@ fn write_zip(path: &Path, project: &Project) -> Result<(), ProjectError> {
         active: project.active,
         udim: project.udim,
         hidden: project.hidden_sets.clone(),
+        images: project.images.iter().map(|i| ImageEntry { id: i.id.clone(), name: i.name.clone() }).collect(),
         sets: project
             .sets
             .iter()
@@ -371,6 +408,10 @@ fn write_zip(path: &Path, project: &Project) -> Result<(), ProjectError> {
     zip.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
     zip.start_file("mesh.bin", deflate)?;
     zip.write_all(&project.mesh.to_bytes())?;
+    for img in &project.images {
+        zip.start_file(image_path(&img.id), deflate)?;
+        zip.write_all(&img.bytes)?;
+    }
     for (i, set) in project.sets.iter().enumerate() {
         for (t, tile) in set.tiles.iter().enumerate() {
             let at = Place::Tile(i, t);
@@ -479,6 +520,7 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
         tiles: Vec<(Place, Vec<BlobEntry>, Vec<BakeEntry>)>,
     }
     let mut hidden_sets = Vec::new();
+    let mut image_entries = Vec::new();
     let (mesh_name, entries, active, udim): (String, Vec<Pending>, usize, bool) = if header.version >= 4 {
         let m: Manifest = serde_json::from_slice(&manifest_bytes)?;
         let sets = m
@@ -492,6 +534,7 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
             })
             .collect();
         hidden_sets = m.hidden;
+        image_entries = m.images;
         (m.mesh_name, sets, m.active, m.udim)
     } else if header.version == 3 {
         let m: ManifestV3 = serde_json::from_slice(&manifest_bytes)?;
@@ -527,10 +570,22 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
         }
         sets.push(SetData { texture_size: e.texture_size, document: e.document, tiles: data });
     }
+    let mut images = Vec::with_capacity(image_entries.len());
+    if image_entries.len() > MAX_IMAGES {
+        return invalid("too many texture images");
+    }
+    for e in image_entries {
+        if !op_core::is_valid_texture_id(&e.id) {
+            return invalid("a texture image has an unusable id");
+        }
+        let mut entry = zip.by_name(&image_path(&e.id))?;
+        let bytes = read_limited(&mut entry, MAX_IMAGE_BYTES, "texture image")?;
+        images.push(ImageData { id: e.id, name: e.name.chars().take(200).collect(), bytes });
+    }
     hidden_sets.retain(|s| *s < sets.len());
     hidden_sets.sort_unstable();
     hidden_sets.dedup();
-    Ok(Project { mesh_name, mesh, sets, active, udim, hidden_sets })
+    Ok(Project { mesh_name, mesh, sets, active, udim, hidden_sets, images })
 }
 
 /// Where to autosave: next to a saved project, or in `fallback_dir` for an untitled one.
@@ -576,6 +631,7 @@ mod tests {
             active: 0,
             udim: false,
             hidden_sets: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -912,6 +968,7 @@ mod tests {
             active: 0,
             udim: true,
             hidden_sets: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -930,6 +987,43 @@ mod tests {
             assert_eq!(q.sets[0].tiles[t].baked, p.sets[0].tiles[t].baked, "tile {t}");
         }
         assert_ne!(q.sets[0].tiles[0].blobs[0].bytes, q.sets[0].tiles[1].blobs[0].bytes, "the tiles hold different paint");
+    }
+
+    #[test]
+    fn embedded_texture_images_round_trip_and_hostile_ids_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.opproj");
+        let mut p = sample();
+        let id = "0123456789abcdef0123456789abcdef".to_string();
+        p.images = vec![ImageData { id: id.clone(), name: "wood_BaseColor.png".into(), bytes: (0..=255u8).cycle().take(5000).collect() }];
+        save(&path, &p).unwrap();
+        let q = load(&path).unwrap();
+        assert_eq!(q.images, p.images);
+        // Ids that are not hashes could name paths: refused when saving...
+        for bad in ["../../etc/passwd", "short", "0123456789ABCDEF0123456789ABCDEF"] {
+            let mut evil = sample();
+            evil.images = vec![ImageData { id: bad.into(), name: "x".into(), bytes: vec![1] }];
+            assert!(save(&path, &evil).is_err(), "{bad}");
+        }
+        let mut twice = sample();
+        twice.images = vec![p.images[0].clone(), p.images[0].clone()];
+        assert!(save(&path, &twice).is_err(), "the same id twice");
+        // ...and when loading a manifest that was edited by hand.
+        save(&path, &p).unwrap();
+        let mut zin = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&read_limited(&mut zin.by_name("manifest.json").unwrap(), 1 << 22, "m").unwrap()).unwrap();
+        value["images"][0]["id"] = "../../x".into();
+        let out = dir.path().join("evil.opproj");
+        let mut zout = zip::ZipWriter::new(File::create(&out).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zout.start_file("manifest.json", opts).unwrap();
+        zout.write_all(&serde_json::to_vec(&value).unwrap()).unwrap();
+        zout.start_file("mesh.bin", opts).unwrap();
+        zout.write_all(&p.mesh.to_bytes()).unwrap();
+        zout.finish().unwrap();
+        assert!(load(&out).is_err(), "a manifest naming a path as an image id");
+        // A project from before textures has none.
+        assert!(load_without_hidden_field(&path).images.len() == 1, "images are kept when only `hidden` is absent");
     }
 
     #[test]

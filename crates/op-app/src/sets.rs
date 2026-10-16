@@ -216,6 +216,7 @@ impl App {
     }
 
     fn enqueue(&self, batch: SetBatch) {
+        self.ensure_doc_images(&batch.doc);
         if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
             gpu.enqueue(batch);
         }
@@ -344,6 +345,7 @@ impl App {
     }
 
     fn gpu_rebuild(&self, set: usize, doc: &Document, size: u32) {
+        self.ensure_doc_images(doc);
         if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
             gpu.rebuild_set(&self.render_state.device, &self.render_state.queue, set, doc, size);
         }

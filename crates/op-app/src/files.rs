@@ -22,6 +22,11 @@ pub fn layout_path() -> PathBuf {
     data_dir().join("layout.json")
 }
 
+/// Where imported texture images are kept between sessions.
+pub fn textures_dir() -> PathBuf {
+    data_dir().join("textures")
+}
+
 pub fn presets_dir() -> PathBuf {
     data_dir().join("presets")
 }

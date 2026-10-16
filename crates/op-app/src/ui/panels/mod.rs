@@ -3,6 +3,7 @@
 mod bake;
 mod brush;
 mod display;
+mod fill;
 mod layer_dnd;
 pub mod layers;
 mod properties;
@@ -11,6 +12,11 @@ mod shelf;
 mod texture_set;
 
 pub use shelf::ShelfState;
+
+/// The shelf category that lists imported textures.
+pub fn shelf_textures() -> shelf::Category {
+    shelf::textures_category()
+}
 use crate::ui::theme;
 use std::ops::RangeInclusive;
 

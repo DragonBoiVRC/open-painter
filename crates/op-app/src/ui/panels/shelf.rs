@@ -1,5 +1,6 @@
-//! "Shelf": a searchable browser of reusable assets — smart materials, smart masks and brush presets.
-//! Double-click a tile to use it; drag smart materials and masks onto the layer stack.
+//! "Shelf": a searchable browser of reusable assets — smart materials, smart masks, brush presets and
+//! imported textures. Double-click a tile to use it; drag smart materials, masks and textures onto the
+//! layer stack (textures also onto a channel slot in the layer's properties).
 
 use crate::ui::theme;
 use crate::{App, GenAction, builtin_kinds};
@@ -12,16 +13,18 @@ pub enum Category {
     Materials,
     Masks,
     Brushes,
+    Textures,
 }
 
 impl Category {
-    const ALL: [Category; 3] = [Category::Materials, Category::Masks, Category::Brushes];
+    const ALL: [Category; 4] = [Category::Materials, Category::Masks, Category::Brushes, Category::Textures];
 
     fn label(self) -> &'static str {
         match self {
             Category::Materials => "Smart materials",
             Category::Masks => "Smart masks",
             Category::Brushes => "Brushes",
+            Category::Textures => "Textures",
         }
     }
 
@@ -30,6 +33,7 @@ impl Category {
             Category::Materials => ph::CUBE,
             Category::Masks => ph::CIRCLE_HALF,
             Category::Brushes => ph::PAINT_BRUSH,
+            Category::Textures => ph::IMAGE,
         }
     }
 }
@@ -49,6 +53,8 @@ pub enum Asset {
     Material(usize),
     Mask(Generator),
     Brush(BrushPreset),
+    /// An imported texture, by library id.
+    Texture(String),
 }
 
 #[derive(Clone, Debug)]
@@ -149,8 +155,14 @@ fn first_fill_color(nodes: &[op_core::Node]) -> Option<[u8; 3]> {
 }
 
 /// Every asset the shelf can show, in display order.
-pub fn catalog(materials: &[SmartMaterial], custom: &[Generator]) -> Vec<Entry> {
+/// The textures to list: (library id, file name).
+pub type TextureList = [(String, String)];
+
+pub fn catalog(materials: &[SmartMaterial], custom: &[Generator], textures: &TextureList) -> Vec<Entry> {
     let mut out = Vec::new();
+    for (id, name) in textures {
+        out.push(Entry { category: Category::Textures, name: name.clone(), asset: Asset::Texture(id.clone()), swatch: None });
+    }
     for (i, m) in materials.iter().enumerate() {
         out.push(Entry {
             category: Category::Materials,
@@ -203,7 +215,8 @@ pub fn visible<'a>(entries: &'a [Entry], category: Category, query: &str) -> Vec
 
 impl App {
     pub(crate) fn shelf_panel(&mut self, ui: &mut egui::Ui) {
-        let entries = catalog(&self.smart_materials, &self.custom_generators);
+        let texture_list: Vec<(String, String)> = self.assets.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
+        let entries = catalog(&self.smart_materials, &self.custom_generators, &texture_list);
         let mut chosen: Option<Asset> = None;
 
         ui.horizontal_top(|ui| {
@@ -270,7 +283,17 @@ impl App {
                             .on_hover_text("Tile size");
                     });
                 });
+                if self.shelf.category == Category::Textures && self.shelf.query.trim().is_empty() {
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(self.import_rx.is_none(), egui::Button::new(format!("{}  Import textures...", ph::DOWNLOAD_SIMPLE))).clicked() {
+                            self.start_texture_import();
+                        }
+                        super::hint(ui, "Or drop image files on the window. Drag a texture onto a layer or a channel slot.");
+                    });
+                }
                 let shown = visible(&entries, self.shelf.category, &self.shelf.query);
+                let wanted: Vec<String> = shown.iter().filter_map(|e| if let Asset::Texture(id) = &e.asset { Some(id.clone()) } else { None }).collect();
+                self.ensure_tex_thumbs(ui.ctx(), &wanted);
                 let tile = self.shelf.tile;
                 let footer = if self.shelf.category == Category::Materials && self.shelf.query.trim().is_empty() {
                     30.0
@@ -349,6 +372,7 @@ impl App {
                 Category::Materials => egui::Color32::from_gray(0x55),
                 Category::Masks => egui::Color32::from_gray(0x20),
                 Category::Brushes => egui::Color32::from_gray(0x3a),
+                Category::Textures => egui::Color32::from_gray(0x2a),
             },
         };
         p.rect_filled(art, 2.0, base);
@@ -371,6 +395,25 @@ impl App {
                 r * 0.35,
                 egui::Color32::from_white_alpha((200.0 * b.opacity.max(0.4)) as u8),
             );
+        } else if let Asset::Texture(id) = &e.asset {
+            match self.tex_thumbs.get(id) {
+                Some(h) => {
+                    // Keep the picture's proportions inside the square.
+                    let (w, hgt) = (h.size()[0] as f32, h.size()[1] as f32);
+                    let s = (size / w.max(hgt)).min(f32::MAX);
+                    let img = egui::Rect::from_center_size(art.center(), egui::vec2(w * s, hgt * s));
+                    p.image(h.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                }
+                None => {
+                    p.text(art.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(size * 0.4), theme::TEXT_DIM);
+                }
+            }
+            // The channel its name suggests.
+            if let Some(g) = self.texture(id).and_then(|a| a.guess()) {
+                let badge = egui::Rect::from_min_size(art.left_bottom() + egui::vec2(3.0, -17.0), egui::vec2(18.0, 14.0));
+                p.rect_filled(badge, 3.0, egui::Color32::from_black_alpha(190));
+                p.text(badge.center(), egui::Align2::CENTER_CENTER, slot_badge(g.slot), egui::FontId::proportional(9.5), theme::ORANGE);
+            }
         } else {
             let tint = if e.swatch.is_some() {
                 egui::Color32::from_white_alpha(120)
@@ -401,10 +444,26 @@ impl App {
         if resp.drag_started() && !matches!(e.asset, Asset::Brush(_)) {
             egui::DragAndDrop::set_payload(ui.ctx(), e.asset.clone());
         }
+        if let Asset::Texture(id) = &e.asset {
+            resp.context_menu(|ui| {
+                for slot in op_core::Slot::ALL {
+                    if ui.button(format!("Use as {}", slot.label().to_lowercase())).clicked() {
+                        self.use_texture_as(id, slot);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Remove from the library").clicked() {
+                    self.remove_texture(id);
+                    ui.close();
+                }
+            });
+        }
         let tip = match &e.asset {
             Asset::Material(_) => "Double-click to add to the layer stack, or drag it there",
             Asset::Mask(_) => "Double-click to give the selected layer this mask, or drag it onto a layer",
             Asset::Brush(_) => "Double-click to use this brush",
+            Asset::Texture(_) => "Double-click to use it on the selected fill layer (or a new one); drag it onto a layer or a slot. Right-click for more.",
         };
         resp.on_hover_text(format!("{}\n{tip}", e.name)).double_clicked()
     }
@@ -423,6 +482,7 @@ impl App {
                 }
                 None => self.status = "Select a layer first, then use the mask.".into(),
             },
+            Asset::Texture(id) => self.use_texture(&id),
             Asset::Brush(b) => {
                 self.brush.radius_pts = b.radius_pts;
                 self.brush.hardness = b.hardness;
@@ -431,6 +491,21 @@ impl App {
             }
         }
     }
+}
+
+/// Two or three letters for a channel, drawn on a texture tile.
+fn slot_badge(slot: op_core::Slot) -> &'static str {
+    match slot {
+        op_core::Slot::BaseColor => "BC",
+        op_core::Slot::Metallic => "M",
+        op_core::Slot::Roughness => "R",
+        op_core::Slot::Height => "H",
+        op_core::Slot::Normal => "N",
+    }
+}
+
+pub fn textures_category() -> Category {
+    Category::Textures
 }
 
 #[cfg(test)]
@@ -462,7 +537,7 @@ mod tests {
 
     #[test]
     fn the_catalog_lists_materials_masks_and_brushes() {
-        let c = catalog(&[material("Steel", Some([0.5, 0.5, 0.6]))], &[]);
+        let c = catalog(&[material("Steel", Some([0.5, 0.5, 0.6]))], &[], &[]);
         let count = |cat| c.iter().filter(|e| e.category == cat).count();
         assert_eq!(count(Category::Materials), 1);
         assert_eq!(count(Category::Masks), builtin_kinds().len());
@@ -491,7 +566,7 @@ mod tests {
 
     #[test]
     fn a_category_filters_but_a_search_looks_everywhere() {
-        let c = catalog(&[material("Edge steel", None)], &[]);
+        let c = catalog(&[material("Edge steel", None)], &[], &[]);
         let names = |v: Vec<&Entry>| v.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(visible(&c, Category::Materials, "")), ["Edge steel"]);
         let found = names(visible(&c, Category::Brushes, "edge"));

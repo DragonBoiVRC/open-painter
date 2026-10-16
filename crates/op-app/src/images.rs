@@ -10,7 +10,6 @@ pub struct GpuImage {
     pub texture: wgpu::Texture,
     pub srgb: wgpu::TextureView,
     pub linear: wgpu::TextureView,
-    pub size: (u32, u32),
 }
 
 fn make(device: &wgpu::Device, w: u32, h: u32, mips: u32) -> GpuImage {
@@ -26,7 +25,7 @@ fn make(device: &wgpu::Device, w: u32, h: u32, mips: u32) -> GpuImage {
     });
     let srgb = texture.create_view(&wgpu::TextureViewDescriptor { format: Some(wgpu::TextureFormat::Rgba8UnormSrgb), ..Default::default() });
     let linear = texture.create_view(&Default::default());
-    GpuImage { texture, srgb, linear, size: (w, h) }
+    GpuImage { texture, srgb, linear }
 }
 
 /// A 1x1 stand-in bound where a pass has no image for a slot.
@@ -73,9 +72,5 @@ impl ImageLibrary {
 
     pub fn insert(&mut self, id: &str, image: GpuImage) {
         self.map.insert(id.to_string(), Arc::new(image));
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.len()
     }
 }
