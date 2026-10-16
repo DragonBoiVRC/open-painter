@@ -554,6 +554,11 @@ impl ViewportGpu {
         }
     }
 
+    /// Set the pictures brush strokes read (stamp alpha and stencil).
+    pub fn set_brush_pictures(&mut self, pictures: crate::images::BrushPictures) {
+        self.images.lock().expect("image library lock").brush = pictures;
+    }
+
     pub fn has_image(&self, id: &str) -> bool {
         self.images.lock().expect("image library lock").contains(id)
     }
@@ -941,6 +946,57 @@ mod tests {
         assert!(after as f32 > before as f32 * 1.6, "smudge copied nothing: {before} -> {after} covered texels");
         let high = metal.chunks_exact(2).filter(|t| t[1] > 128 && t[0] > 200).count();
         assert!(high as f32 > after as f32 * 0.9, "copied paint lost its value");
+    }
+
+    /// Paint only lands where the stencil picture is bright; mirroring it swaps the halves.
+    #[test]
+    fn a_stencil_limits_where_paint_lands() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        // Left half white, right half black, covering the whole viewport.
+        let white = [255u8, 255, 255, 255];
+        let black = [0u8, 0, 0, 255];
+        let rgba8: Vec<u8> = [white, black, white, black].concat();
+        let (device, queue) = (&rig.device, &rig.queue);
+        rig.gpu.upload_image(device, queue, "half", &op_image::Decoded { width: 2, height: 2, rgba8 });
+        let covered = |rig: &mut Rig, pics: crate::images::BrushPictures| {
+            rig.gpu.set_brush_pictures(pics);
+            rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Clear { layer, target: Target::Content }]);
+            rig.run(&doc, &[PaintOp::Stamps { layer, target: Target::Content, stamps: vec![dab(SIZE as f32 / 2.0, 70.0, 1.0, [0.0, 1.0, 0.0, 0.0])] }]);
+            rig.metal().chunks_exact(2).filter(|t| t[1] > 128).count()
+        };
+        let none = covered(&mut rig, Default::default());
+        let pics = crate::images::BrushPictures { stencil: Some("half".into()), stencil_place: [0.5, 0.5, 1.0, 0.0], ..Default::default() };
+        let left = covered(&mut rig, pics.clone());
+        let ratio = left as f32 / none as f32;
+        assert!(ratio > 0.35 && ratio < 0.65, "stencil kept {ratio} of the paint, expected about half");
+        let flipped = covered(&mut rig, crate::images::BrushPictures { stencil_flip: true, ..pics });
+        assert!((flipped as f32 / none as f32) > 0.35 && (flipped as f32) < none as f32 * 0.65);
+    }
+
+    /// An image tip shapes the stamp: a picture that is bright only in its left half paints only there.
+    #[test]
+    fn an_image_tip_shapes_the_stamp() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let white = [255u8, 255, 255, 255];
+        let black = [0u8, 0, 0, 255];
+        let rgba8: Vec<u8> = [white, black, white, black].concat();
+        let (device, queue) = (&rig.device, &rig.queue);
+        rig.gpu.upload_image(device, queue, "tip", &op_image::Decoded { width: 2, height: 2, rgba8 });
+        rig.gpu.set_brush_pictures(crate::images::BrushPictures { alpha: Some("tip".into()), ..Default::default() });
+        let mut round = dab(SIZE as f32 / 2.0, 60.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![round] }]);
+        let round_count = rig.metal().chunks_exact(2).filter(|t| t[1] > 128).count();
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Clear { layer, target: Target::Content }]);
+        round.shape[1] = 5.0;
+        rig.run(&doc, &[PaintOp::Stamps { layer, target: Target::Content, stamps: vec![round] }]);
+        let tip_count = rig.metal().chunks_exact(2).filter(|t| t[1] > 128).count();
+        assert!(tip_count > 0 && (tip_count as f32) < round_count as f32 * 0.8, "image tip painted {tip_count} vs round {round_count}");
     }
 
     #[test]

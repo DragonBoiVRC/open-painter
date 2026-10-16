@@ -226,6 +226,32 @@ impl App {
         }
     }
 
+    /// Send the brush's alpha and stencil pictures to the GPU when they change, uploading any that
+    /// it does not have yet. A picture that has left the library is dropped from the brush.
+    pub(crate) fn sync_brush_pictures(&mut self) {
+        if self.brush_pics.alpha.as_ref().is_some_and(|id| self.texture(id).is_none()) {
+            self.brush_pics.alpha = None;
+        }
+        if self.brush_pics.stencil.as_ref().is_some_and(|id| self.texture(id).is_none()) {
+            self.brush_pics.stencil = None;
+        }
+        if self.brush_pics_sent.as_ref() == Some(&self.brush_pics) {
+            return;
+        }
+        let mut renderer = self.render_state.renderer.write();
+        let Some(gpu) = renderer.callback_resources.get_mut::<ViewportGpu>() else { return };
+        for id in [&self.brush_pics.alpha, &self.brush_pics.stencil].into_iter().flatten() {
+            if !gpu.has_image(id) {
+                if let Some(img) = self.texture(id).and_then(|a| a.decoded()) {
+                    gpu.upload_image(&self.render_state.device, &self.render_state.queue, id, img);
+                }
+            }
+        }
+        gpu.set_brush_pictures(self.brush_pics.clone());
+        drop(renderer);
+        self.brush_pics_sent = Some(self.brush_pics.clone());
+    }
+
     /// Small egui textures for the shelf and layer rows, made on demand.
     pub(crate) fn ensure_tex_thumbs(&mut self, ctx: &egui::Context, ids: &[String]) {
         // Decoding is the slow part, so only a few per frame; the rest arrive on the next ones.

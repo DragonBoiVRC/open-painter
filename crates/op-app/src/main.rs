@@ -311,6 +311,12 @@ struct App {
     /// The texture library: images imported into the shelf.
     assets: Vec<textures::TextureAsset>,
     tex_thumbs: HashMap<String, egui::TextureHandle>,
+    /// The stamp picture and stencil picked in the Brush panel, and the last state sent to the GPU.
+    brush_pics: images::BrushPictures,
+    brush_pics_sent: Option<images::BrushPictures>,
+    /// Show the stencil over the viewport; while placing, dragging moves it and scrolling resizes it.
+    show_stencil: bool,
+    place_stencil: bool,
     import_rx: Option<Receiver<Vec<PathBuf>>>,
     /// Groups folded shut in the layers panel.
     collapsed: std::collections::HashSet<NodeId>,
@@ -448,6 +454,10 @@ impl App {
             shelf: Default::default(),
             assets: Vec::new(),
             tex_thumbs: HashMap::new(),
+            brush_pics: images::BrushPictures { stencil_place: [0.5, 0.5, 0.6, 0.0], ..Default::default() },
+            brush_pics_sent: None,
+            show_stencil: true,
+            place_stencil: false,
             import_rx: None,
             collapsed: Default::default(),
             renaming: None,
@@ -1384,7 +1394,9 @@ impl App {
         let copies = matches!(self.tool, Tool::Smudge | Tool::Clone);
         // Smudge and clone read from a point on screen, which a mirrored stroke would get wrong.
         let symmetry = if copies { 0 } else { self.symmetry };
-        let shape = [angle, b.shape as f32, next_random(&self.rng) * 100.0, symmetry as f32];
+        // Shape 5 draws the picked picture; without one it is a round brush.
+        let kind = if b.shape == 5 && self.brush_pics.alpha.is_none() { 0 } else { b.shape };
+        let shape = [angle, kind as f32, next_random(&self.rng) * 100.0, symmetry as f32];
         // Where the symmetry plane sits on its axis: the middle of the model.
         let plane = match symmetry {
             0 => 0.0,

@@ -45,5 +45,6 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Mask levels (black, white, gamma, invert) live on the mask in Properties - Layer.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.
+- Brush alpha and stencils: pick an image from the texture library in Properties - Brush ("Image and stencil"). The Image stamp shapes each dab; a stencil is laid over the screen and paint only lands where it is bright. Tick "Move it in the viewport" to drag and scroll it into place.
 - Not here yet: the projection tool, layer filters and effects, anchor points,
   and path tracing.

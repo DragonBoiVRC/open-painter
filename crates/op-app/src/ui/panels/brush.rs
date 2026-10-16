@@ -5,7 +5,7 @@ use crate::ui::theme;
 use crate::{App, Tool};
 
 /// Names of the stamp shapes, in the order the shaders number them.
-const SHAPES: [&str; 5] = ["Round", "Square", "Diamond", "Chalk", "Streaks"];
+const SHAPES: [&str; 6] = ["Round", "Square", "Diamond", "Chalk", "Streaks", "Image"];
 
 impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
@@ -54,6 +54,61 @@ impl App {
             slider_row(ui, "Size jitter", &mut self.brush.size_jitter, 0.0..=1.0);
             slider_row(ui, "Scatter", &mut self.brush.position_jitter, 0.0..=4.0);
             slider_row(ui, "Opacity jitter", &mut self.brush.opacity_jitter, 0.0..=1.0);
+        });
+        section(ui, "Image and stencil", |ui| {
+            let names: Vec<(String, String)> = self.assets.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
+            if names.is_empty() {
+                hint(ui, "Import images into the Shelf (Textures) to use them as a brush shape or a stencil.");
+            }
+            let name_of = |id: &Option<String>| match id {
+                Some(id) => names.iter().find(|(i, _)| i == id).map(|(_, n)| n.clone()).unwrap_or_else(|| "(missing)".into()),
+                None => "None".into(),
+            };
+            let mut alpha = self.brush_pics.alpha.clone();
+            ui.horizontal(|ui| {
+                ui.label("Stamp image");
+                egui::ComboBox::from_id_salt("brush_alpha").selected_text(name_of(&alpha)).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut alpha, None, "None");
+                    for (id, name) in &names {
+                        ui.selectable_value(&mut alpha, Some(id.clone()), name);
+                    }
+                });
+            });
+            if alpha != self.brush_pics.alpha {
+                if alpha.is_some() {
+                    self.brush.shape = 5;
+                } else if self.brush.shape == 5 {
+                    self.brush.shape = 0;
+                }
+                self.brush_pics.alpha = alpha;
+            }
+            hint(ui, "The picture's brightness (and alpha) shapes each stamp. Use the Image stamp above.");
+            let mut stencil = self.brush_pics.stencil.clone();
+            ui.horizontal(|ui| {
+                ui.label("Stencil");
+                egui::ComboBox::from_id_salt("brush_stencil").selected_text(name_of(&stencil)).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut stencil, None, "None");
+                    for (id, name) in &names {
+                        ui.selectable_value(&mut stencil, Some(id.clone()), name);
+                    }
+                });
+            });
+            self.brush_pics.stencil = stencil;
+            if self.brush_pics.stencil.is_some() {
+                let place = &mut self.brush_pics.stencil_place;
+                slider_row(ui, "Scale", &mut place[2], 0.05..=2.0);
+                let mut deg = place[3].to_degrees();
+                slider_row(ui, "Rotation", &mut deg, -180.0..=180.0);
+                place[3] = deg.to_radians();
+                slider_row(ui, "Position X", &mut place[0], -0.5..=1.5);
+                slider_row(ui, "Position Y", &mut place[1], -0.5..=1.5);
+                ui.checkbox(&mut self.brush_pics.stencil_flip, "Mirror");
+                ui.checkbox(&mut self.show_stencil, "Show it over the viewport");
+                ui.checkbox(&mut self.place_stencil, "Move it in the viewport");
+                hint(ui, "Paint only lands where the stencil is bright. While moving it, drag to position and scroll to resize.");
+            } else {
+                self.place_stencil = false;
+            }
         });
         section(ui, "Pen pressure", |ui| {
             ui.checkbox(&mut self.brush.pressure_size, "Pressure changes size");

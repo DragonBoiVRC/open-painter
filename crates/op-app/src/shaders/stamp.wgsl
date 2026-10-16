@@ -11,10 +11,42 @@ struct StampGlobals {
     camera_pos: vec4<f32>,
     viewport: vec4<f32>,   // width px, height px, near, far
     tile: vec4<f32>,       // UV offset of the tile being painted
+    stencil: vec4<f32>,    // centre px, half-size px
+    stencil_xf: vec4<f32>, // cos, sin of the rotation, 1 if a stencil is on, 1 if mirrored
 };
 
 @group(0) @binding(0) var<uniform> sg: StampGlobals;
 @group(0) @binding(1) var depth_tex: texture_depth_2d;
+@group(0) @binding(2) var tip_tex: texture_2d<f32>;
+@group(0) @binding(3) var stencil_tex: texture_2d<f32>;
+@group(0) @binding(4) var pic_samp: sampler;
+
+// How much a picture lets through: its brightness, scaled by its own alpha.
+fn pic_value(c: vec4<f32>) -> f32 {
+    return dot(c.rgb, vec3<f32>(0.3, 0.59, 0.11)) * c.a;
+}
+
+// Image tip (shape 5): the picture, stretched over the brush's square, is the stamp's alpha.
+fn tip_alpha(off: vec2<f32>, shape: vec4<f32>, radius_px: f32) -> f32 {
+    let c = cos(shape.x);
+    let s = sin(shape.x);
+    let l = vec2<f32>(c * off.x + s * off.y, -s * off.x + c * off.y);
+    if (max(abs(l.x), abs(l.y)) >= 1.0) { return 0.0; }
+    let lod = log2(max(f32(textureDimensions(tip_tex).y) / (2.0 * max(radius_px, 1.0)), 1.0));
+    return pic_value(textureSampleLevel(tip_tex, pic_samp, l * 0.5 + 0.5, lod));
+}
+
+// The stencil's value at a screen pixel, or 0 outside it.
+fn stencil_at(px: vec2<f32>) -> f32 {
+    let d = px - sg.stencil.xy;
+    let c = sg.stencil_xf.x;
+    let s = sg.stencil_xf.y;
+    var l = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y) / max(sg.stencil.zw, vec2<f32>(1e-3));
+    if (sg.stencil_xf.w > 0.5) { l.x = -l.x; }
+    if (max(abs(l.x), abs(l.y)) >= 1.0) { return 0.0; }
+    let lod = log2(max(f32(textureDimensions(stencil_tex).y) / (2.0 * max(sg.stencil.w, 1.0)), 1.0));
+    return pic_value(textureSampleLevel(stencil_tex, pic_samp, l * 0.5 + 0.5, lod));
+}
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -124,8 +156,22 @@ fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     let px = vec2<f32>((ndc.x * 0.5 + 0.5) * size.x, (0.5 - ndc.y * 0.5) * size.y);
     if (px.x < 0.0 || px.y < 0.0 || px.x >= size.x || px.y >= size.y) { return -1.0; }
 
-    let d = shape_dist((px - i.brush.xy) / max(i.brush.z, 1e-3), i.shape);
-    if (d >= 1.0) { return -1.0; }
+    let off = (px - i.brush.xy) / max(i.brush.z, 1e-3);
+    let is_tip = i32(i.shape.y + 0.5) == 5;
+    var tip = 1.0;
+    var d = 0.0;
+    if (is_tip) {
+        tip = tip_alpha(off, i.shape, i.brush.z);
+        if (tip <= 0.003) { return -1.0; }
+    } else {
+        d = shape_dist(off, i.shape);
+        if (d >= 1.0) { return -1.0; }
+    }
+    var stencil = 1.0;
+    if (sg.stencil_xf.z > 0.5) {
+        stencil = stencil_at(px);
+        if (stencil <= 0.003) { return -1.0; }
+    }
 
     // Back-facing surfaces never take paint.
     let to_cam = normalize(sg.camera_pos.xyz - world_pos);
@@ -137,8 +183,12 @@ fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     let theirs = linear_depth(seen);
     if (ours > theirs + theirs * 0.004) { return -1.0; }
 
-    let t = clamp((1.0 - d) / max(1.0 - i.brush.w, 1e-3), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t) * i.values.z;
+    var t = tip;
+    if (!is_tip) {
+        let u = clamp((1.0 - d) / max(1.0 - i.brush.w, 1e-3), 0.0, 1.0);
+        t = u * u * (3.0 - 2.0 * u);
+    }
+    return t * stencil * i.values.z;
 }
 
 // With symmetry on, a texel is painted when either it or its mirror image is under the brush

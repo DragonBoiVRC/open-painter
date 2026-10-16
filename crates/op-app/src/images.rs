@@ -53,10 +53,25 @@ pub fn upload_image(device: &wgpu::Device, queue: &wgpu::Queue, img: &Decoded) -
     gpu
 }
 
+/// The pictures a brush stroke reads: an alpha that shapes the stamp, and a stencil laid over the
+/// screen that the stroke paints through.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BrushPictures {
+    /// Library id of the stamp's alpha picture (the brush shape "Image").
+    pub alpha: Option<String>,
+    /// Library id of the stencil picture.
+    pub stencil: Option<String>,
+    /// Where the stencil sits in the viewport: centre (fractions of width/height), height as a
+    /// fraction of the viewport height, rotation in radians, mirrored horizontally.
+    pub stencil_place: [f32; 4],
+    pub stencil_flip: bool,
+}
+
 /// Images by id, shared by every paint store.
 #[derive(Default)]
 pub struct ImageLibrary {
     map: HashMap<String, Arc<GpuImage>>,
+    pub brush: BrushPictures,
 }
 
 pub type SharedImages = Arc<Mutex<ImageLibrary>>;

@@ -56,6 +56,7 @@ impl App {
     pub(crate) fn viewport_ui(&mut self, ui: &mut egui::Ui) {
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let ppp = ui.pixels_per_point();
+        self.sync_brush_pictures();
         let (mods, primary_down) = ui.input(|i| (i.modifiers, i.pointer.primary_down()));
         let alt = mods.alt;
         let d = resp.drag_delta();
@@ -89,7 +90,7 @@ impl App {
                 self.camera.zoom(-d.y * 3.0);
             }
         }
-        if resp.hovered() {
+        if resp.hovered() && !(self.place_stencil && self.brush_pics.stencil.is_some()) {
             self.camera.zoom(ui.input(|i| i.smooth_scroll_delta.y));
         }
 
@@ -120,7 +121,19 @@ impl App {
                 self.pick_set_at(rect, pos);
             }
         }
-        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open;
+        let placing = self.place_stencil && self.brush_pics.stencil.is_some();
+        if placing {
+            let place = &mut self.brush_pics.stencil_place;
+            if resp.dragged_by(egui::PointerButton::Primary) && !alt {
+                place[0] += d.x / rect.width().max(1.0);
+                place[1] += d.y / rect.height().max(1.0);
+            }
+            if resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                place[2] = (place[2] * (1.0 + scroll * 0.002)).clamp(0.05, 2.0);
+            }
+        }
+        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {
@@ -223,6 +236,37 @@ impl App {
             let core = r * self.brush.hardness;
             if core > 3.0 {
                 p.circle_stroke(pos, core, Stroke::new(1.0, Color32::from_white_alpha(70)));
+            }
+        }
+
+        // The stencil, drawn faintly over the model so it can be lined up.
+        if let (true, Some(id)) = (self.show_stencil, self.brush_pics.stencil.clone()) {
+            self.ensure_tex_thumbs(ui.ctx(), std::slice::from_ref(&id));
+            if let Some(tex) = self.tex_thumbs.get(&id) {
+                let place = self.brush_pics.stencil_place;
+                let [tw, th] = tex.size();
+                let half_h = place[2] * rect.height() * 0.5;
+                let half_w = half_h * tw as f32 / th.max(1) as f32;
+                let centre = Pos2::new(rect.min.x + place[0] * rect.width(), rect.min.y + place[1] * rect.height());
+                let (sn, cs) = place[3].sin_cos();
+                let flip = if self.brush_pics.stencil_flip { -1.0 } else { 1.0 };
+                let corner = |x: f32, y: f32| {
+                    let (x, y) = (x * half_w, y * half_h);
+                    centre + egui::vec2(cs * x - sn * y, sn * x + cs * y)
+                };
+                let tint = Color32::from_white_alpha(if placing { 120 } else { 70 });
+                let mut mesh = egui::Mesh::with_texture(tex.id());
+                for (x, y, u, v) in [(-1.0, -1.0, 0.0, 0.0), (1.0, -1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 1.0), (-1.0, 1.0, 0.0, 1.0)] {
+                    let u = if flip < 0.0 { 1.0 - u } else { u };
+                    mesh.vertices.push(egui::epaint::Vertex { pos: corner(x, y), uv: Pos2::new(u, v), color: tint });
+                }
+                mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+                let painter = ui.painter().with_clip_rect(rect);
+                painter.add(egui::Shape::mesh(mesh));
+                if placing {
+                    let outline = [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0), corner(-1.0, -1.0)];
+                    painter.add(egui::Shape::line(outline.to_vec(), Stroke::new(1.0, Color32::from_rgb(0xff, 0xd0, 0x40))));
+                }
             }
         }
 

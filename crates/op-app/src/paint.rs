@@ -51,6 +51,10 @@ struct StampGlobals {
     viewport: [f32; 4],
     /// UV offset of the tile being painted (u, v, 0, 0).
     tile: [f32; 4],
+    /// Stencil: centre px (xy), half-size px (zw).
+    stencil: [f32; 4],
+    /// Stencil: cos, sin of its rotation, 1 if a stencil is on, 1 if mirrored.
+    stencil_xf: [f32; 4],
 }
 
 /// Camera state the stamp pass needs; supplied each frame.
@@ -230,6 +234,9 @@ pub struct PaintGpu {
     smudge_layout: wgpu::BindGroupLayout,
     /// A copy of the layer being smudged, so stamps read what was there before them.
     scratch: Option<Layer>,
+    images: Option<crate::images::SharedImages>,
+    /// A 1x1 stand-in bound for a brush picture that is not set (the shader ignores it then).
+    white: crate::images::GpuImage,
     /// The same brushes drawn directly in UV space (the 2D view).
     pipeline_content_2d: wgpu::RenderPipeline,
     pipeline_mask_2d: wgpu::RenderPipeline,
@@ -278,6 +285,33 @@ impl PaintGpu {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                // The brush's alpha picture and the stencil picture, and how to sample them.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -499,6 +533,8 @@ impl PaintGpu {
             pipeline_smudge,
             smudge_layout,
             scratch: None,
+            images: None,
+            white: crate::images::dummy_image(device),
             pipeline_content_2d,
             pipeline_mask_2d,
             stamp_layout,
@@ -694,6 +730,7 @@ impl PaintGpu {
 
     /// Let fill layers read from the shared image library.
     pub fn set_images(&mut self, images: crate::images::SharedImages) {
+        self.images = Some(images.clone());
         self.compositor.set_images(images);
     }
 
@@ -752,6 +789,53 @@ impl PaintGpu {
 
     /// Apply this frame's operations, then recomposite the layer stack if anything
     /// changed. Must run before the scene pass so the viewport shows the result at once.
+    /// Everything the stamp shaders need for this frame: camera, tile and stencil placement.
+    fn stamp_globals(&self, view: &StampView<'_>, stencil_on: bool, place: [f32; 4], flip: bool) -> StampGlobals {
+        let (w, h) = (view.size_px[0] as f32, view.size_px[1] as f32);
+        // `place[2]` is the stencil's height as a fraction of the viewport's.
+        let half_h = place[2] * h * 0.5;
+        StampGlobals {
+            view_proj: view.view_proj,
+            camera_pos: view.camera_pos,
+            viewport: [w, h, view.near_far[0], view.near_far[1]],
+            tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
+            stencil: [place[0] * w, place[1] * h, half_h, half_h],
+            stencil_xf: [place[3].cos(), place[3].sin(), if stencil_on { 1.0 } else { 0.0 }, if flip { 1.0 } else { 0.0 }],
+        }
+    }
+
+    /// Upload the globals and bind them with the depth buffer and the brush pictures.
+    fn stamp_bind(&self, device: &wgpu::Device, queue: &wgpu::Queue, view: &StampView<'_>) -> wgpu::BindGroup {
+        let (alpha, stencil, place, flip) = match &self.images {
+            Some(lib) => {
+                let lib = lib.lock().expect("image library lock");
+                let b = lib.brush.clone();
+                (b.alpha.as_deref().and_then(|id| lib.get(id)), b.stencil.as_deref().and_then(|id| lib.get(id)), b.stencil_place, b.stencil_flip)
+            }
+            None => (None, None, [0.5, 0.5, 0.5, 0.0], false),
+        };
+        let mut globals = self.stamp_globals(view, stencil.is_some(), place, flip);
+        if let Some(img) = &stencil {
+            // Keep the picture's proportions: `half_h` stays, the half-width follows the aspect.
+            let size = img.texture.size();
+            globals.stencil[2] = globals.stencil[3] * size.width as f32 / size.height.max(1) as f32;
+        }
+        queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        let alpha_view = alpha.as_ref().map(|i| &i.linear).unwrap_or(&self.white.linear);
+        let stencil_view = stencil.as_ref().map(|i| &i.linear).unwrap_or(&self.white.linear);
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stamp_bind"),
+            layout: &self.stamp_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view.depth) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(alpha_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(stencil_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        })
+    }
+
     pub fn apply(
         &mut self,
         device: &wgpu::Device,
@@ -927,24 +1011,7 @@ impl PaintGpu {
                     let stride = std::mem::size_of::<Stamp>() as u64;
                     let offset = self.cursor as u64 * stride;
                     queue.write_buffer(&self.instance_buf, offset, bytemuck::cast_slice(&stamps[..n]));
-                    queue.write_buffer(
-                        &self.globals_buf,
-                        0,
-                        bytemuck::bytes_of(&StampGlobals {
-                            view_proj: view.view_proj,
-                            camera_pos: view.camera_pos,
-                            viewport: [view.size_px[0] as f32, view.size_px[1] as f32, view.near_far[0], view.near_far[1]],
-                            tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
-                        }),
-                    );
-                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("stamp_bind"),
-                        layout: &self.stamp_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: self.globals_buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view.depth) },
-                        ],
-                    });
+                    let bind = self.stamp_bind(device, queue, view);
                     let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
                     let attachments: Vec<_> = views
                         .iter()
@@ -988,29 +1055,7 @@ impl PaintGpu {
                     let stride = std::mem::size_of::<Stamp>() as u64;
                     let offset = self.cursor as u64 * stride;
                     queue.write_buffer(&self.instance_buf, offset, bytemuck::cast_slice(&stamps[..n]));
-                    queue.write_buffer(
-                        &self.globals_buf,
-                        0,
-                        bytemuck::bytes_of(&StampGlobals {
-                            view_proj: view.view_proj,
-                            camera_pos: view.camera_pos,
-                            viewport: [
-                                view.size_px[0] as f32,
-                                view.size_px[1] as f32,
-                                view.near_far[0],
-                                view.near_far[1],
-                            ],
-                            tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
-                        }),
-                    );
-                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("stamp_bind"),
-                        layout: &self.stamp_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: self.globals_buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view.depth) },
-                        ],
-                    });
+                    let bind = self.stamp_bind(device, queue, view);
                     let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
                     let attachments: Vec<_> = views
                         .iter()
