@@ -1043,15 +1043,16 @@ impl PaintGpu {
         let old = std::mem::take(&mut self.store);
         let mut store = HashMap::new();
         for (id, g) in old {
-            let content = g.content.as_ref().map(|c| {
-                let mut layer = Layer::new_paint(device, size);
-                layer.base = self.resampled(device, encoder, &c.base, size, 0);
-                layer.metal = self.resampled(device, encoder, &c.metal, size, 1);
-                layer.rough = self.resampled(device, encoder, &c.rough, size, 1);
-                layer.height = self.resampled(device, encoder, &c.height, size, 1);
-                layer.emissive = self.resampled(device, encoder, &c.emissive, size, 0);
-                layer.opacity = self.resampled(device, encoder, &c.opacity, size, 1);
-                layer
+            let content = g.content.as_ref().map(|c| Layer {
+                size,
+                base: self.resampled(device, encoder, &c.base, size, 0),
+                metal: self.resampled(device, encoder, &c.metal, size, 1),
+                rough: self.resampled(device, encoder, &c.rough, size, 1),
+                height: self.resampled(device, encoder, &c.height, size, 1),
+                emissive: self.resampled(device, encoder, &c.emissive, size, 0),
+                opacity: self.resampled(device, encoder, &c.opacity, size, 1),
+                // A paint layer carries no normal map of its own (see `Layer::new_paint`).
+                normal: texture(device, "paint_normal_stub", 1, crate::normal_gpu::NORMAL_FORMAT),
             });
             let mask = g.mask.as_ref().map(|m| self.resampled(device, encoder, m, size, 2));
             store.insert(id, NodeGpu { content, mask });
