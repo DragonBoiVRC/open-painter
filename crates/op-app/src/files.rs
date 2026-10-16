@@ -22,6 +22,34 @@ pub fn layout_path() -> PathBuf {
     data_dir().join("layout.json")
 }
 
+const MAX_RECENT: usize = 10;
+
+/// Where the list of recently used projects is kept.
+pub fn recent_path() -> PathBuf {
+    data_dir().join("recent.json")
+}
+
+/// `path` goes to the front of `list`; repeats are dropped and the list stays short.
+pub fn push_recent(list: &mut Vec<PathBuf>, path: &Path) {
+    list.retain(|p| p != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(MAX_RECENT);
+}
+
+pub fn load_recent() -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(recent_path()) else { return Vec::new() };
+    let mut list: Vec<PathBuf> = serde_json::from_str(&text).unwrap_or_default();
+    list.truncate(MAX_RECENT);
+    list
+}
+
+pub fn save_recent(list: &[PathBuf]) {
+    if let Ok(text) = serde_json::to_string(list) {
+        let _ = std::fs::create_dir_all(data_dir());
+        let _ = std::fs::write(recent_path(), text);
+    }
+}
+
 /// Where imported texture images are kept between sessions.
 pub fn textures_dir() -> PathBuf {
     data_dir().join("textures")
@@ -110,6 +138,19 @@ pub fn load_user_presets(dir: &Path) -> (Vec<ExportPreset>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recent_projects_are_newest_first_without_repeats_and_bounded() {
+        let mut list = Vec::new();
+        for i in 0..14 {
+            super::push_recent(&mut list, std::path::Path::new(&format!("/p/{i}.opproj")));
+        }
+        super::push_recent(&mut list, std::path::Path::new("/p/5.opproj"));
+        assert_eq!(list.len(), 10);
+        assert_eq!(list[0], std::path::PathBuf::from("/p/5.opproj"));
+        assert_eq!(list.iter().filter(|p| p.ends_with("5.opproj")).count(), 1);
+        assert_eq!(list[1], std::path::PathBuf::from("/p/13.opproj"));
+    }
+
     use super::*;
 
     #[test]

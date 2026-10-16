@@ -309,6 +309,8 @@ struct App {
     brush: Brush,
     rng: std::cell::Cell<u32>,
     env: Environment,
+    /// Recently used projects, newest first.
+    recent: Vec<PathBuf>,
     /// Mirror painting across a plane through the model's centre: 0 off, 1 x, 2 y, 3 z.
     symmetry: u32,
     channels: PaintChannels,
@@ -436,6 +438,7 @@ impl App {
             brush: Brush::default(),
             rng: std::cell::Cell::new(0x9e37_79b9),
             env: Environment::default(),
+            recent: files::load_recent(),
             symmetry: 0,
             channels: PaintChannels {
                 base: true,
@@ -634,8 +637,16 @@ impl App {
         self.install_sets(states, loads, p.active);
         self.hidden_sets = p.hidden_sets.into_iter().collect();
         self.set_view(View::Shaded);
+        if let (Some(p), false) = (&path, modified) {
+            self.remember_project(p);
+        }
         self.project_path = path;
         self.modified = modified;
+    }
+
+    fn remember_project(&mut self, path: &Path) {
+        files::push_recent(&mut self.recent, path);
+        files::save_recent(&self.recent);
     }
 
     fn open_path(&mut self, path: &Path) {
@@ -739,6 +750,7 @@ impl App {
                 // The explicit save supersedes any autosave of this project (or of the untitled one).
                 let _ = std::fs::remove_file(self.recover_path());
                 self.project_path = Some(path.clone());
+                self.remember_project(&path);
                 let _ = std::fs::remove_file(self.recover_path());
                 self.modified = false;
                 self.status = format!("Saved {}", path.display());

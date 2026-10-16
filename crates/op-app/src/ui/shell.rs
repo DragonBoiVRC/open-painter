@@ -95,6 +95,18 @@ impl App {
                         self.dialog = Some(PathDialog { save: false, path: start });
                         ui.close();
                     }
+                    let recent: Vec<_> = self.recent.iter().filter(|p| p.exists()).cloned().collect();
+                    ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                        ui.menu_button("Open recent", |ui| {
+                            for p in recent {
+                                let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                if ui.button(label).on_hover_text(p.display().to_string()).clicked() {
+                                    self.request(Pending::Open(p), &ctx);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                     ui.separator();
                     if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
                         match self.project_path.clone() {
