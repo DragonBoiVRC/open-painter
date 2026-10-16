@@ -158,6 +158,28 @@ enum Tool {
     Clone,
     /// Paints the stencil picture onto the surface through the brush, as a projector would.
     Project,
+    /// Click to fill a UV island, a piece of the mesh or the whole texture set.
+    Fill,
+}
+
+/// What a click with the fill tool covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FillScope {
+    UvIsland,
+    MeshPart,
+    TextureSet,
+}
+
+impl FillScope {
+    const ALL: [FillScope; 3] = [FillScope::UvIsland, FillScope::MeshPart, FillScope::TextureSet];
+
+    fn label(self) -> &'static str {
+        match self {
+            FillScope::UvIsland => "UV island",
+            FillScope::MeshPart => "Mesh part",
+            FillScope::TextureSet => "Texture set",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -361,6 +383,7 @@ struct App {
     lazy_pos: Option<[f32; 2]>,
     /// The stroke under way is capped by `brush.stroke_opacity`; mask stamps then record coverage.
     stroke_limited: bool,
+    fill_scope: FillScope,
     env: Environment,
     /// Recently used projects, newest first.
     recent: Vec<PathBuf>,
@@ -501,6 +524,7 @@ impl App {
             clone_offset: None,
             lazy_pos: None,
             stroke_limited: false,
+            fill_scope: FillScope::UvIsland,
             env: Environment::default(),
             recent: files::load_recent(),
             symmetry: 0,
@@ -1583,6 +1607,55 @@ impl App {
         self.stroke.last_px = to;
     }
 
+    /// Fill what the click at `ray` (origin, direction) lands on with the paint colour and channels
+    /// (or, on a mask, with white; `hide` makes it black).
+    fn fill_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, hide: bool) {
+        let (layer, target) = match self.paint_target() {
+            Ok(t) => t,
+            Err(msg) => {
+                self.status = msg.to_string();
+                return;
+            }
+        };
+        let active = self.active;
+        let Some((set, first)) = self.mesh.raycast_triangle_where(origin, dir, |s| s == active) else {
+            self.status = "No model under the cursor to fill.".into();
+            return;
+        };
+        let firsts: Vec<usize> = match self.fill_scope {
+            FillScope::UvIsland => self.mesh.connected_triangles(first, op_mesh::Connect::UvIsland),
+            FillScope::MeshPart => self.mesh.connected_triangles(first, op_mesh::Connect::MeshPart),
+            FillScope::TextureSet => {
+                let r = &self.mesh.set_ranges()[set];
+                (r.first_index as usize..(r.first_index + r.index_count) as usize).step_by(3).collect()
+            }
+        };
+        if firsts.is_empty() {
+            return;
+        }
+        let uvs: Vec<[f32; 2]> = firsts.iter().flat_map(|&t| (0..3).map(move |c| t + c)).map(|i| self.mesh.vertices[self.mesh.indices[i] as usize].uv).collect();
+        let c = &self.channels;
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        let lin = c.base_color.map(srgb_to_linear);
+        let op = match target {
+            Target::Mask => PaintOp::Fill { layer, target, uvs, color: [0.0; 3], values: [if hide { 0.0 } else { 1.0 }, 0.0, self.brush.opacity, 0.0], enables: [0.0; 4] },
+            Target::Content => PaintOp::Fill {
+                layer,
+                target,
+                uvs,
+                color: lin,
+                values: [c.metallic, c.roughness, self.brush.opacity, c.height_value],
+                enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
+            },
+        };
+        self.stroke.active = false;
+        self.pending.push(PaintOp::BeginStroke { layer, target });
+        self.pending.push(op);
+        self.push_hist(Hist::Stroke);
+        self.thumbs_dirty();
+        self.status = format!("Filled {} triangle(s).", firsts.len());
+    }
+
     fn clear_target(&mut self) {
         match self.paint_target() {
             Ok((layer, target)) => {
@@ -1794,6 +1867,8 @@ impl App {
                         ("Ctrl + click", "pick the texture set under the cursor"),
                         ("H / Shift+H", "hide or show the active material / show all"),
                         ("P / E  or  1 / 2", "paint / erase"),
+                        ("S / K / J / G  or  3 / 4 / 5 / 6", "smudge / clone / projection / fill"),
+                        ("Ctrl + click (clone)", "set the clone source"),
                         ("I", "pick the colour under the cursor"),
                         ("L", "toggle symmetry"),
                         ("C", "cycle base color / roughness / metallic views"),
@@ -2125,7 +2200,7 @@ impl App {
             self.symmetry = if self.symmetry == 0 { 1 } else { 0 };
             self.status = if self.symmetry == 0 { "Symmetry off".into() } else { "Symmetry on: strokes are mirrored across X".into() };
         }
-        let (smaller, larger, paint, erase, smudge, clone, project, frame) = ui.input(|i| {
+        let (smaller, larger, paint, erase, smudge, clone, project, fill, frame) = ui.input(|i| {
             (
                 i.key_pressed(Key::OpenBracket),
                 i.key_pressed(Key::CloseBracket),
@@ -2134,6 +2209,7 @@ impl App {
                 i.key_pressed(Key::S) && !i.modifiers.any() || i.key_pressed(Key::Num3),
                 i.key_pressed(Key::K) && !i.modifiers.any() || i.key_pressed(Key::Num4),
                 i.key_pressed(Key::J) && !i.modifiers.any() || i.key_pressed(Key::Num5),
+                i.key_pressed(Key::G) && !i.modifiers.any() || i.key_pressed(Key::Num6),
                 i.key_pressed(Key::F) && !i.modifiers.any(),
             )
         });
@@ -2157,6 +2233,9 @@ impl App {
         }
         if project {
             self.tool = Tool::Project;
+        }
+        if fill {
+            self.tool = Tool::Fill;
         }
         if frame {
             self.frame_model();

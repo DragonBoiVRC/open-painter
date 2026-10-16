@@ -1169,6 +1169,45 @@ mod tests {
         assert!((value as i32 - 128).abs() <= 6, "metallic through a half-revealed mask: {value}");
     }
 
+    /// A geometry fill paints exactly the given triangles (and a hair more, so island edges are
+    /// covered), on content and on masks, and undoes like a stroke.
+    #[test]
+    fn a_fill_paints_the_given_triangles() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        // The square u, v in 0.25..0.5 as two triangles.
+        let (a, b, c, d) = ([0.25, 0.25], [0.5, 0.25], [0.5, 0.5], [0.25, 0.5]);
+        let uvs = vec![a, b, c, a, c, d];
+        rig.run(&doc, &[
+            PaintOp::BeginStroke { layer, target: Target::Content },
+            PaintOp::Fill { layer, target: Target::Content, uvs: uvs.clone(), color: [1.0, 0.0, 0.0], values: [0.7, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0] },
+        ]);
+        let m = rig.metal();
+        let (value, cover) = texel_rg(&m, (0.375, 0.375));
+        assert!(cover > 250 && (value as i32 - 178).abs() <= 3, "inside: value {value} coverage {cover}");
+        // The very edge texel is covered because of the padding; clearly outside is not.
+        assert!(texel_rg(&m, (0.2501, 0.375)).1 > 200, "island edge texels should be covered");
+        assert_eq!(texel_rg(&m, (0.1, 0.1)).1, 0);
+        assert_eq!(texel_rg(&m, (0.7, 0.4)).1, 0);
+        rig.run(&doc, &[PaintOp::UndoStroke]);
+        assert_eq!(texel_rg(&rig.metal(), (0.375, 0.375)).1, 0, "undo");
+
+        // Masks: a black mask revealed inside the triangles only.
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "metal", fill(None, Some(1.0), None));
+        doc.find_mut(layer).unwrap().mask = Some(Mask::new(false));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        rig.run(&doc, &[
+            PaintOp::BeginStroke { layer, target: Target::Mask },
+            PaintOp::Fill { layer, target: Target::Mask, uvs, color: [0.0; 3], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4] },
+        ]);
+        let m = rig.metal();
+        assert!(texel_rg(&m, (0.375, 0.375)).0 > 250, "revealed inside");
+        assert_eq!(texel_rg(&m, (0.1, 0.1)).0, 0, "hidden outside");
+    }
+
     #[test]
     fn projective_brush_paints_visible_side_only_and_undoes() {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };

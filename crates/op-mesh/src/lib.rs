@@ -35,6 +35,15 @@ pub struct Vertex {
     pub uv: [f32; 2],
 }
 
+/// How a fill decides which triangles belong together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Connect {
+    /// Triangles that meet at a shared position *and* UV: one UV island.
+    UvIsland,
+    /// Triangles that meet at a shared position, across UV seams: one piece of the mesh.
+    MeshPart,
+}
+
 /// A run of triangles that share a material: one texture set. `first_index` and `index_count`
 /// are in the mesh's index buffer and are multiples of three.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +160,84 @@ impl Mesh {
             }
         }
         best
+    }
+
+    /// The nearest visible triangle along a ray: its texture set and the index of its first corner in
+    /// `indices` (a multiple of three).
+    pub fn raycast_triangle_where(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool) -> Option<(usize, usize)> {
+        let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
+        let mut best: Option<(usize, usize, f32)> = None;
+        for (set, r) in self.set_ranges().iter().enumerate() {
+            if !visible(set) {
+                continue;
+            }
+            for first in (r.first_index..r.first_index + r.index_count).step_by(3) {
+                let t = &self.indices[first as usize..first as usize + 3];
+                let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
+                let (e1, e2) = (b - a, c - a);
+                let p = dir.cross(e2);
+                let det = e1.dot(p);
+                if det.abs() < 1e-12 {
+                    continue;
+                }
+                let inv = 1.0 / det;
+                let s = origin - a;
+                let u = s.dot(p) * inv;
+                if !(0.0..=1.0).contains(&u) {
+                    continue;
+                }
+                let q = s.cross(e1);
+                let v = dir.dot(q) * inv;
+                if v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                let dist = e2.dot(q) * inv;
+                if dist > 0.0 && best.is_none_or(|(_, _, d)| dist < d) {
+                    best = Some((set, first as usize, dist));
+                }
+            }
+        }
+        best.map(|(set, first, _)| (set, first))
+    }
+
+    /// The triangles connected to the one starting at index `first`, as the first-corner indices of
+    /// each (including the one given), staying inside its texture set. Triangles connect when they
+    /// share a corner position — and, for `Connect::UvIsland`, the corner's UV too, so a hard UV seam
+    /// stops the fill where a mesh-only seam would not.
+    pub fn connected_triangles(&self, first: usize, how: Connect) -> Vec<usize> {
+        let Some(range) = self.set_ranges().into_iter().find(|r| (r.first_index as usize..(r.first_index + r.index_count) as usize).contains(&first)) else {
+            return Vec::new();
+        };
+        let key = |i: u32| {
+            let v = &self.vertices[i as usize];
+            let p = v.position.map(f32::to_bits);
+            let uv = if how == Connect::UvIsland { v.uv.map(f32::to_bits) } else { [0, 0] };
+            (p, uv)
+        };
+        let tris: Vec<usize> = (range.first_index as usize..(range.first_index + range.index_count) as usize).step_by(3).collect();
+        // Which triangles touch each corner key.
+        let mut by_key: std::collections::HashMap<([u32; 3], [u32; 2]), Vec<usize>> = std::collections::HashMap::new();
+        for &t in &tris {
+            for c in 0..3 {
+                by_key.entry(key(self.indices[t + c])).or_default().push(t);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut order = Vec::new();
+        let mut stack = vec![first];
+        seen.insert(first);
+        while let Some(t) = stack.pop() {
+            order.push(t);
+            for c in 0..3 {
+                for &n in by_key.get(&key(self.indices[t + c])).into_iter().flatten() {
+                    if seen.insert(n) {
+                        stack.push(n);
+                    }
+                }
+            }
+        }
+        order.sort_unstable();
+        order
     }
 
     /// Axis-aligned bounds as (min, max). Returns zeros for an empty mesh.
@@ -533,5 +620,52 @@ mod tests {
         let at = 16 + 32 * Mesh::uv_sphere(1.0, 8, 4).vertices.len() + 4 * Mesh::uv_sphere(1.0, 8, 4).indices.len();
         huge[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(Mesh::from_bytes(&huge).is_err());
+    }
+
+    /// Two unit quads side by side that touch along an edge. In UV space they are separate islands;
+    /// as geometry they are one piece.
+    fn two_quads() -> Mesh {
+        let v = |x: f32, u: f32, v: f32| Vertex { position: [x, 0.0, 0.0], normal: [0.0, 0.0, 1.0], uv: [u, v] };
+        // Quad A: x 0..1, UV 0..0.4. Quad B: x 1..2, UV 0.6..1 (its shared edge at x=1 has different UVs).
+        let mut vertices = vec![v(0.0, 0.0, 0.0), v(1.0, 0.4, 0.0), v(1.0, 0.4, 1.0), v(0.0, 0.0, 1.0)];
+        vertices[2].position[1] = 1.0;
+        vertices[3].position[1] = 1.0;
+        let mut b = vec![v(1.0, 0.6, 0.0), v(2.0, 1.0, 0.0), v(2.0, 1.0, 1.0), v(1.0, 0.6, 1.0)];
+        b[2].position[1] = 1.0;
+        b[3].position[1] = 1.0;
+        vertices.extend(b);
+        Mesh { vertices, indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7], sets: Vec::new() }
+    }
+
+    #[test]
+    fn a_fill_finds_the_uv_island_or_the_mesh_part() {
+        let m = two_quads();
+        assert_eq!(m.connected_triangles(0, Connect::UvIsland), vec![0, 3], "quad A is its own UV island");
+        assert_eq!(m.connected_triangles(9, Connect::UvIsland), vec![6, 9]);
+        assert_eq!(m.connected_triangles(0, Connect::MeshPart), vec![0, 3, 6, 9], "the quads meet in space");
+        assert!(m.connected_triangles(100, Connect::UvIsland).is_empty(), "no such triangle");
+    }
+
+    #[test]
+    fn a_fill_stays_inside_its_texture_set() {
+        let mut m = two_quads();
+        m.sets = vec![
+            SetRange { name: "a".into(), first_index: 0, index_count: 6 },
+            SetRange { name: "b".into(), first_index: 6, index_count: 6 },
+        ];
+        assert_eq!(m.connected_triangles(0, Connect::MeshPart), vec![0, 3]);
+    }
+
+    #[test]
+    fn the_ray_finds_the_triangle_and_its_set() {
+        let mut m = two_quads();
+        m.sets = vec![
+            SetRange { name: "a".into(), first_index: 0, index_count: 6 },
+            SetRange { name: "b".into(), first_index: 6, index_count: 6 },
+        ];
+        let hit = m.raycast_triangle_where(Vec3::new(1.5, 0.2, 5.0), -Vec3::Z, |_| true).expect("hits quad B");
+        assert_eq!(hit.0, 1);
+        assert!(hit.1 == 6 || hit.1 == 9);
+        assert!(m.raycast_triangle_where(Vec3::new(1.5, 0.2, 5.0), -Vec3::Z, |s| s == 0).is_none(), "set b is hidden");
     }
 }

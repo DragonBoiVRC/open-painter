@@ -92,6 +92,10 @@ pub enum PaintOp {
     /// buffer that is laid over the pre-stroke snapshot at that opacity. For masks, `mask_value` is
     /// the value being painted (stamps paint 1 into the buffer to record coverage).
     StrokeOpacity { layer: NodeId, target: Target, opacity: f32, mask_value: f32 },
+    /// Fill triangles (given as UV positions, three per triangle) with one colour: a UV island, a
+    /// piece of the mesh or a whole texture set. `values` is (metallic, roughness, opacity, height);
+    /// for masks `values.x` is the value to paint.
+    Fill { layer: NodeId, target: Target, uvs: Vec<[f32; 2]>, color: [f32; 3], values: [f32; 4], enables: [f32; 4] },
     /// The eraser: stamps take coverage away from a layer's content. With `uv` the stamps are in
     /// UV space like `Stamps2d`.
     Erase { layer: NodeId, stamps: Vec<Stamp>, uv: bool },
@@ -244,6 +248,18 @@ struct StrokeLimit {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FillParams {
+    color: [f32; 4],
+    values: [f32; 4],
+    enables: [f32; 4],
+    tile: [f32; 4],
+}
+
+/// The most triangles one fill draws.
+const MAX_FILL_TRIANGLES: usize = 400_000;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BlendParams {
     v: [f32; 4],
 }
@@ -254,6 +270,9 @@ pub struct PaintGpu {
     pipeline_erase: wgpu::RenderPipeline,
     pipeline_erase_2d: wgpu::RenderPipeline,
     pipeline_smudge: wgpu::RenderPipeline,
+    pipeline_fill: wgpu::RenderPipeline,
+    pipeline_fill_mask: wgpu::RenderPipeline,
+    fill_layout: wgpu::BindGroupLayout,
     pipeline_resolve: wgpu::RenderPipeline,
     resolve_layout: wgpu::BindGroupLayout,
     pipeline_resolve_mask: wgpu::RenderPipeline,
@@ -513,6 +532,38 @@ impl PaintGpu {
             cache: None,
         });
 
+        let fill_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("fill_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        let fill_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/fill.wgsl"));
+        let fill_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("fill_pl"), bind_group_layouts: &[Some(&fill_layout)], immediate_size: 0 });
+        let uv_attr = wgpu::vertex_attr_array![0 => Float32x2];
+        let make_fill = |entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&fill_pl),
+                vertex: wgpu::VertexState {
+                    module: &fill_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout { array_stride: 8, step_mode: wgpu::VertexStepMode::Vertex, attributes: &uv_attr })],
+                },
+                fragment: Some(wgpu::FragmentState { module: &fill_shader, entry_point: Some(entry), compilation_options: Default::default(), targets }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline_fill = make_fill("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
+        let pipeline_fill_mask = make_fill("fs_mask", &[target(MASK_FORMAT, straight)]);
         let plain_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -621,6 +672,9 @@ impl PaintGpu {
             pipeline_erase,
             pipeline_erase_2d,
             pipeline_smudge,
+            pipeline_fill,
+            pipeline_fill_mask,
+            fill_layout,
             pipeline_resolve,
             resolve_layout,
             pipeline_resolve_mask,
@@ -1165,6 +1219,73 @@ impl PaintGpu {
                         self.resolve_limited(device, encoder);
                     }
                     self.cursor += n;
+                    dirty = true;
+                }
+                PaintOp::Fill { layer, target, uvs, color, values, enables } => {
+                    let Some(g) = self.store.get(layer) else { continue };
+                    let (views, pipeline): (Vec<wgpu::TextureView>, _) = match target {
+                        Target::Content => match &g.content {
+                            Some(c) => (c.views()[..4].to_vec(), &self.pipeline_fill),
+                            None => continue,
+                        },
+                        Target::Mask => match &g.mask {
+                            Some(m) => (vec![m.create_view(&Default::default())], &self.pipeline_fill_mask),
+                            None => continue,
+                        },
+                    };
+                    let count = uvs.len().min(MAX_FILL_TRIANGLES * 3) / 3 * 3;
+                    if count == 0 {
+                        continue;
+                    }
+                    // Grow every triangle by a texel and a half so the fill reaches the island's edge
+                    // texels, which the rasteriser would otherwise leave out.
+                    let pad = 1.5 / self.size as f32;
+                    let mut verts: Vec<[f32; 2]> = Vec::with_capacity(count);
+                    for tri in uvs[..count].chunks_exact(3) {
+                        let c = [(tri[0][0] + tri[1][0] + tri[2][0]) / 3.0, (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0];
+                        for p in tri {
+                            let d = [p[0] - c[0], p[1] - c[1]];
+                            let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
+                            verts.push([p[0] + d[0] / len * pad, p[1] + d[1] / len * pad]);
+                        }
+                    }
+                    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("fill_vertices"),
+                        contents: bytemuck::cast_slice(&verts),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                    let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("fill_params"),
+                        contents: bytemuck::bytes_of(&FillParams {
+                            color: [color[0], color[1], color[2], 0.0],
+                            values: *values,
+                            enables: *enables,
+                            tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
+                        }),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("fill_bind"),
+                        layout: &self.fill_layout,
+                        entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
+                    });
+                    let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+                    let attachments: Vec<_> = views
+                        .iter()
+                        .map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: load }))
+                        .collect();
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("fill_pass"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &bind, &[]);
+                    pass.set_vertex_buffer(0, vbuf.slice(..));
+                    pass.draw(0..verts.len() as u32, 0..1);
                     dirty = true;
                 }
                 PaintOp::StrokeOpacity { layer, target, opacity, mask_value } => {
