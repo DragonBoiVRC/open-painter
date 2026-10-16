@@ -1949,6 +1949,36 @@ impl App {
         }
     }
 
+    /// Write the 3D view as it is now to a PNG next to the project (or in `export/`).
+    fn save_viewport_image(&mut self) {
+        let shot = {
+            let renderer = self.render_state.renderer.read();
+            renderer.callback_resources.get::<ViewportGpu>().and_then(|g| g.screenshot(&self.render_state.device, &self.render_state.queue))
+        };
+        let Some((w, h, mut rgba)) = shot else {
+            self.status = "Nothing to save yet: the 3D view has not been drawn.".into();
+            return;
+        };
+        // The picture is opaque whatever the framebuffer's alpha says.
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let png = match op_image::encode_png(w, h, &rgba) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = format!("Could not make the image: {e}");
+                return;
+            }
+        };
+        let dir = self.default_export_dir();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let path = dir.join(format!("{}_view_{stamp}.png", self.project_name()));
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, png)) {
+            Ok(()) => self.status = format!("Saved the view to {}", path.display()),
+            Err(e) => self.status = format!("Could not save the view: {e}"),
+        }
+    }
+
     fn default_export_dir(&self) -> PathBuf {
         match self.project_path.as_ref().and_then(|p| p.parent()) {
             Some(d) => d.join("export"),
@@ -1979,6 +2009,7 @@ impl App {
                         ("I / Shift+I", "pick the colour / every channel under the cursor"),
                         ("L", "toggle symmetry"),
                         ("W", "show or hide the mesh edges"),
+                        ("F12", "save the 3D view as a PNG"),
                         ("C", "cycle base color / roughness / metallic / emissive / opacity views"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
@@ -2303,6 +2334,9 @@ impl App {
             };
             self.set_view(next);
             self.status = format!("Viewport: {}", crate::ui::viewport::view_label(next));
+        }
+        if ui.input(|i| i.key_pressed(Key::F12)) {
+            self.save_viewport_image();
         }
         if ui.input(|i| i.key_pressed(Key::W) && !i.modifiers.any()) {
             self.show_wireframe = !self.show_wireframe;

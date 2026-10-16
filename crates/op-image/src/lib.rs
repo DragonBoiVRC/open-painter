@@ -57,6 +57,17 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, ImageError> {
     Ok(Decoded { width, height, rgba8: rgba.into_raw() })
 }
 
+/// Encode 8-bit RGBA pixels (top row first) as a PNG file.
+pub fn encode_png(width: u32, height: u32, rgba8: &[u8]) -> Result<Vec<u8>, ImageError> {
+    if width == 0 || height == 0 || rgba8.len() != width as usize * height as usize * 4 {
+        return Err(ImageError::Decode("the pixel data does not match the image size".into()));
+    }
+    let img = RgbaImage::from_raw(width, height, rgba8.to_vec()).ok_or_else(|| ImageError::Decode("bad pixel data".into()))?;
+    let mut out = Vec::new();
+    img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|e| ImageError::Decode(e.to_string()))?;
+    Ok(out)
+}
+
 /// A stable id for an image: two FNV-1a hashes of its bytes, as 32 hex digits. Identical files get
 /// the same id, so importing a texture twice does not duplicate it.
 pub fn content_id(bytes: &[u8]) -> String {
@@ -199,6 +210,16 @@ mod tests {
         let mut out = Vec::new();
         img.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
         out
+    }
+
+    #[test]
+    fn encode_png_round_trips_and_rejects_bad_sizes() {
+        let px: Vec<u8> = (0..2 * 3 * 4).map(|i| i as u8).collect();
+        let bytes = encode_png(2, 3, &px).unwrap();
+        let back = decode(&bytes).unwrap();
+        assert_eq!((back.width, back.height, back.rgba8), (2, 3, px));
+        assert!(encode_png(2, 3, &[0; 5]).is_err());
+        assert!(encode_png(0, 3, &[]).is_err());
     }
 
     #[test]

@@ -61,6 +61,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Colour-selection masks: a generated mask called "Color selection" picks one piece of the model by its baked ID colour; "Pick the piece from the model" lets you click it.
 - Section plane (Display Settings): cuts the model open along X, Y or Z so you can see and paint the inside.
 - A strip of recently used colours sits under the colour swatch in Properties - Brush.
+- File > Save viewport image (F12) writes the 3D view as it is to a PNG next to the project.
 - Lazy mouse (Properties - Brush, "Lazy mouse") makes the brush trail the cursor on a string for smooth strokes.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.

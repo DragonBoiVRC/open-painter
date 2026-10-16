@@ -133,6 +133,10 @@ impl App {
                         self.export.open = true;
                         ui.close();
                     }
+                    if ui.add(egui::Button::new("Save viewport image").shortcut_text("F12")).clicked() {
+                        self.save_viewport_image();
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.add(egui::Button::new("Quit").shortcut_text("Ctrl+Q")).clicked() {
                         self.request(Pending::Quit, &ctx);

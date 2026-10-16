@@ -994,6 +994,13 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
 }
 
 impl ViewportGpu {
+    /// The last 3D frame as RGBA8 pixels (top row first) with its size, or `None` before the first frame.
+    pub fn screenshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(u32, u32, Vec<u8>)> {
+        let off = self.offscreen.as_ref()?;
+        let [w, h] = off.size;
+        Some((w, h, crate::gpu_io::read_texture_rect(device, queue, &off.color, w, h, 4)))
+    }
+
     /// Copy the finished frame into `pass`, smoothed if FXAA is on.
     fn blit_into(&self, pass: &mut wgpu::RenderPass<'_>) {
         let Some(off) = &self.offscreen else { return };
@@ -2774,6 +2781,21 @@ mod tests {
         rig.globals.env = [0.0, 1.0, 0.0, 0.0];
         rig.run(&doc, &[]);
         assert_eq!(corner(&rig), plain);
+    }
+
+    /// A screenshot is the frame as drawn, at its own size, and encodes to a PNG that reads back.
+    #[test]
+    fn the_viewport_image_is_the_frame_and_encodes_as_png() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        assert!(rig.gpu.screenshot(&rig.device, &rig.queue).is_none(), "nothing drawn yet");
+        rig.run(&Document::with_default_material(), &[PaintOp::Reset(SIZE)]);
+        let (w, h, rgba) = rig.gpu.screenshot(&rig.device, &rig.queue).expect("a frame was drawn");
+        assert_eq!((w, h, rgba.len()), (SIZE, SIZE, (SIZE * SIZE * 4) as usize));
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        assert_eq!(rgba[i..i + 4], center_pixel(&rig));
+        let back = op_image::decode(&op_image::encode_png(w, h, &rgba).unwrap()).unwrap();
+        assert_eq!((back.width, back.height), (w, h));
+        assert_eq!(back.rgba8[i..i + 3], rgba[i..i + 3]);
     }
 
     /// FXAA smooths the silhouette of the model and leaves flat areas as they were.

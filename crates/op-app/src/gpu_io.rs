@@ -33,6 +33,33 @@ pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Text
     out
 }
 
+/// Copy a texture of any size to the CPU: exactly `width * height * bpp` bytes, tightly packed.
+pub fn read_texture_rect(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture, width: u32, height: u32, bpp: u32) -> Vec<u8> {
+    let unpadded = width * bpp;
+    let padded = unpadded.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: padded as u64 * height as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        tex.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(height) } },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit([enc.finish()]);
+    buf.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("buffer map failed"));
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll failed");
+    let mapped = buf.slice(..).get_mapped_range().expect("mapped range");
+    let mut out = Vec::with_capacity((unpadded * height) as usize);
+    for row in mapped.chunks_exact(padded as usize) {
+        out.extend_from_slice(&row[..unpadded as usize]);
+    }
+    out
+}
+
 /// Overwrite a whole square texture with tightly packed bytes.
 ///
 /// The copy is recorded in `encoder` rather than issued with `queue.write_texture`:
