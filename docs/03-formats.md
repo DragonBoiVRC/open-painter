@@ -18,8 +18,8 @@ Texture kinds:
 
 | kind | format | meaning |
 |---|---|---|
-| `base` | RGBA16F | premultiplied linear color + coverage |
-| `metal`, `rough` | RG8 | (value x coverage, coverage) |
+| `base`, `emissive` | RGBA16F | premultiplied linear color + coverage (`emissive` is the light the surface gives off) |
+| `metal`, `rough`, `height`, `opacity` | RG8 | (value x coverage, coverage); height 0.5 is flat; opacity is 1 where nothing is painted |
 | `mask` | R8 | 1 reveals, 0 hides |
 
 Guarantees and rules:
@@ -52,8 +52,9 @@ Presets imported from Substance Painter (see below) are saved there automaticall
 ```
 
 - `channels`: 1 (gray), 3 (RGB) or 4 (RGBA) sources. A source is one of:
-  `Metallic`, `Roughness`, `Smoothness` (1 - roughness), `AoMixed` (baked AO), `{"Constant": v}`,
-  `{"Color": {"map": "Base"|"Diffuse"|"Specular", "comp": "R"|"G"|"B"|"L"}}`,
+  `Metallic`, `Roughness`, `Smoothness` (1 - roughness), `Height`, `Opacity` (1 where nothing is painted),
+  `AoMixed` (baked AO), `{"Constant": v}`,
+  `{"Color": {"map": "Base"|"Diffuse"|"Specular"|"Emissive", "comp": "R"|"G"|"B"|"L"}}`,
   `{"Normal": {"directx": bool, "comp": ...}}` (baked tangent-space normal; `directx` flips green),
   `{"Mesh": {"map": <MeshMap>, "comp": ...}}` (any baked map). `L` is Rec. 709 luminance.
   Diffuse = `base * (1 - metallic)`, Specular = `lerp(0.04, base, metallic)`.
@@ -81,7 +82,7 @@ How a preset channel `(mapIdType, mapId, channelSrc)` is translated:
 
 | mapIdType | meaning | handled |
 |---|---|---|
-| 1 | document channel (version 1 stores the bit index, version 0 the bit flag `1 << index`) | BaseColor (0), Opacity (3, written as 1), Emissive (4, written as 0), Glossiness (6), Roughness (7), Metallic (13), Diffuse (24) and Specular (2) derived from base/metallic |
+| 1 | document channel (version 1 stores the bit index, version 0 the bit flag `1 << index`) | BaseColor (0), Height (1), Opacity (3), Emissive (4), Glossiness (6), Roughness (7), Metallic (13), Diffuse (24) and Specular (2) derived from base/metallic |
 | 2 | named virtual map | `Normal_OpenGL`, `Normal_DirectX`, `AO_Mixed`, `Glossiness`, `Diffuse`, `Specular` |
 | 3 | baked mesh map: 0 ID, 1 AO, 2 curvature, 3 world normal, 4 position, 5 thickness, 6 normal, 7 height, 8 bent normals, 9 opacity | all of them |
 | 0 | constant (0 black, 1 white) | yes |
@@ -89,8 +90,11 @@ How a preset channel `(mapIdType, mapId, channelSrc)` is translated:
 `channelSrc`: 0 R, 1 G, 2 B, 3 A (opaque), 4 L. Bit depth setting 0 = 8-bit, 1 = 16-bit.
 
 Everything that is not an exact translation is **reported as a warning and written as a constant**, never
-guessed: document channels this project does not have (Height, Anisotropy, Transmissive, Scattering, user
+guessed: document channels this project does not have (Anisotropy, Transmissive, Scattering, user
 channels), channel ids that no sample preset identifies (for example 14, 15, 17 and 23 in the Poiyomi
 preset), unsupported file formats, folders inside file names, unknown `$variables`, dithering.
 The id table comes from the sample presets (ids appear next to the file names Painter gives them);
 ids with no evidence stay unidentified on purpose.
+
+Maps made only of emissive light or opacity are left out of an export when nothing glows or nothing is
+see-through, so the built-in presets can list them without littering every export with black or white files.
