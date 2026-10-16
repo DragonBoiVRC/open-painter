@@ -118,12 +118,21 @@ struct Environment {
 }
 
 /// The display settings that are kept between sessions: the lighting and the HDRI in use.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct DisplaySettings {
     env: Environment,
     /// The file name (in the environments folder) of the HDRI that was loaded.
     hdri: Option<String>,
+    /// Orthographic camera, and the field of view in degrees (0 means the default).
+    ortho: bool,
+    fov_degrees: f32,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self { env: Environment::default(), hdri: None, ortho: false, fov_degrees: 45.0 }
+    }
 }
 
 impl DisplaySettings {
@@ -140,6 +149,7 @@ impl DisplaySettings {
         e.light = fin(e.light, 1.0, 0.0, 3.0);
         e.background_blur = fin(e.background_blur, 0.3, 0.0, 1.0);
         e.tonemap = e.tonemap.min(2);
+        me.fov_degrees = if me.fov_degrees.is_finite() && me.fov_degrees > 0.0 { me.fov_degrees.clamp(10.0, 110.0) } else { 45.0 };
         me
     }
 }
@@ -578,7 +588,7 @@ impl App {
         let doc = Document::with_default_material();
         let selected = doc.nodes.last().map(|n| n.id);
         let mut app = Self {
-            camera: OrbitCamera::default(),
+            camera: OrbitCamera { ortho: display.ortho, fov_y: display.fov_degrees.to_radians(), ..OrbitCamera::default() },
             doc,
             mesh: Mesh::default(),
             mesh_name: "sphere".into(),
@@ -1384,7 +1394,7 @@ impl App {
         if self.hdri_rx.is_some() {
             return;
         }
-        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone() };
+        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone(), ortho: self.camera.ortho, fov_degrees: self.camera.fov_y.to_degrees() };
         if self.display_saved.as_ref() == Some(&now) {
             return;
         }
