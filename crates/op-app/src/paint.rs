@@ -125,6 +125,9 @@ pub enum PaintOp {
     Gc(Vec<NodeId>),
     /// Drop all paint and stroke history and (re)allocate at this resolution.
     Reset(u32),
+    /// Change the resolution, resampling every layer and mask so the paint is kept. Stroke history is
+    /// dropped (its snapshots are the old size).
+    Resize(u32),
     /// Replace a layer's mask with generated content (one byte per texel). Ignored if the
     /// resolution no longer matches or the layer has no mask.
     SetMask { layer: NodeId, size: u32, bytes: Vec<u8> },
@@ -329,6 +332,9 @@ pub struct PaintGpu {
     pipeline_erase: wgpu::RenderPipeline,
     pipeline_erase_2d: wgpu::RenderPipeline,
     pipeline_smudge: wgpu::RenderPipeline,
+    resample_layout: wgpu::BindGroupLayout,
+    resample_sampler: wgpu::Sampler,
+    resample_pipelines: [wgpu::RenderPipeline; 3],
     pipeline_fill: wgpu::RenderPipeline,
     pipeline_fill_mask: wgpu::RenderPipeline,
     fill_layout: wgpu::BindGroupLayout,
@@ -627,6 +633,62 @@ impl PaintGpu {
         };
         let pipeline_fill = make_fill("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_fill_mask = make_fill("fs_mask", &[target(MASK_FORMAT, straight)]);
+        let resample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("resample_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let resample_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let resample_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/resample.wgsl"));
+        let resample_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("resample_pl"), bind_group_layouts: &[Some(&resample_layout)], immediate_size: 0 });
+        let make_resample = |format: wgpu::TextureFormat| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("resample"),
+                layout: Some(&resample_pl),
+                vertex: wgpu::VertexState { module: &resample_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+                fragment: Some(wgpu::FragmentState {
+                    module: &resample_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState::from(format))],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Colour (RGBA16F), two-channel values (RG8) and masks (R8).
+        let resample_pipelines = [make_resample(BASE_FORMAT), make_resample(VALUE_FORMAT), make_resample(MASK_FORMAT)];
         let plain_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -735,6 +797,9 @@ impl PaintGpu {
             pipeline_erase,
             pipeline_erase_2d,
             pipeline_smudge,
+            resample_layout,
+            resample_sampler,
+            resample_pipelines,
             pipeline_fill,
             pipeline_fill_mask,
             fill_layout,
@@ -898,6 +963,83 @@ impl PaintGpu {
             _ => return None,
         }
         Some(current)
+    }
+
+    /// Resample `src` into a new texture of `size` (`kind`: 0 colour, 1 values, 2 mask).
+    fn resampled(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture, size: u32, kind: usize) -> wgpu::Texture {
+        let format = [BASE_FORMAT, VALUE_FORMAT, MASK_FORMAT][kind];
+        let dst = texture(device, "resampled", size, format);
+        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("resample_params"),
+            contents: bytemuck::cast_slice(&[size as f32, 0.0, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let sv = src.create_view(&Default::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resample_bind"),
+            layout: &self.resample_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sv) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.resample_sampler) },
+            ],
+        });
+        let dv = dst.create_view(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("resample_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dv,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.resample_pipelines[kind]);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        dst
+    }
+
+    /// Change the resolution to `size`, keeping the paint and masks (resampled). Stroke history is
+    /// dropped, and so is anything cached at the old size.
+    fn resize(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, doc: &Document, size: u32) {
+        let old = std::mem::take(&mut self.store);
+        let mut store = HashMap::new();
+        for (id, g) in old {
+            let content = g.content.as_ref().map(|c| {
+                let mut layer = Layer::new_paint(device, size);
+                layer.base = self.resampled(device, encoder, &c.base, size, 0);
+                layer.metal = self.resampled(device, encoder, &c.metal, size, 1);
+                layer.rough = self.resampled(device, encoder, &c.rough, size, 1);
+                layer.height = self.resampled(device, encoder, &c.height, size, 1);
+                layer.emissive = self.resampled(device, encoder, &c.emissive, size, 0);
+                layer.opacity = self.resampled(device, encoder, &c.opacity, size, 1);
+                layer
+            });
+            let mask = g.mask.as_ref().map(|m| self.resampled(device, encoder, m, size, 2));
+            store.insert(id, NodeGpu { content, mask });
+        }
+        self.store = store;
+        self.size = size;
+        self.undo.clear();
+        self.redo.clear();
+        self.scratch = None;
+        self.stroke_limit = None;
+        self.stroke_buf = None;
+        self.stroke_mask_buf = None;
+        self.output = Layer::new(device, size);
+        self.output.clear(encoder);
+        self.normal.resize(device, size);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
+        self.compositor.set_size(size);
+        self.last_doc = None;
+        self.ensure_store(device, encoder, doc);
     }
 
     /// Drop all paint and history; reallocate everything at `size`.
@@ -1266,6 +1408,12 @@ impl PaintGpu {
                 PaintOp::Reset(size) => {
                     self.reset(device, encoder, doc, *size);
                     dirty = true;
+                }
+                PaintOp::Resize(size) => {
+                    if *size > 0 && *size != self.size {
+                        self.resize(device, encoder, doc, *size);
+                        dirty = true;
+                    }
                 }
                 PaintOp::Load { size, blobs } => {
                     self.reset(device, encoder, doc, *size);

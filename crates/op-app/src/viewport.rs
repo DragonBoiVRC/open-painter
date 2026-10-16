@@ -1697,6 +1697,70 @@ mod tests {
         assert!(cut[3] == 255 && (cut[0] > 40 || cut[1] > 40 || cut[2] > 40), "the inside is lit, not empty: {cut:?}");
     }
 
+    /// Changing the resolution keeps the paint and masks (resampled) and drops the stroke history.
+    #[test]
+    fn resizing_a_texture_set_keeps_its_paint_and_masks() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        let metal = doc.add(None, None, "metal", fill(None, Some(1.0), None));
+        doc.find_mut(metal).unwrap().mask = Some(Mask::new(false));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let stamp = dab(SIZE as f32 / 2.0, 30.0, 0.6, [0.0, 1.0, 0.0, 0.0]);
+        let reveal = {
+            let mut r = dab(SIZE as f32 / 2.0, 30.0, 1.0, [0.0; 4]);
+            r.values[0] = 1.0;
+            r
+        };
+        rig.run(&doc, &[
+            PaintOp::BeginStroke { layer, target: Target::Content },
+            PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] },
+            PaintOp::BeginStroke { layer: metal, target: Target::Mask },
+            PaintOp::Stamps { layer: metal, target: Target::Mask, stamps: vec![reveal] },
+        ]);
+        let front = sphere_uv(rig.front);
+        let before = rig.metal();
+        let (v0, c0) = texel_rg(&before, front);
+        assert!(c0 > 240);
+        let covered_before = before.chunks_exact(2).filter(|t| t[1] > 128).count();
+
+        for new_size in [SIZE * 2, SIZE / 2] {
+            rig.run(&doc, &[PaintOp::Resize(new_size)]);
+            assert_eq!(rig.gpu.paint().size(), new_size);
+            assert_eq!(rig.gpu.paint().undo_depth(), (0, 0), "the old snapshots are gone");
+            let m = crate::gpu_io::read_texture(&rig.device, &rig.queue, &rig.gpu.paint().output.metal, new_size, 2);
+            let at = |uv: (f32, f32)| {
+                let x = ((uv.0 * new_size as f32) as u32).min(new_size - 1);
+                let y = ((uv.1 * new_size as f32) as u32).min(new_size - 1);
+                let i = ((y * new_size + x) * 2) as usize;
+                (m[i], m[i + 1])
+            };
+            let (v, c) = at(front);
+            // The layer stack composites the paint layer (0.6) under a fill that the mask reveals (1.0).
+            assert!(c > 240 && v > 240, "size {new_size}: the mask-revealed fill covers the dab: value {v} coverage {c}");
+            let area = m.chunks_exact(2).filter(|t| t[1] > 128).count();
+            let expected = covered_before as f32 * (new_size as f32 / SIZE as f32).powi(2);
+            assert!((area as f32 - expected).abs() < expected * 0.2, "size {new_size}: area {area} vs {expected}");
+            let _ = (v0, c0);
+            // Under the revealed fill the paint layer's own 0.6 survived the resampling.
+            doc.find_mut(metal).unwrap().visible = false;
+            rig.run(&doc, &[]);
+            let m = crate::gpu_io::read_texture(&rig.device, &rig.queue, &rig.gpu.paint().output.metal, new_size, 2);
+            let x = ((front.0 * new_size as f32) as u32).min(new_size - 1);
+            let y = ((front.1 * new_size as f32) as u32).min(new_size - 1);
+            let i = ((y * new_size + x) * 2) as usize;
+            assert!((m[i] as f32 / m[i + 1].max(1) as f32 - 0.6).abs() < 0.04 && m[i + 1] > 240, "size {new_size}: paint layer value {} coverage {}", m[i], m[i + 1]);
+            doc.find_mut(metal).unwrap().visible = true;
+            // Painting still works at the new size.
+            rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }]);
+            assert_eq!(rig.gpu.paint().undo_depth(), (1, 0));
+            rig.run(&doc, &[PaintOp::UndoStroke]);
+            // Back to the original size for the next round.
+            rig.run(&doc, &[PaintOp::Resize(SIZE)]);
+            assert_eq!(rig.gpu.paint().size(), SIZE);
+        }
+    }
+
     /// Paint reaches the far side of the model only when both "through" options are on.
     #[test]
     fn paint_through_options_reach_hidden_and_back_faces() {

@@ -18,15 +18,17 @@ impl App {
                         }
                     });
                 if self.tex_size != before {
-                    // Changing resolution discards all paint and history.
+                    // The paint and masks are resampled to the new size; the stroke history (snapshots at the
+                    // old size) is dropped.
                     self.clear_active_history();
-                    self.pending.push(PaintOp::Reset(self.tex_size));
+                    self.pending.push(PaintOp::Resize(self.tex_size));
                     // Baked maps are tied to the resolution they were baked at.
                     self.clear_baked();
+                    self.thumbs_dirty();
                     self.modified = true;
                 }
             });
-            hint(ui, "Changing the resolution clears all paint, history and baked maps.");
+            hint(ui, "Changing the resolution keeps your paint (resampled) but clears the undo history and the baked maps: bake again afterwards.");
         });
         section(ui, "UV tiles", |ui| {
             let mut on = self.udim;
