@@ -132,6 +132,29 @@ impl App {
                 self.pick_set_at(rect, pos);
             }
         }
+        // Choosing the piece a colour-selection mask picks: the next click on the model decides.
+        if let Some(target) = self.pick_id_for {
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.pick_id_for = None;
+                self.status = "Cancelled.".into();
+            } else if let (true, Some(pos)) = (resp.clicked() && !alt, resp.interact_pointer_pos()) {
+                self.pick_id_for = None;
+                match self.sample_id_at(rect, pos) {
+                    Some(c) => {
+                        let before = self.doc.clone();
+                        if let Some(g) = self.doc.find_mut(target).and_then(|n| n.mask.as_mut()).and_then(|m| m.generator.as_mut()) {
+                            g.params.insert("r".into(), c[0]);
+                            g.params.insert("g".into(), c[1]);
+                            g.params.insert("b".into(), c[2]);
+                        }
+                        self.record(before);
+                        self.status = "Selected that piece of the model.".into();
+                    }
+                    None => self.status = "No ID map baked for this texture set under the cursor: bake the ID map first.".into(),
+                }
+            }
+        }
+        let picking_id = self.pick_id_for.is_some();
         // Fill: one click fills the island, mesh part or texture set under the cursor.
         let fill = self.tool == Tool::Fill && !alt && !modal_open;
         if let (true, true, Some(pos)) = (fill, resp.clicked() && !mods.command, resp.interact_pointer_pos()) {
@@ -154,7 +177,7 @@ impl App {
                 place[2] = (place[2] * (1.0 + scroll * 0.002)).clamp(0.05, 2.0);
             }
         }
-        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && self.tool != Tool::Fill;
+        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && self.tool != Tool::Fill && !picking_id;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {

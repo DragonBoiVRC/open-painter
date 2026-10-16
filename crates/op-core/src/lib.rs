@@ -481,6 +481,8 @@ pub enum GeneratorKind {
     HeightGradient,
     /// Plain fractal noise.
     Noise,
+    /// One piece of the model, chosen by its colour in the baked ID map.
+    ColorSelect,
     /// An arbitrary graph, usually loaded from a file.
     Custom { name: String, graph: Graph },
 }

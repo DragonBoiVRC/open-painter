@@ -15,6 +15,7 @@ impl App {
         let mut changed = false;
         let mut mask_action = None;
         let mut gen_action: Option<GenAction> = None;
+        let mut pick_id = false;
         if let Some(node) = self.doc.find_mut(id) {
             changed |= ui.text_edit_singleline(&mut node.name).changed();
             egui::ComboBox::from_id_salt("blend").selected_text(node.blend.name()).show_ui(ui, |ui| {
@@ -156,6 +157,11 @@ impl App {
                                     changed = true;
                                 }
                             }
+                            if gen.kind == op_core::GeneratorKind::ColorSelect {
+                                if ui.button("Pick the piece from the model").on_hover_text("Then click the model: its ID colour is used").clicked() {
+                                    pick_id = true;
+                                }
+                            }
                             changed |= ui.checkbox(&mut gen.invert, "Invert").changed();
                             let missing: Vec<&str> = op_proc::required_maps(&gen.kind)
                                 .into_iter()
@@ -204,6 +210,10 @@ impl App {
         }
         if changed && self.gesture_before.is_none() {
             self.gesture_before = Some(snapshot.clone());
+        }
+        if pick_id {
+            self.pick_id_for = Some(id);
+            self.status = "Click the model to choose the piece (Esc to cancel).".into();
         }
         if let Some(action) = gen_action {
             self.apply_gen_action(id, action);

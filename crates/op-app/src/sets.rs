@@ -334,6 +334,24 @@ impl App {
 
     /// Make the texture set under `pos` (a point in the viewport `rect`) the active one.
     /// The colour painted at the point under the cursor, as sRGB (what the paint colour swatch holds).
+    /// The ID-map colour of the piece of the model under the cursor (first UV tile only), if baked.
+    pub(crate) fn sample_id_at(&self, rect: egui::Rect, pos: egui::Pos2) -> Option<[f32; 3]> {
+        let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+        let ndc = glam::Vec2::new((pos.x - rect.min.x) / w * 2.0 - 1.0, 1.0 - (pos.y - rect.min.y) / h * 2.0);
+        let inv = self.camera.view_proj(w / h).inverse();
+        let near = inv.project_point3(ndc.extend(0.0));
+        let far = inv.project_point3(ndc.extend(1.0));
+        let active = self.active;
+        let (set, _, uv) = self.mesh.raycast_uv_where(near, (far - near).normalize_or_zero(), |s| s == active)?;
+        if set != active || !(0.0..1.0).contains(&uv[0]) || !(0.0..1.0).contains(&uv[1]) {
+            return None;
+        }
+        let ids = self.baked0().get(&MeshMap::Id)?;
+        let size = ids.size as usize;
+        let (x, y) = (((uv[0] * size as f32) as usize).min(size - 1), ((uv[1] * size as f32) as usize).min(size - 1));
+        Some(ids.texel(y * size + x))
+    }
+
     /// Everything painted at the point under the cursor: colour (sRGB) and the metallic, roughness
     /// and height values, with the viewport's fallbacks where the layer stack leaves a texel uncovered.
     pub(crate) fn sample_surface_at(&self, rect: egui::Rect, pos: egui::Pos2) -> Option<SurfaceSample> {

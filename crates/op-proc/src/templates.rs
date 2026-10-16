@@ -59,6 +59,13 @@ const NOISE: [ParamSpec; 4] = [
     int("seed", "Seed", 0.0, 9999.0, 5.0),
 ];
 
+const COLOR_SELECT: [ParamSpec; 4] = [
+    p("r", "ID red", 0.0, 1.0, 1.0),
+    p("g", "ID green", 0.0, 1.0, 0.0),
+    p("b", "ID blue", 0.0, 1.0, 0.0),
+    p("tolerance", "Tolerance", 0.0, 0.5, 0.04),
+];
+
 pub fn param_specs(kind: &GeneratorKind) -> &'static [ParamSpec] {
     match kind {
         GeneratorKind::EdgeWear => &EDGE_WEAR,
@@ -66,6 +73,7 @@ pub fn param_specs(kind: &GeneratorKind) -> &'static [ParamSpec] {
         GeneratorKind::TopDust => &TOP_DUST,
         GeneratorKind::HeightGradient => &HEIGHT_GRADIENT,
         GeneratorKind::Noise => &NOISE,
+        GeneratorKind::ColorSelect => &COLOR_SELECT,
         GeneratorKind::Custom { .. } => &[],
     }
 }
@@ -77,6 +85,7 @@ pub fn label(kind: &GeneratorKind) -> String {
         GeneratorKind::TopDust => "Top dust".into(),
         GeneratorKind::HeightGradient => "Height gradient".into(),
         GeneratorKind::Noise => "Noise".into(),
+        GeneratorKind::ColorSelect => "Color selection".into(),
         GeneratorKind::Custom { name, .. } => name.clone(),
     }
 }
@@ -89,6 +98,7 @@ pub fn required_maps(kind: &GeneratorKind) -> Vec<MeshMap> {
         GeneratorKind::TopDust => vec![MeshMap::WorldSpaceNormal, MeshMap::Position],
         GeneratorKind::HeightGradient => vec![MeshMap::Position],
         GeneratorKind::Noise => vec![MeshMap::Position],
+        GeneratorKind::ColorSelect => vec![MeshMap::Id],
         GeneratorKind::Custom { .. } => vec![],
     }
 }
@@ -177,6 +187,22 @@ pub fn build_graph(gen: &Generator) -> Result<Graph, String> {
             let ramp = levels(&mut b, y, v("low"), v("high"));
             breakup(&mut b, ramp, v("breakup"), v("scale"), v("seed") as u32)
         }
+        GeneratorKind::ColorSelect => {
+            // How far each ID channel is from the chosen colour; the worst one decides.
+            let mut worst: Option<GraphNodeId> = None;
+            for (comp, key) in ["r", "g", "b"].into_iter().enumerate() {
+                let id = baked(&mut b, MeshMap::Id, comp as u8);
+                let target = b.add(Op::Const { value: v(key) }, &[]);
+                let d = b.add(Op::Blend { op: BlendOp::Difference, opacity: 1.0 }, &[id, target]);
+                worst = Some(match worst {
+                    None => d,
+                    Some(w) => b.add(Op::Blend { op: BlendOp::Max, opacity: 1.0 }, &[w, d]),
+                });
+            }
+            let tolerance = v("tolerance");
+            let far = b.add(Op::Threshold { level: tolerance + 0.004, softness: 0.008 }, &[worst.expect("three channels")]);
+            b.add(Op::Invert, &[far])
+        }
         GeneratorKind::Noise => {
             let n = b.add(
                 Op::Noise { kind: NoiseKind::Perlin, scale: v("scale"), octaves: v("octaves") as u32, persistence: 0.5, seed: v("seed") as u32, uv_space: false },
@@ -196,12 +222,13 @@ pub fn build_graph(gen: &Generator) -> Result<Graph, String> {
 mod tests {
     use super::*;
 
-    const ALL: [GeneratorKind; 5] = [
+    const ALL: [GeneratorKind; 6] = [
         GeneratorKind::EdgeWear,
         GeneratorKind::CreviceDirt,
         GeneratorKind::TopDust,
         GeneratorKind::HeightGradient,
         GeneratorKind::Noise,
+        GeneratorKind::ColorSelect,
     ];
 
     #[test]

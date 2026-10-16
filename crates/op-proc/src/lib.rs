@@ -185,6 +185,31 @@ mod tests {
     }
 
     #[test]
+    fn color_selection_picks_the_piece_with_that_id_colour() {
+        let size = 32;
+        // Left half red, right half blue, with a slightly different red strip that a tolerance can reach.
+        let ids = HashMap::from([(
+            MeshMap::Id,
+            map(size, 3, |x, _| if x < 12 { [1.0, 0.0, 0.0] } else if x < 16 { [0.95, 0.03, 0.0] } else { [0.0, 0.0, 1.0] }),
+        )]);
+        let n = size as usize;
+        let red = |tol: f32| Generator::new(GeneratorKind::ColorSelect).with("r", 1.0).with("g", 0.0).with("b", 0.0).with("tolerance", tol);
+        let strict = eval(&red(0.01), size, &ids);
+        assert!(strict.values[5 * n + 2] > 0.95, "the exact colour is selected");
+        assert!(strict.values[5 * n + 14] < 0.05, "a near colour is not, with a tight tolerance");
+        assert!(strict.values[5 * n + 25] < 0.02, "another piece is not selected");
+        let loose = eval(&red(0.08), size, &ids);
+        assert!(loose.values[5 * n + 14] > 0.95, "a larger tolerance reaches the near colour");
+        assert!(loose.values[5 * n + 25] < 0.02);
+        // Inverting selects everything but the piece.
+        let inv = eval(&red(0.01).inverted(), size, &ids);
+        assert!(inv.values[5 * n + 2] < 0.05 && inv.values[5 * n + 25] > 0.95);
+        // Without the ID map baked the generator still works, and says what is missing.
+        let none = eval(&red(0.01), size, &HashMap::new());
+        assert!(none.warnings.iter().any(|w| w.contains("ID")), "{:?}", none.warnings);
+    }
+
+    #[test]
     fn crevice_dirt_amount_grows_the_dirty_area() {
         let size = 32;
         let ao = HashMap::from([(MeshMap::AmbientOcclusion, map(size, 1, |x, _| [x as f32 / 31.0; 3]))]);

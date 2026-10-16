@@ -324,8 +324,8 @@ struct SmartUi {
     message: String,
 }
 
-fn builtin_kinds() -> [GeneratorKind; 5] {
-    [GeneratorKind::EdgeWear, GeneratorKind::CreviceDirt, GeneratorKind::TopDust, GeneratorKind::HeightGradient, GeneratorKind::Noise]
+fn builtin_kinds() -> [GeneratorKind; 6] {
+    [GeneratorKind::EdgeWear, GeneratorKind::CreviceDirt, GeneratorKind::TopDust, GeneratorKind::HeightGradient, GeneratorKind::Noise, GeneratorKind::ColorSelect]
 }
 
 struct BakeJob {
@@ -440,6 +440,8 @@ struct App {
     uv_cam: Option<uvview::UvCamera>,
     uv_channel: uvview::Channel,
     uv_wire: bool,
+    /// A colour-selection mask waiting for the user to click the piece of the model it should select.
+    pick_id_for: Option<NodeId>,
     /// Draw the mesh edges over the 3D model.
     show_wireframe: bool,
     /// Paint reaches surfaces hidden behind others, and surfaces turned away from the camera.
@@ -597,6 +599,7 @@ impl App {
             uv_channel: uvview::Channel::Base,
             uv_wire: true,
             show_wireframe: false,
+            pick_id_for: None,
             paint_through: false,
             paint_backfaces: false,
             sets_scrolled: usize::MAX,
