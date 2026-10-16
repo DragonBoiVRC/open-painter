@@ -59,6 +59,10 @@ pub fn environments_dir() -> PathBuf {
     data_dir().join("environments")
 }
 
+pub fn brushes_dir() -> PathBuf {
+    data_dir().join("brushes")
+}
+
 pub fn presets_dir() -> PathBuf {
     data_dir().join("presets")
 }
@@ -217,5 +221,92 @@ mod tests {
     fn missing_presets_dir_is_not_an_error() {
         let (p, w) = load_user_presets(Path::new("/definitely/not/here"));
         assert!(p.is_empty() && w.is_empty());
+    }
+}
+
+/// What a brush file holds.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BrushFile {
+    name: String,
+    brush: crate::ui::panels::BrushPreset,
+}
+
+/// The file name a brush is kept under: its name with anything odd replaced.
+fn brush_file_name(name: &str) -> String {
+    let stem: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "-_ ".contains(c) { c } else { '_' }).collect();
+    format!("{}.json", stem.trim())
+}
+
+/// Save a user brush preset into `dir`; returns where it went.
+pub fn save_user_brush(dir: &Path, name: &str, brush: &crate::ui::panels::BrushPreset) -> Result<PathBuf, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err("a brush name needs 1 to 64 characters".into());
+    }
+    let json = serde_json::to_string_pretty(&BrushFile { name: name.to_string(), brush: *brush }).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join(brush_file_name(name));
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+pub fn delete_user_brush(dir: &Path, name: &str) -> std::io::Result<()> {
+    std::fs::remove_file(dir.join(brush_file_name(name.trim())))
+}
+
+/// Load the user's brush presets from `dir`; bad files become warnings.
+pub fn load_user_brushes(dir: &Path) -> (Vec<(String, crate::ui::panels::BrushPreset)>, Vec<String>) {
+    let (mut out, mut warnings) = (Vec::new(), Vec::new());
+    for path in json_files(dir) {
+        let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let parsed = read_limited(&path).and_then(|t| serde_json::from_str::<BrushFile>(&t).map_err(|e| e.to_string()));
+        match parsed {
+            Ok(b) if b.brush.is_sane() && !b.name.trim().is_empty() && b.name.chars().count() <= 64 => out.push((b.name.trim().to_string(), b.brush)),
+            Ok(_) => warnings.push(format!("{file}: the brush settings are out of range")),
+            Err(e) => warnings.push(format!("{file}: {e}")),
+        }
+    }
+    (out, warnings)
+}
+
+#[cfg(test)]
+mod brush_tests {
+    use super::*;
+    use crate::ui::panels::BrushPreset;
+
+    #[test]
+    fn a_saved_brush_loads_back_and_old_files_without_new_fields_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = BrushPreset { radius_pts: 55.0, hardness: 0.25, stroke_opacity: 0.4, lazy_radius: 30.0, ..BrushPreset::BASE };
+        b.pressure_opacity = true;
+        save_user_brush(dir.path(), "My / brush", &b).unwrap();
+        let (got, warnings) = load_user_brushes(dir.path());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(got, vec![("My / brush".to_string(), b)]);
+
+        // A file written before stroke opacity, lazy mouse and pressure existed.
+        std::fs::write(
+            dir.path().join("Old.json"),
+            r#"{"name":"Old","brush":{"radius_pts":20.0,"hardness":0.5,"opacity":1.0,"spacing":0.15,"shape":0,"angle":0.0,"follow_path":false,"angle_jitter":0.0,"size_jitter":0.0,"position_jitter":0.0,"opacity_jitter":0.0}}"#,
+        )
+        .unwrap();
+        let (got, warnings) = load_user_brushes(dir.path());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let old = got.iter().find(|(n, _)| n == "Old").unwrap().1;
+        assert_eq!((old.stroke_opacity, old.lazy_radius, old.pressure_size, old.pressure_opacity), (1.0, 0.0, true, false));
+        delete_user_brush(dir.path(), "Old").unwrap();
+        assert_eq!(load_user_brushes(dir.path()).0.len(), 1);
+    }
+
+    #[test]
+    fn hostile_brush_files_are_warnings_not_brushes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.json"), r#"{"name":"Huge","brush":{"radius_pts":1e30,"hardness":0.5,"opacity":1.0,"spacing":0.15,"shape":0,"angle":0.0,"follow_path":false,"angle_jitter":0.0,"size_jitter":0.0,"position_jitter":0.0,"opacity_jitter":0.0}}"#).unwrap();
+        std::fs::write(dir.path().join("b.json"), "not json").unwrap();
+        std::fs::write(dir.path().join("c.json"), r#"{"name":"","brush":{"radius_pts":10.0,"hardness":0.5,"opacity":1.0,"spacing":0.15,"shape":9,"angle":0.0,"follow_path":false,"angle_jitter":0.0,"size_jitter":0.0,"position_jitter":0.0,"opacity_jitter":0.0}}"#).unwrap();
+        let (got, warnings) = load_user_brushes(dir.path());
+        assert!(got.is_empty());
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(save_user_brush(dir.path(), "   ", &BrushPreset::BASE).is_err());
     }
 }

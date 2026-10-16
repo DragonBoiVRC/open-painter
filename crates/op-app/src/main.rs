@@ -464,6 +464,8 @@ struct App {
     bake: BakeUi,
     view: View,
     custom_generators: Vec<Generator>,
+    /// Brush presets the user saved, by name.
+    user_brushes: Vec<(String, ui::panels::BrushPreset)>,
     smart_materials: Vec<SmartMaterial>,
     /// Problems found while loading the user's smart materials and generator files.
     definition_warnings: Vec<String>,
@@ -502,6 +504,10 @@ impl App {
         let (user_smart, mut definition_warnings) = files::load_smart_materials(&files::smart_materials_dir());
         let (custom_generators, generator_warnings) = files::load_custom_generators(&files::generators_dir());
         definition_warnings.extend(generator_warnings);
+        let (mut user_brushes, brush_warnings) = files::load_user_brushes(&files::brushes_dir());
+        definition_warnings.extend(brush_warnings);
+        // A saved brush never hides a built-in one of the same name.
+        user_brushes.retain(|(n, _)| !ui::panels::builtin_brush_names().contains(&n.as_str()));
         let mut smart_materials = builtin_smart_materials();
         for mut m in user_smart {
             // A user file never replaces a built-in one silently.
@@ -626,6 +632,7 @@ impl App {
             hidden_sets: Default::default(),
             pending_tiles: Vec::new(),
             custom_generators,
+            user_brushes,
             smart_materials,
             definition_warnings,
             smart_ui: SmartUi::default(),

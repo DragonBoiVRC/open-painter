@@ -11,7 +11,7 @@ mod sets;
 mod shelf;
 mod texture_set;
 
-pub use shelf::ShelfState;
+pub use shelf::{builtin_brush_names, BrushPreset, ShelfState};
 
 /// The shelf category that lists imported textures.
 pub fn shelf_textures() -> shelf::Category {

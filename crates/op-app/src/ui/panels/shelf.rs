@@ -38,10 +38,19 @@ impl Category {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+fn one() -> f32 {
+    1.0
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BrushPreset {
     pub radius_pts: f32,
     pub hardness: f32,
+    /// The flow of each dab.
     pub opacity: f32,
     pub spacing: f32,
     pub shape: u32,
@@ -51,11 +60,20 @@ pub struct BrushPreset {
     pub size_jitter: f32,
     pub position_jitter: f32,
     pub opacity_jitter: f32,
+    /// Cap on the opacity of a whole stroke (added later: older files have none).
+    #[serde(default = "one")]
+    pub stroke_opacity: f32,
+    #[serde(default)]
+    pub lazy_radius: f32,
+    #[serde(default = "yes")]
+    pub pressure_size: bool,
+    #[serde(default)]
+    pub pressure_opacity: bool,
 }
 
 impl BrushPreset {
     /// A plain round brush; presets override what makes them different.
-    const BASE: BrushPreset = BrushPreset {
+    pub(crate) const BASE: BrushPreset = BrushPreset {
         radius_pts: 24.0,
         hardness: 0.6,
         opacity: 1.0,
@@ -67,7 +85,49 @@ impl BrushPreset {
         size_jitter: 0.0,
         position_jitter: 0.0,
         opacity_jitter: 0.0,
+        stroke_opacity: 1.0,
+        lazy_radius: 0.0,
+        pressure_size: true,
+        pressure_opacity: false,
     };
+
+    /// The preset that reproduces `b`.
+    pub(crate) fn of(b: &crate::Brush) -> Self {
+        Self {
+            radius_pts: b.radius_pts,
+            hardness: b.hardness,
+            opacity: b.opacity,
+            spacing: b.spacing,
+            shape: b.shape,
+            angle: b.angle,
+            follow_path: b.follow_path,
+            angle_jitter: b.angle_jitter,
+            size_jitter: b.size_jitter,
+            position_jitter: b.position_jitter,
+            opacity_jitter: b.opacity_jitter,
+            stroke_opacity: b.stroke_opacity,
+            lazy_radius: b.lazy_radius,
+            pressure_size: b.pressure_size,
+            pressure_opacity: b.pressure_opacity,
+        }
+    }
+
+    /// Whether the numbers a file gave are usable (finite and in range).
+    pub fn is_sane(&self) -> bool {
+        let ok = |v: f32, lo: f32, hi: f32| v.is_finite() && (lo..=hi).contains(&v);
+        ok(self.radius_pts, 1.0, 1000.0)
+            && ok(self.hardness, 0.0, 1.0)
+            && ok(self.opacity, 0.0, 1.0)
+            && ok(self.spacing, 0.005, 5.0)
+            && self.shape <= 5
+            && ok(self.angle, -3600.0, 3600.0)
+            && ok(self.angle_jitter, 0.0, 1.0)
+            && ok(self.size_jitter, 0.0, 1.0)
+            && ok(self.position_jitter, 0.0, 10.0)
+            && ok(self.opacity_jitter, 0.0, 1.0)
+            && ok(self.stroke_opacity, 0.0, 1.0)
+            && ok(self.lazy_radius, 0.0, 1000.0)
+    }
 }
 
 /// What a tile stands for.
@@ -187,6 +247,11 @@ const BRUSHES: [(&str, BrushPreset); 11] = [
     ),
 ];
 
+/// The names of the built-in brushes.
+pub fn builtin_brush_names() -> Vec<&'static str> {
+    BRUSHES.iter().map(|(n, _)| *n).collect()
+}
+
 /// The first fill color in a tree, as an sRGB byte triple.
 fn first_fill_color(nodes: &[op_core::Node]) -> Option<[u8; 3]> {
     for n in nodes {
@@ -211,7 +276,7 @@ fn first_fill_color(nodes: &[op_core::Node]) -> Option<[u8; 3]> {
 /// The textures to list: (library id, file name).
 pub type TextureList = [(String, String)];
 
-pub fn catalog(materials: &[SmartMaterial], custom: &[Generator], textures: &TextureList) -> Vec<Entry> {
+pub fn catalog(materials: &[SmartMaterial], custom: &[Generator], textures: &TextureList, user_brushes: &[(String, BrushPreset)]) -> Vec<Entry> {
     let mut out = Vec::new();
     for (id, name) in textures {
         out.push(Entry { category: Category::Textures, name: name.clone(), asset: Asset::Texture(id.clone()), swatch: None });
@@ -248,6 +313,9 @@ pub fn catalog(materials: &[SmartMaterial], custom: &[Generator], textures: &Tex
             swatch: None,
         });
     }
+    for (name, p) in user_brushes {
+        out.push(Entry { category: Category::Brushes, name: name.clone(), asset: Asset::Brush(*p), swatch: None });
+    }
     out
 }
 
@@ -269,7 +337,7 @@ pub fn visible<'a>(entries: &'a [Entry], category: Category, query: &str) -> Vec
 impl App {
     pub(crate) fn shelf_panel(&mut self, ui: &mut egui::Ui) {
         let texture_list: Vec<(String, String)> = self.assets.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
-        let entries = catalog(&self.smart_materials, &self.custom_generators, &texture_list);
+        let entries = catalog(&self.smart_materials, &self.custom_generators, &texture_list, &self.user_brushes);
         let mut chosen: Option<Asset> = None;
 
         ui.horizontal_top(|ui| {
@@ -348,7 +416,7 @@ impl App {
                 let wanted: Vec<String> = shown.iter().filter_map(|e| if let Asset::Texture(id) = &e.asset { Some(id.clone()) } else { None }).collect();
                 self.ensure_tex_thumbs(ui.ctx(), &wanted);
                 let tile = self.shelf.tile;
-                let footer = if self.shelf.category == Category::Materials && self.shelf.query.trim().is_empty() {
+                let footer = if matches!(self.shelf.category, Category::Materials | Category::Brushes) && self.shelf.query.trim().is_empty() {
                     30.0
                 } else {
                     0.0
@@ -379,7 +447,16 @@ impl App {
                 for w in &self.definition_warnings {
                     ui.colored_label(theme::WARN, format!("Skipped: {w}"));
                 }
-                if footer > 0.0 {
+                if footer > 0.0 && self.shelf.category == Category::Brushes {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.shelf.save_name).hint_text("name").desired_width(140.0));
+                        let ok = !self.shelf.save_name.trim().is_empty();
+                        if ui.add_enabled(ok, egui::Button::new("Save the current brush")).clicked() {
+                            self.save_user_brush(self.shelf.save_name.trim().to_string());
+                            self.shelf.save_name.clear();
+                        }
+                    });
+                } else if footer > 0.0 {
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.shelf.save_name)
@@ -497,6 +574,14 @@ impl App {
         if resp.drag_started() && !matches!(e.asset, Asset::Brush(_)) {
             egui::DragAndDrop::set_payload(ui.ctx(), e.asset.clone());
         }
+        if let (Asset::Brush(_), true) = (&e.asset, self.user_brushes.iter().any(|(n, _)| *n == e.name)) {
+            resp.context_menu(|ui| {
+                if ui.button("Delete this brush").clicked() {
+                    self.delete_user_brush(&e.name);
+                    ui.close();
+                }
+            });
+        }
         if let Asset::Texture(id) = &e.asset {
             resp.context_menu(|ui| {
                 for slot in op_core::Slot::ALL {
@@ -548,7 +633,34 @@ impl App {
                 self.brush.size_jitter = b.size_jitter;
                 self.brush.position_jitter = b.position_jitter;
                 self.brush.opacity_jitter = b.opacity_jitter;
+                self.brush.stroke_opacity = b.stroke_opacity;
+                self.brush.lazy_radius = b.lazy_radius;
+                self.brush.pressure_size = b.pressure_size;
+                self.brush.pressure_opacity = b.pressure_opacity;
             }
+        }
+    }
+
+    pub(crate) fn delete_user_brush(&mut self, name: &str) {
+        if let Some(i) = self.user_brushes.iter().position(|(n, _)| n == name) {
+            self.user_brushes.remove(i);
+            let _ = crate::files::delete_user_brush(&crate::files::brushes_dir(), name);
+            self.status = format!("Deleted the brush '{name}'.");
+        }
+    }
+
+    /// Keep the current brush as a preset on the shelf and in the data folder.
+    pub(crate) fn save_user_brush(&mut self, name: String) {
+        let preset = BrushPreset::of(&self.brush);
+        match crate::files::save_user_brush(&crate::files::brushes_dir(), &name, &preset) {
+            Ok(path) => {
+                match self.user_brushes.iter().position(|(n, _)| *n == name) {
+                    Some(i) => self.user_brushes[i].1 = preset,
+                    None => self.user_brushes.push((name.clone(), preset)),
+                }
+                self.status = format!("Saved the brush '{name}' to {}", path.display());
+            }
+            Err(e) => self.status = format!("Could not save the brush: {e}"),
         }
     }
 }
@@ -599,7 +711,7 @@ mod tests {
 
     #[test]
     fn the_catalog_lists_materials_masks_and_brushes() {
-        let c = catalog(&[material("Steel", Some([0.5, 0.5, 0.6]))], &[], &[]);
+        let c = catalog(&[material("Steel", Some([0.5, 0.5, 0.6]))], &[], &[], &[]);
         let count = |cat| c.iter().filter(|e| e.category == cat).count();
         assert_eq!(count(Category::Materials), 1);
         assert_eq!(count(Category::Masks), builtin_kinds().len());
@@ -628,7 +740,7 @@ mod tests {
 
     #[test]
     fn a_category_filters_but_a_search_looks_everywhere() {
-        let c = catalog(&[material("Edge steel", None)], &[], &[]);
+        let c = catalog(&[material("Edge steel", None)], &[], &[], &[]);
         let names = |v: Vec<&Entry>| v.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(visible(&c, Category::Materials, "")), ["Edge steel"]);
         let found = names(visible(&c, Category::Brushes, "edge"));
