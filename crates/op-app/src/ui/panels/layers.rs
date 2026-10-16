@@ -494,29 +494,39 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str, enabled: bool) -> egui:
     }
 }
 
-/// Which of the three channels a layer writes, as (label, active).
-fn channels(node: &Node) -> Option<[(&'static str, bool); 4]> {
+/// Which channels a layer writes, as (label, active): colour, metallic, roughness, then height,
+/// emissive, opacity.
+fn channels(node: &Node) -> Option<[(&'static str, bool); 6]> {
     match &node.kind {
-        NodeKind::Paint => Some([("C", true), ("M", true), ("R", true), ("H", true)]),
-        NodeKind::Fill(f) => Some([("C", f.base.is_some()), ("M", f.metallic.is_some()), ("R", f.roughness.is_some()), ("H", f.height.is_some())]),
+        NodeKind::Paint => Some([("C", true), ("M", true), ("R", true), ("H", true), ("E", true), ("O", true)]),
+        NodeKind::Fill(f) => Some([
+            ("C", f.base.is_some() || f.maps.base.is_some()),
+            ("M", f.metallic.is_some() || f.maps.metallic.is_some()),
+            ("R", f.roughness.is_some() || f.maps.roughness.is_some()),
+            ("H", f.height.is_some() || f.maps.height.is_some()),
+            ("E", f.emissive.is_some() || f.maps.emissive.is_some()),
+            ("O", f.opacity.is_some() || f.maps.opacity.is_some()),
+        ]),
         NodeKind::Group { .. } => None,
     }
 }
 
 fn channel_bars_width(node: &Node) -> f32 {
-    if channels(node).is_some() { 26.0 } else { 0.0 }
+    if channels(node).is_some() { 40.0 } else { 0.0 }
 }
 
 /// Orange ticks at the right edge: one per channel the layer touches, as in a channel indicator.
 fn paint_channel_bars(p: &egui::Painter, rect: egui::Rect, node: &Node) {
     let Some(ch) = channels(node) else { return };
-    let x = rect.right() - 20.0;
+    // Two columns of three: C M R down the left, H E O down the right.
     for (i, (label, on)) in ch.into_iter().enumerate() {
-        let y = rect.top() + 3.5 + i as f32 * 8.5;
-        let bar = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(5.0, 6.0));
+        let (col, row) = (i / 3, i % 3);
+        let x = rect.right() - 36.0 + col as f32 * 17.0;
+        let y = rect.top() + 5.0 + row as f32 * 9.5;
+        let bar = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(5.0, 7.0));
         p.rect_filled(bar, 1.0, if on { theme::ORANGE } else { egui::Color32::from_gray(0x44) });
         p.text(
-            egui::pos2(x + 8.0, y + 3.0),
+            egui::pos2(x + 8.0, y + 3.5),
             egui::Align2::LEFT_CENTER,
             label,
             egui::FontId::proportional(8.5),
