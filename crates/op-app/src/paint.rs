@@ -218,8 +218,21 @@ impl Layer {
         }
     }
 
+    /// A layer that holds paint: like [`Layer::new`] but without a normal map the size of the texture,
+    /// since only the compositor's working buffers ever carry one. (The normal is a 1x1 stand-in, which
+    /// reads as "no normal" wherever it is sampled.)
+    pub fn new_paint(device: &wgpu::Device, size: u32) -> Self {
+        Self { normal: texture(device, "paint_normal_stub", 1, crate::normal_gpu::NORMAL_FORMAT), ..Self::new(device, size) }
+    }
+
+    /// Whether the normal map is the size of the texture (false for [`Layer::new_paint`]).
+    fn has_normal(&self) -> bool {
+        self.normal.width() == self.size
+    }
+
+    /// Bytes a paint layer takes (see [`Layer::new_paint`]).
     fn bytes(size: u32) -> u64 {
-        size as u64 * size as u64 * (8 + 2 + 2 + 2 + 8 + 2 + 4)
+        size as u64 * size as u64 * (8 + 2 + 2 + 2 + 8 + 2)
     }
 
     /// Views of base, metal, rough, height, emissive, opacity, normal (see [`PAINT_TARGETS`], [`V_NORMAL`]).
@@ -228,14 +241,23 @@ impl Layer {
     }
 
     pub fn copy_from(&self, encoder: &mut wgpu::CommandEncoder, src: &Layer) {
-        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough), (&src.height, &self.height), (&src.emissive, &self.emissive), (&src.opacity, &self.opacity), (&src.normal, &self.normal)] {
+        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough), (&src.height, &self.height), (&src.emissive, &self.emissive), (&src.opacity, &self.opacity)] {
             copy_tex(encoder, s, d, self.size);
+        }
+        // Only layers that both have a real normal map copy it.
+        if src.has_normal() && self.has_normal() {
+            copy_tex(encoder, &src.normal, &self.normal, self.size);
         }
     }
 
     pub fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
         let v = self.views();
-        clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]], wgpu::Color::TRANSPARENT);
+        // One pass clears them all, so they must share a size: leave a stand-in normal map alone.
+        if self.has_normal() {
+            clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]], wgpu::Color::TRANSPARENT);
+        } else {
+            clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]], wgpu::Color::TRANSPARENT);
+        }
     }
 }
 
@@ -811,7 +833,7 @@ impl PaintGpu {
             if matches!(n.kind, NodeKind::Paint) {
                 let g = store.entry(n.id).or_default();
                 if g.content.is_none() {
-                    g.content = Some(Layer::new(device, size)); // wgpu zero-initialises
+                    g.content = Some(Layer::new_paint(device, size)); // wgpu zero-initialises
                 }
             }
             if let Some(m) = &n.mask {
@@ -841,7 +863,7 @@ impl PaintGpu {
         let g = self.store.get(&layer)?;
         let tex = match target {
             Target::Content => {
-                let snap = Layer::new(device, self.size);
+                let snap = Layer::new_paint(device, self.size);
                 snap.copy_from(encoder, g.content.as_ref()?);
                 SnapTex::Content(snap)
             }
@@ -1366,7 +1388,7 @@ impl PaintGpu {
                     match target {
                         Target::Content => {
                             if self.stroke_buf.as_ref().is_none_or(|b| b.size != self.size) {
-                                self.stroke_buf = Some(Layer::new(device, self.size));
+                                self.stroke_buf = Some(Layer::new_paint(device, self.size));
                             }
                             self.stroke_buf.as_ref().unwrap().clear(encoder);
                         }
@@ -1434,7 +1456,7 @@ impl PaintGpu {
                         continue;
                     }
                     if self.scratch.as_ref().is_none_or(|s| s.size != self.size) {
-                        self.scratch = Some(Layer::new(device, self.size));
+                        self.scratch = Some(Layer::new_paint(device, self.size));
                     }
                     let scratch = self.scratch.as_ref().unwrap();
                     scratch.copy_from(encoder, c);
