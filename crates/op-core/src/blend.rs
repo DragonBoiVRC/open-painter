@@ -4,7 +4,7 @@
 //! op-app renders on the GPU and compares against this module.
 //!
 //! Colors are premultiplied: `(r*a, g*a, b*a, a)`. Blending follows the W3C
-//! Compositing and Blending model with separable blend functions.
+//! Compositing and Blending model with separable and non-separable blend functions.
 
 use crate::{srgb_to_linear, BlendMode, Document, FillParams, Node, NodeKind};
 
@@ -56,6 +56,57 @@ pub fn blend(mode: BlendMode, cb: f32, cs: f32) -> f32 {
         BlendMode::Divide => {
             if cs <= 0.0 { 1.0 } else { (cb / cs).min(1.0) }
         }
+        // Non-separable modes need all three channels; see `blend_rgb`.
+        BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => cs,
+    }
+}
+
+fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+fn clip_color(c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    let mut c = c;
+    if n < 0.0 {
+        c = c.map(|v| l + (v - l) * l / (l - n));
+    }
+    if x > 1.0 {
+        c = c.map(|v| l + (v - l) * (1.0 - l) / (x - l));
+    }
+    c
+}
+
+fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color(c.map(|v| v + d))
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    let mx = c[0].max(c[1]).max(c[2]);
+    let mn = c[0].min(c[1]).min(c[2]);
+    if mx > mn {
+        c.map(|v| (v - mn) * s / (mx - mn))
+    } else {
+        [0.0; 3]
+    }
+}
+
+/// Blend function on whole colors: the separable modes per channel, plus the
+/// non-separable hue / saturation / color / luminosity modes.
+pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
+    match mode {
+        BlendMode::Hue => set_lum(set_sat(cs, sat(cb)), lum(cb)),
+        BlendMode::Saturation => set_lum(set_sat(cb, sat(cs)), lum(cb)),
+        BlendMode::Color => set_lum(cs, lum(cb)),
+        BlendMode::Luminosity => set_lum(cb, lum(cs)),
+        _ => [0, 1, 2].map(|i| blend(mode, cb[i], cs[i])),
     }
 }
 
@@ -64,9 +115,10 @@ pub fn blend(mode: BlendMode, cb: f32, cs: f32) -> f32 {
 pub fn over(mode: BlendMode, backdrop: [f32; 4], cs: [f32; 3], a_s: f32) -> [f32; 4] {
     let ab = backdrop[3];
     let mut out = [0.0; 4];
+    let cb = if ab > 0.0 { [backdrop[0] / ab, backdrop[1] / ab, backdrop[2] / ab] } else { [0.0; 3] };
+    let blended = blend_rgb(mode, cb, cs);
     for i in 0..3 {
-        let cb = if ab > 0.0 { backdrop[i] / ab } else { 0.0 };
-        let b = blend(mode, cb, cs[i]);
+        let b = blended[i];
         out[i] = (1.0 - a_s) * backdrop[i] + a_s * ((1.0 - ab) * cs[i] + ab * b);
     }
     out[3] = a_s + ab * (1.0 - a_s);

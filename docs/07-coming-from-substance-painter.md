@@ -44,4 +44,4 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Lighting uses built-in procedural environments rather than HDRI files.
 - Mask levels (black, white, gamma, invert) live on the mask in Properties - Layer.
 - Not here yet: the clone, smudge and projection tools, layer filters and effects, anchor points,
-  non-separable blend modes (hue, saturation, colour, luminosity), pen pressure, and path tracing.
+  pen pressure, and path tracing.

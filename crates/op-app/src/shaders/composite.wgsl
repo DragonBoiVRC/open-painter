@@ -1,5 +1,5 @@
 // open-painter: layer compositor. One pass composites one layer over a backdrop.
-// Same math as op-core/src/blend.rs (W3C compositing, separable blend modes);
+// Same math as op-core/src/blend.rs (W3C compositing, separable and non-separable blend modes);
 // a headless test cross-checks the two.
 //
 // All textures are premultiplied. Pass dst = over(backdrop, source * opacity * mask).
@@ -53,6 +53,41 @@ fn vs_main(@builtin(vertex_index) i: u32) -> FsIn {
     return o;
 }
 
+fn lum(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.3, 0.59, 0.11));
+}
+
+fn clip_color(c: vec3<f32>) -> vec3<f32> {
+    let l = lum(c);
+    let n = min(c.r, min(c.g, c.b));
+    let x = max(c.r, max(c.g, c.b));
+    var o = c;
+    if (n < 0.0) {
+        o = l + (o - l) * l / (l - n);
+    }
+    if (x > 1.0) {
+        o = l + (o - l) * (1.0 - l) / (x - l);
+    }
+    return o;
+}
+
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    return clip_color(c + (l - lum(c)));
+}
+
+fn sat(c: vec3<f32>) -> f32 {
+    return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+
+fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    if (mx > mn) {
+        return (c - mn) * s / (mx - mn);
+    }
+    return vec3<f32>(0.0);
+}
+
 fn blend_mode(cb: vec3<f32>, cs: vec3<f32>, mode: u32) -> vec3<f32> {
     switch mode {
         case 1u: { return cb * cs; }
@@ -88,6 +123,10 @@ fn blend_mode(cb: vec3<f32>, cs: vec3<f32>, mode: u32) -> vec3<f32> {
         case 15u: {
             return select(min(cb / max(cs, vec3<f32>(1e-6)), vec3<f32>(1.0)), vec3<f32>(1.0), cs <= vec3<f32>(0.0));
         }
+        case 16u: { return set_lum(set_sat(cs, sat(cb)), lum(cb)); }
+        case 17u: { return set_lum(set_sat(cb, sat(cs)), lum(cb)); }
+        case 18u: { return set_lum(cs, lum(cb)); }
+        case 19u: { return set_lum(cb, lum(cs)); }
         default: { return cs; }
     }
 }

@@ -171,10 +171,14 @@ pub enum BlendMode {
     LinearBurn,
     Exclusion,
     Divide,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
 }
 
 impl BlendMode {
-    pub const ALL: [BlendMode; 16] = [
+    pub const ALL: [BlendMode; 20] = [
         BlendMode::Normal,
         BlendMode::Multiply,
         BlendMode::Screen,
@@ -191,6 +195,10 @@ impl BlendMode {
         BlendMode::LinearBurn,
         BlendMode::Exclusion,
         BlendMode::Divide,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
     ];
 
     pub fn name(self) -> &'static str {
@@ -211,6 +219,10 @@ impl BlendMode {
             BlendMode::LinearBurn => "Linear burn",
             BlendMode::Exclusion => "Exclusion",
             BlendMode::Divide => "Divide",
+            BlendMode::Hue => "Hue",
+            BlendMode::Saturation => "Saturation",
+            BlendMode::Color => "Color",
+            BlendMode::Luminosity => "Luminosity",
         }
     }
 
