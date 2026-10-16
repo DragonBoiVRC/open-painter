@@ -26,10 +26,12 @@ maps what you know onto what is here, and says plainly what is not here yet.
 | Brush size and hardness | Ctrl + right drag, or `[` and `]` for size |
 | Turn the environment | Shift + right drag |
 | Paint / erase | `P` / `E` or `1` / `2` |
+| Smudge / clone / projection / fill | `S` / `K` / `J` / `G` or `3` / `4` / `5` / `6` (Ctrl+click sets the clone source) |
 | Straight line | Shift + click after a stroke |
 | Symmetry | `L` toggles it; pick the axis in Properties - Paint |
-| Pick colour from the model | `I` |
-| Cycle base colour / roughness / metallic views | `C` |
+| Pick colour from the model / every channel | `I` / `Shift+I` |
+| Cycle base colour / roughness / metallic / emissive / opacity views | `C` |
+| Show the mesh edges | `W` |
 | Hide all panels / show them again | Tab |
 | 3D + 2D / 3D only / show 2D | F1 / F3 / F4 |
 | Frame the model | `F` |
