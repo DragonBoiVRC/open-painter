@@ -95,6 +95,7 @@ fn layer(name: &str, base: [f32; 3], metallic: Option<f32>, roughness: Option<f3
         blend: BlendMode::Normal,
         mask: None,
         adjust: Default::default(),
+        filters: Vec::new(),
         kind: NodeKind::Fill(FillParams { base: Some(base), metallic, roughness, ..Default::default() }),
     }
 }
@@ -121,6 +122,7 @@ fn group(name: &str, children: Vec<Node>) -> Node {
         blend: BlendMode::Normal,
         mask: None,
         adjust: Default::default(),
+        filters: Vec::new(),
         kind: NodeKind::Group { children },
     }
 }

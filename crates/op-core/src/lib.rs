@@ -564,6 +564,47 @@ impl MaskAdjust {
     }
 }
 
+/// A filter applied to what a paint layer or group puts down, before it is blended. Filters run in
+/// the order they are listed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Filter {
+    /// Soften everything the layer puts down; `radius` is in texels.
+    Blur { radius: f32 },
+    /// Unsharp mask: adds `amount` times the difference from a blur of `radius` texels.
+    Sharpen { amount: f32, radius: f32 },
+    /// Flip every colour and value the layer puts down (1 - x).
+    Invert,
+    /// Stretch the input range `black..white` to 0..1 with `gamma`, on colours and values alike.
+    Levels { black: f32, white: f32, gamma: f32 },
+}
+
+impl Filter {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Filter::Blur { .. } => "Blur",
+            Filter::Sharpen { .. } => "Sharpen",
+            Filter::Invert => "Invert",
+            Filter::Levels { .. } => "Levels",
+        }
+    }
+
+    /// A new filter of each kind with its default settings.
+    pub fn defaults() -> [Filter; 4] {
+        [Filter::Blur { radius: 4.0 }, Filter::Sharpen { amount: 1.0, radius: 3.0 }, Filter::Invert, Filter::Levels { black: 0.0, white: 1.0, gamma: 1.0 }]
+    }
+
+    /// The same filter with anything non-finite replaced and every setting clamped to its range.
+    pub fn sanitized(self) -> Self {
+        let f = |v: f32, d: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        match self {
+            Filter::Blur { radius } => Filter::Blur { radius: f(radius, 0.0, 0.0, 64.0) },
+            Filter::Sharpen { amount, radius } => Filter::Sharpen { amount: f(amount, 0.0, 0.0, 8.0), radius: f(radius, 2.0, 0.5, 64.0) },
+            Filter::Invert => Filter::Invert,
+            Filter::Levels { black, white, gamma } => Filter::Levels { black: f(black, 0.0, 0.0, 1.0), white: f(white, 1.0, 0.0, 1.0), gamma: f(gamma, 1.0, 0.1, 10.0) },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     /// Owns paintable base/metal/rough textures.
@@ -585,6 +626,9 @@ pub struct Node {
     /// Colour correction of what this layer (or group) puts down.
     #[serde(default)]
     pub adjust: ColorAdjust,
+    /// Filters on paint layers and groups (fill layers are constants, so there is nothing to filter).
+    #[serde(default)]
+    pub filters: Vec<Filter>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -758,6 +802,7 @@ impl Document {
             mask: None,
             kind,
             adjust: ColorAdjust::default(),
+            filters: Vec::new(),
         };
         let list = match parent.and_then(|p| self.find_mut(p)) {
             Some(Node { kind: NodeKind::Group { children }, .. }) => children,
@@ -1208,5 +1253,29 @@ mod tests {
         assert_eq!(d, before);
         d.find_mut(a).unwrap().opacity = 0.5;
         assert_ne!(d, before);
+    }
+
+    #[test]
+    fn filters_round_trip_and_old_projects_load_without_them() {
+        let (mut d, a, ..) = doc_abc();
+        d.find_mut(a).unwrap().filters = vec![Filter::Blur { radius: 3.0 }, Filter::Invert, Filter::Levels { black: 0.1, white: 0.9, gamma: 1.2 }];
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d);
+        // A project written before filters existed has no "filters" key.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        for n in v["nodes"].as_array_mut().unwrap() {
+            n.as_object_mut().unwrap().remove("filters");
+        }
+        let old: Document = serde_json::from_value(v).unwrap();
+        assert!(old.find(a).unwrap().filters.is_empty());
+    }
+
+    #[test]
+    fn filter_settings_are_clamped_and_nan_is_harmless() {
+        assert_eq!(Filter::Blur { radius: f32::NAN }.sanitized(), Filter::Blur { radius: 0.0 });
+        assert_eq!(Filter::Blur { radius: 1e9 }.sanitized(), Filter::Blur { radius: 64.0 });
+        assert_eq!(Filter::Sharpen { amount: -3.0, radius: 0.0 }.sanitized(), Filter::Sharpen { amount: 0.0, radius: 0.5 });
+        assert_eq!(Filter::Levels { black: f32::INFINITY, white: 2.0, gamma: 0.0 }.sanitized(), Filter::Levels { black: 0.0, white: 1.0, gamma: 0.1 });
     }
 }

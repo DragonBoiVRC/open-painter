@@ -9,7 +9,7 @@ use crate::images::{dummy_image, GpuImage, SharedImages};
 use crate::normal_gpu::NORMAL_FORMAT;
 use crate::paint::{Layer, NodeGpu, BASE_FORMAT, VALUE_FORMAT};
 use eframe::egui_wgpu::wgpu::{self, util::DeviceExt};
-use op_core::{srgb_to_linear, Document, FillParams, Node, NodeId, NodeKind, Slot};
+use op_core::{srgb_to_linear, Document, Filter, FillParams, Node, NodeId, NodeKind, Slot};
 use std::collections::HashMap;
 
 #[repr(C)]
@@ -28,6 +28,16 @@ struct Params {
     adj: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FilterParams {
+    kind: [u32; 4],
+    v: [f32; 4],
+}
+
+/// The most filters one layer applies, whatever a project file asks for.
+const MAX_FILTERS: usize = 16;
+
 enum Src<'a> {
     Fill(&'a FillParams),
     Tex(&'a Layer),
@@ -35,6 +45,8 @@ enum Src<'a> {
 
 pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
+    filter_pipeline: wgpu::RenderPipeline,
+    filter_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
     /// 1x1 stand-ins bound when a pass has no source texture / mask.
     dummy: Layer,
@@ -121,8 +133,50 @@ impl Compositor {
             multiview_mask: None,
             cache: None,
         });
+        let filter_tex = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let mut filter_entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        }];
+        filter_entries.extend((1..=9).map(filter_tex));
+        let filter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("filter_layout"), entries: &filter_entries });
+        let filter_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/filter.wgsl"));
+        let filter_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("filter_pl"),
+            bind_group_layouts: &[Some(&filter_layout)],
+            immediate_size: 0,
+        });
+        let filter_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("filter"),
+            layout: Some(&filter_pl),
+            vertex: wgpu::VertexState { module: &filter_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &filter_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(NORMAL_FORMAT)],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             pipeline,
+            filter_pipeline,
+            filter_layout,
             layout,
             dummy: Layer::new(device, 1),
             dummy_mask: crate::paint::make_mask_texture(device, 1),
@@ -196,12 +250,20 @@ impl Compositor {
             match &node.kind {
                 NodeKind::Paint => {
                     let Some(content) = store.get(&node.id).and_then(|g| g.content.as_ref()) else { continue };
-                    self.pass(device, encoder, &back, &front, Src::Tex(content), node, mask);
+                    let filtered = self.filtered(device, encoder, content, &node.filters);
+                    self.pass(device, encoder, &back, &front, Src::Tex(filtered.as_ref().unwrap_or(content)), node, mask);
+                    if let Some(f) = filtered {
+                        self.pool.push(f);
+                    }
                 }
                 NodeKind::Fill(f) => self.pass(device, encoder, &back, &front, Src::Fill(f), node, mask),
                 NodeKind::Group { children } => {
                     let result = self.composite_nodes(device, encoder, children, store);
-                    self.pass(device, encoder, &back, &front, Src::Tex(&result), node, mask);
+                    let filtered = self.filtered(device, encoder, &result, &node.filters);
+                    self.pass(device, encoder, &back, &front, Src::Tex(filtered.as_ref().unwrap_or(&result)), node, mask);
+                    if let Some(f) = filtered {
+                        self.pool.push(f);
+                    }
                     self.pool.push(result);
                 }
             }
@@ -209,6 +271,91 @@ impl Compositor {
         }
         self.pool.push(front);
         back
+    }
+
+    /// `input` run through `filters` in order, or `None` if there is nothing to do.
+    fn filtered(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, input: &Layer, filters: &[Filter]) -> Option<Layer> {
+        let mut current: Option<Layer> = None;
+        for f in filters.iter().take(MAX_FILTERS).map(|f| f.sanitized()) {
+            let passes: Vec<(u32, [f32; 4])> = match f {
+                Filter::Blur { radius } if radius < 0.5 => continue,
+                Filter::Blur { radius } => vec![(0, [radius, 1.0, 0.0, 0.0]), (0, [radius, 0.0, 1.0, 0.0])],
+                Filter::Sharpen { amount, .. } if amount <= 0.0 => continue,
+                Filter::Sharpen { amount, radius } => vec![(0, [radius, 1.0, 0.0, 0.0]), (0, [radius, 0.0, 1.0, 0.0]), (1, [amount, 0.0, 0.0, 0.0])],
+                Filter::Invert => vec![(2, [0.0; 4])],
+                Filter::Levels { black, white, gamma } => {
+                    if black == 0.0 && white == 1.0 && gamma == 1.0 {
+                        continue;
+                    }
+                    vec![(3, [black, white, gamma, 0.0])]
+                }
+            };
+            let start = current.take();
+            let source = start.as_ref().unwrap_or(input);
+            let dst = self.acquire(device, encoder);
+            if let Filter::Sharpen { .. } = f {
+                // Blur a copy along x then y (blur ping-pongs through `tmp`), then combine with the original.
+                let tmp = self.acquire(device, encoder);
+                let blurred = self.acquire(device, encoder);
+                self.filter_pass(device, encoder, source, source, &tmp, passes[0]);
+                self.filter_pass(device, encoder, &tmp, &tmp, &blurred, passes[1]);
+                self.filter_pass(device, encoder, source, &blurred, &dst, passes[2]);
+                self.pool.push(tmp);
+                self.pool.push(blurred);
+            } else if passes.len() == 2 {
+                let tmp = self.acquire(device, encoder);
+                self.filter_pass(device, encoder, source, source, &tmp, passes[0]);
+                self.filter_pass(device, encoder, &tmp, &tmp, &dst, passes[1]);
+                self.pool.push(tmp);
+            } else {
+                self.filter_pass(device, encoder, source, source, &dst, passes[0]);
+            }
+            if let Some(old) = start {
+                self.pool.push(old);
+            }
+            current = Some(dst);
+        }
+        current
+    }
+
+    fn filter_pass(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, a: &Layer, b: &Layer, dst: &Layer, pass: (u32, [f32; 4])) {
+        let params = FilterParams { kind: [pass.0, 0, 0, 0], v: pass.1 };
+        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("filter_params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let (av, bv) = (a.views(), b.views());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("filter_bind"),
+            layout: &self.filter_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&av[0]) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&av[1]) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&av[2]) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&av[3]) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&av[4]) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&bv[0]) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&bv[1]) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&bv[2]) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&bv[3]) },
+            ],
+        });
+        let dv = dst.views();
+        let ops = wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store };
+        let attachments = dv.each_ref().map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops }));
+        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("filter_pass"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        rp.set_pipeline(&self.filter_pipeline);
+        rp.set_bind_group(0, &bind, &[]);
+        rp.draw(0..3, 0..1);
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -1020,6 +1020,53 @@ mod tests {
         assert!(px(0) > 0.95 && px(1) < 0.05 && px(2) < 0.05 && px(3) > 0.95, "got rgba {} {} {} {}", px(0), px(1), px(2), px(3));
     }
 
+    /// Layer filters reshape what a paint layer puts down: blur spreads it, invert flips it,
+    /// levels remap it, and the stored paint is left alone.
+    #[test]
+    fn layer_filters_change_the_composite_not_the_paint() {
+        use op_core::Filter;
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let stamp = dab(SIZE as f32 / 2.0, 24.0, 0.8, [0.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let stats = |rig: &Rig| {
+            let m = rig.metal();
+            let covered = m.chunks_exact(2).filter(|t| t[1] > 0).count();
+            let solid = m.chunks_exact(2).filter(|t| t[1] > 240);
+            let (n, sum) = solid.fold((0u32, 0u32), |(n, s), t| (n + 1, s + (t[0] as u32 * 255 / t[1] as u32)));
+            (covered, if n == 0 { 0.0 } else { sum as f32 / n as f32 / 255.0 })
+        };
+        let (plain_cover, plain_value) = stats(&rig);
+        assert!(plain_cover > 0 && (plain_value - 0.8).abs() < 0.03, "unfiltered: {plain_cover} texels at {plain_value}");
+
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Blur { radius: 10.0 }];
+        rig.run(&doc, &[]);
+        let (blur_cover, _) = stats(&rig);
+        assert!(blur_cover as f32 > plain_cover as f32 * 1.15, "blur did not spread the paint: {plain_cover} -> {blur_cover}");
+
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Invert];
+        rig.run(&doc, &[]);
+        let (inv_cover, inv_value) = stats(&rig);
+        assert_eq!(inv_cover, plain_cover, "invert must not change coverage");
+        assert!((inv_value - 0.2).abs() < 0.03, "inverted value {inv_value}");
+
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Levels { black: 0.0, white: 0.5, gamma: 1.0 }];
+        rig.run(&doc, &[]);
+        let (_, lv_value) = stats(&rig);
+        assert!(lv_value > 0.97, "levels with white at 0.5 should clip 0.8 to 1, got {lv_value}");
+
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Sharpen { amount: 2.0, radius: 4.0 }];
+        rig.run(&doc, &[]);
+        let (sharp_cover, _) = stats(&rig);
+        assert!(sharp_cover > 0);
+
+        doc.find_mut(layer).unwrap().filters.clear();
+        rig.run(&doc, &[]);
+        assert_eq!(stats(&rig).0, plain_cover, "the stored paint changed");
+    }
+
     #[test]
     fn projective_brush_paints_visible_side_only_and_undoes() {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };

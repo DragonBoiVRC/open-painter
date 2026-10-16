@@ -1,7 +1,7 @@
 //! "Properties - Layer": name, blending, fill values, mask and generator of the selected layer.
 
 use crate::{builtin_kinds, App, GenAction, Target};
-use op_core::{BlendMode, Generator, Mask, NodeKind};
+use op_core::{BlendMode, Filter, Generator, Mask, NodeKind};
 
 impl App {
     pub(crate) fn properties_panel(&mut self, ui: &mut egui::Ui) {
@@ -34,6 +34,12 @@ impl App {
                     changed = true;
                 }
             });
+
+            if !matches!(node.kind, NodeKind::Fill(_)) {
+                egui::CollapsingHeader::new("Filters").id_salt("layer_filters").default_open(!node.filters.is_empty()).show(ui, |ui| {
+                    changed |= filters_ui(ui, &mut node.filters);
+                });
+            }
 
             if let NodeKind::Fill(f) = &mut node.kind {
                 ui.add_space(4.0);
@@ -186,4 +192,67 @@ impl App {
             ui.small(msg);
         }
     }
+}
+
+/// The filter list of a paint layer or group: each filter's settings, with reorder and remove buttons,
+/// and a menu to add more. Returns true if anything changed.
+fn filters_ui(ui: &mut egui::Ui, filters: &mut Vec<Filter>) -> bool {
+    let mut changed = false;
+    let mut remove = None;
+    let mut swap = None;
+    let count = filters.len();
+    for (i, f) in filters.iter_mut().enumerate() {
+        ui.push_id(i, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(f.name()).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("x").on_hover_text("Remove this filter").clicked() {
+                        remove = Some(i);
+                    }
+                    if ui.add_enabled(i + 1 < count, egui::Button::new("v").small()).on_hover_text("Run later").clicked() {
+                        swap = Some((i, i + 1));
+                    }
+                    if ui.add_enabled(i > 0, egui::Button::new("^").small()).on_hover_text("Run earlier").clicked() {
+                        swap = Some((i - 1, i));
+                    }
+                });
+            });
+            match f {
+                Filter::Blur { radius } => changed |= super::slider_row(ui, "Radius", radius, 0.0..=64.0).changed(),
+                Filter::Sharpen { amount, radius } => {
+                    changed |= super::slider_row(ui, "Amount", amount, 0.0..=4.0).changed();
+                    changed |= super::slider_row(ui, "Radius", radius, 0.5..=32.0).changed();
+                }
+                Filter::Invert => {
+                    super::hint(ui, "Flips colours and values (1 - x) where the layer has paint.");
+                }
+                Filter::Levels { black, white, gamma } => {
+                    changed |= super::slider_row(ui, "Black", black, 0.0..=1.0).changed();
+                    changed |= super::slider_row(ui, "White", white, 0.0..=1.0).changed();
+                    changed |= super::slider_row(ui, "Gamma", gamma, 0.2..=5.0).changed();
+                }
+            }
+            ui.separator();
+        });
+    }
+    if let Some(i) = remove {
+        filters.remove(i);
+        changed = true;
+    }
+    if let Some((a, b)) = swap {
+        filters.swap(a, b);
+        changed = true;
+    }
+    egui::ComboBox::from_id_salt("filter_add").selected_text("Add filter...").show_ui(ui, |ui| {
+        for f in Filter::defaults() {
+            if ui.selectable_label(false, f.name()).clicked() {
+                filters.push(f);
+                changed = true;
+            }
+        }
+    });
+    if filters.is_empty() {
+        super::hint(ui, "Filters reshape what this layer puts down before it is blended. They never change the paint itself.");
+    }
+    changed
 }

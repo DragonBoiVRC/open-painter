@@ -47,5 +47,6 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.
 - Brush alpha and stencils: pick an image from the texture library in Properties - Brush ("Image and stencil"). The Image stamp shapes each dab; a stencil is laid over the screen and paint only lands where it is bright. Tick "Move it in the viewport" to drag and scroll it into place.
 - Projection (J) paints the stencil picture onto the model through the brush, using the stencil placement above.
-- Not here yet: layer filters and effects, anchor points,
+- Filters (blur, sharpen, invert, levels) are listed under Properties - Layer for paint layers and groups; they reshape what the layer puts down without touching the paint. Fill layers have none, as they are constants.
+- Not here yet: further filters and effects (warp, directional blur, ...), anchor points,
   and path tracing.
