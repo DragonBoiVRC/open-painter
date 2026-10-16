@@ -176,3 +176,40 @@ fn fs_mask(i: VsOut) -> @location(0) vec4<f32> {
     if (a < 0.0) { discard; }
     return vec4<f32>(i.values.x, 0.0, 0.0, a);
 }
+
+// Smudge and clone stamps copy paint from another place on the surface: the point `color.xy`
+// pixels away on screen. `src_uv` is the UV of what the camera saw at each pixel (-1 where
+// nothing was drawn) and the other textures are the layer as it was before this batch of stamps.
+@group(1) @binding(0) var src_uv: texture_2d<f32>;
+@group(1) @binding(1) var src_base: texture_2d<f32>;
+@group(1) @binding(2) var src_metal: texture_2d<f32>;
+@group(1) @binding(3) var src_rough: texture_2d<f32>;
+@group(1) @binding(4) var src_height: texture_2d<f32>;
+@group(1) @binding(5) var src_samp: sampler;
+
+@fragment
+fn fs_smudge(i: VsOut) -> FsOut {
+    let a = stamp_alpha(i);
+    if (a < 0.0) { discard; }
+    let clip = sg.view_proj * vec4<f32>(i.world_pos, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let size = sg.viewport.xy;
+    let px = vec2<f32>((ndc.x * 0.5 + 0.5) * size.x, (0.5 - ndc.y * 0.5) * size.y);
+    let sp = px + i.color.xy;
+    if (sp.x < 0.0 || sp.y < 0.0 || sp.x >= size.x || sp.y >= size.y) { discard; }
+    let uv_dims = vec2<f32>(textureDimensions(src_uv));
+    let suv = textureLoad(src_uv, vec2<i32>(sp * uv_dims / size), 0).xy;
+    if (suv.x < -0.5) { discard; }
+    let t = suv - sg.tile.xy;
+    if (t.x < 0.0 || t.y < 0.0 || t.x > 1.0 || t.y > 1.0) { discard; }
+    let b = textureSampleLevel(src_base, src_samp, t, 0.0);
+    let m = textureSampleLevel(src_metal, src_samp, t, 0.0).rg;
+    let r = textureSampleLevel(src_rough, src_samp, t, 0.0).rg;
+    let h = textureSampleLevel(src_height, src_samp, t, 0.0).rg;
+    var o: FsOut;
+    o.base = b * (a * i.enables.x);
+    o.metal = vec4<f32>(m * (a * i.enables.y), 0.0, m.y * (a * i.enables.y));
+    o.rough = vec4<f32>(r * (a * i.enables.z), 0.0, r.y * (a * i.enables.z));
+    o.height = vec4<f32>(h * (a * i.enables.w), 0.0, h.y * (a * i.enables.w));
+    return o;
+}

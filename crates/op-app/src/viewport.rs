@@ -8,6 +8,7 @@ use op_mesh::{Mesh, Vertex};
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const UV_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -25,6 +26,9 @@ struct Offscreen {
     size: [u32; 2],
     color: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// UV of the surface at each pixel, for smudge and clone (see `uvbuf.wgsl`).
+    uv_view: wgpu::TextureView,
+    uv_depth_view: wgpu::TextureView,
     blit_bind: wgpu::BindGroup,
 }
 
@@ -132,6 +136,9 @@ pub(crate) fn apply_batch(
 
 pub struct ViewportGpu {
     pbr: wgpu::RenderPipeline,
+    uv_pipeline: wgpu::RenderPipeline,
+    /// A 1x1 "nothing drawn" UV buffer for when the 3D view is not drawn.
+    pub(crate) dummy_uv: wgpu::Texture,
     blit: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -292,6 +299,54 @@ impl ViewportGpu {
             cache: None,
         });
 
+        let uv_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/uvbuf.wgsl"));
+        let uv_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("uvbuf_pl"),
+            bind_group_layouts: &[Some(&globals_layout)],
+            immediate_size: 0,
+        });
+        let uv_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("uvbuf"),
+            layout: Some(&uv_pl),
+            vertex: wgpu::VertexState {
+                module: &uv_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attrs,
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &uv_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(UV_FORMAT.into())],
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let dummy_uv = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dummy_uv"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: UV_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blit_layout"),
             entries: &[
@@ -348,6 +403,8 @@ impl ViewportGpu {
 
         Self {
             pbr,
+            uv_pipeline,
+            dummy_uv,
             blit,
             blit_layout,
             sampler,
@@ -543,6 +600,26 @@ impl ViewportGpu {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+        let uv = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport_uv"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: UV_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let uv_depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewport_uv_depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
         let color_view = color.create_view(&Default::default());
         let blit_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("blit_bind"),
@@ -553,7 +630,14 @@ impl ViewportGpu {
             ],
         });
         self.offscreen =
-            Some(Offscreen { size, color, depth_view: depth.create_view(&Default::default()), blit_bind });
+            Some(Offscreen {
+                size,
+                color,
+                depth_view: depth.create_view(&Default::default()),
+                uv_view: uv.create_view(&Default::default()),
+                uv_depth_view: uv_depth.create_view(&Default::default()),
+                blit_bind,
+            });
     }
 
 
@@ -583,6 +667,7 @@ impl ViewportGpu {
             size_px: size,
             near_far: [globals.params[2], globals.params[3]],
             depth: &depth,
+            uv: &off.uv_view,
         };
         let bufs = match (&self.vbuf, &self.ibuf) {
             (Some(v), Some(i)) => Some((v, i)),
@@ -633,6 +718,45 @@ impl ViewportGpu {
                     pass.set_bind_group(1, paint.material_bind(), &[]);
                     pass.set_bind_group(2, preview, &[]);
                     pass.draw_indexed(first..first + count, 0, 0..1);
+                }
+            }
+        }
+        drop(pass);
+
+        // The UV buffer, for the next frame's smudge and clone stamps.
+        let mut uv_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("uvbuf_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &off.uv_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: -1.0, g: -1.0, b: 0.0, a: 0.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &off.uv_depth_view,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if let (Some(v), Some(i)) = (&self.vbuf, &self.ibuf) {
+            uv_pass.set_pipeline(&self.uv_pipeline);
+            uv_pass.set_bind_group(0, &self.globals_bind, &[]);
+            uv_pass.set_vertex_buffer(0, v.slice(..));
+            uv_pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint32);
+            for (set, unit) in self.sets.iter().enumerate() {
+                if self.hidden.get(set).copied().unwrap_or(false) {
+                    continue;
+                }
+                for &(first, count) in &unit.tile_ranges {
+                    if count > 0 {
+                        uv_pass.draw_indexed(first..first + count, 0, 0..1);
+                    }
                 }
             }
         }
@@ -787,6 +911,36 @@ mod tests {
 
     fn fill(base: Option<[f32; 3]>, metallic: Option<f32>, roughness: Option<f32>) -> NodeKind {
         NodeKind::Fill(FillParams { base, metallic, roughness, ..Default::default() })
+    }
+
+    /// A smudge stamp copies paint from the screen position its offset points at.
+    #[test]
+    fn smudge_copies_paint_from_the_offset_position() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let c = SIZE as f32 / 2.0;
+        let src = dab(c, 14.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![src] }]);
+        rig.run(&doc, &[]); // a frame to draw the UV buffer with the new camera state
+        let before = rig.metal().chunks_exact(2).filter(|t| t[1] > 128).count();
+        assert!(before > 0);
+
+        // A stamp 40 px to the right that reads from 40 px to its left, where the dab is.
+        let smudge = Stamp {
+            brush: [c + 40.0, c, 14.0, 1.0],
+            color: [-40.0, 0.0, 0.0, 0.0],
+            values: [0.0, 0.0, 1.0, 0.0],
+            enables: [0.0, 1.0, 0.0, 0.0],
+            shape: [0.0; 4],
+        };
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Smudge { layer, stamps: vec![smudge] }]);
+        let metal = rig.metal();
+        let after = metal.chunks_exact(2).filter(|t| t[1] > 128).count();
+        assert!(after as f32 > before as f32 * 1.6, "smudge copied nothing: {before} -> {after} covered texels");
+        let high = metal.chunks_exact(2).filter(|t| t[1] > 128 && t[0] > 200).count();
+        assert!(high as f32 > after as f32 * 0.9, "copied paint lost its value");
     }
 
     #[test]

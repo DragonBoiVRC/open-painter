@@ -44,5 +44,6 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Lighting uses built-in procedural environments rather than HDRI files.
 - Mask levels (black, white, gamma, invert) live on the mask in Properties - Layer.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
-- Not here yet: the clone, smudge and projection tools, layer filters and effects, anchor points,
+- Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.
+- Not here yet: the projection tool, layer filters and effects, anchor points,
   and path tracing.

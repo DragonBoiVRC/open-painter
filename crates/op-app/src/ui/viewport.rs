@@ -2,7 +2,7 @@
 
 use super::theme;
 use crate::viewport::{Globals, ViewportCallback};
-use crate::{srgb_for_display, App, PaintOp, View};
+use crate::{srgb_for_display, App, PaintOp, Tool, View};
 use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, UiBuilder};
 use egui_phosphor::regular as ph;
@@ -112,7 +112,13 @@ impl App {
         let modal_open = self.dialog.is_some() || self.confirm.is_some();
         let pick = resp.clicked() && mods.command && !alt && !modal_open;
         if let (true, Some(pos)) = (pick, resp.interact_pointer_pos()) {
-            self.pick_set_at(rect, pos);
+            if self.tool == Tool::Clone {
+                // Ctrl+click sets what the clone tool copies from.
+                self.clone_source = Some([(pos.x - rect.min.x) * ppp, (pos.y - rect.min.y) * ppp]);
+                self.status = "Clone source set: paint to copy from there.".into();
+            } else {
+                self.pick_set_at(rect, pos);
+            }
         }
         let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
@@ -127,10 +133,30 @@ impl App {
                             self.begin_line(a.px, ppp, layer, target);
                         }
                     }
-                    self.stroke_to(local, ppp, layer, target, &mut stamps);
-                    self.line_anchor = Some(crate::LineAnchor { px: local, layer, target, camera });
-                    stamp_target = Some((layer, target));
-                    ui.ctx().request_repaint();
+                    let copies = matches!(self.tool, Tool::Smudge | Tool::Clone);
+                    let blocked = if copies && target == crate::Target::Mask {
+                        Some("Smudge and clone work on layer content, not masks")
+                    } else if self.tool == Tool::Clone && !self.stroke.active {
+                        match self.clone_source.take() {
+                            Some(src) => {
+                                self.clone_offset = Some([src[0] - local[0], src[1] - local[1]]);
+                                None
+                            }
+                            None if self.clone_offset.is_none() => Some("Ctrl+click to choose where the clone tool copies from"),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(msg) = blocked {
+                        self.status = msg.into();
+                        self.stroke.active = false;
+                    } else {
+                        self.stroke_to(local, ppp, layer, target, &mut stamps);
+                        self.line_anchor = Some(crate::LineAnchor { px: local, layer, target, camera });
+                        stamp_target = Some((layer, target));
+                        ui.ctx().request_repaint();
+                    }
                 }
                 Err(msg) => {
                     self.status = msg.to_string();
@@ -142,7 +168,11 @@ impl App {
 
         let mut ops = Vec::new();
         if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
-            ops.push(PaintOp::Stamps { layer, target, stamps });
+            if matches!(self.tool, Tool::Smudge | Tool::Clone) {
+                ops.push(PaintOp::Smudge { layer, stamps });
+            } else {
+                ops.push(PaintOp::Stamps { layer, target, stamps });
+            }
         }
         let batches = self.take_batches(ops);
         if batches.iter().any(|b| !b.ops.is_empty()) {
@@ -193,6 +223,23 @@ impl App {
             let core = r * self.brush.hardness;
             if core > 3.0 {
                 p.circle_stroke(pos, core, Stroke::new(1.0, Color32::from_white_alpha(70)));
+            }
+        }
+
+        // Clone tool: mark where the paint is being copied from.
+        if self.tool == Tool::Clone {
+            let to_pos = |px: [f32; 2]| Pos2::new(rect.min.x + px[0] / ppp, rect.min.y + px[1] / ppp);
+            let marker = match (self.clone_source, self.clone_offset, resp.hover_pos()) {
+                (Some(src), _, _) => Some(to_pos(src)),
+                (None, Some(off), Some(h)) => Some(h + egui::vec2(off[0], off[1]) / ppp),
+                _ => None,
+            };
+            if let Some(m) = marker {
+                let p = ui.painter().with_clip_rect(rect);
+                p.circle_stroke(m, 6.0, Stroke::new(3.0, Color32::from_black_alpha(110)));
+                p.circle_stroke(m, 6.0, Stroke::new(1.5, Color32::from_rgb(0xff, 0xd0, 0x40)));
+                p.line_segment([m - egui::vec2(10.0, 0.0), m + egui::vec2(10.0, 0.0)], Stroke::new(1.0, Color32::from_rgb(0xff, 0xd0, 0x40)));
+                p.line_segment([m - egui::vec2(0.0, 10.0), m + egui::vec2(0.0, 10.0)], Stroke::new(1.0, Color32::from_rgb(0xff, 0xd0, 0x40)));
             }
         }
 

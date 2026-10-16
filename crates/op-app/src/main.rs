@@ -61,6 +61,8 @@ struct Brush {
     /// Pen pressure scales the size and/or the opacity of each stamp.
     pressure_size: bool,
     pressure_opacity: bool,
+    /// How far back along the stroke the smudge picks paint up from, in brush radii.
+    smudge_distance: f32,
 }
 
 impl Default for Brush {
@@ -79,6 +81,7 @@ impl Default for Brush {
             opacity_jitter: 0.0,
             pressure_size: true,
             pressure_opacity: false,
+            smudge_distance: 0.4,
         }
     }
 }
@@ -129,6 +132,10 @@ struct PaintChannels {
 enum Tool {
     Paint,
     Erase,
+    /// Drags paint along the stroke.
+    Smudge,
+    /// Copies paint from another place on the surface.
+    Clone,
 }
 
 #[derive(Default)]
@@ -315,6 +322,10 @@ struct App {
     rng: std::cell::Cell<u32>,
     /// Pen pressure 0..1 as last reported by the input device; 1 for a mouse.
     pressure: f32,
+    /// Clone tool: the screen position (pixels) to copy from, waiting for the next stroke to anchor to.
+    clone_source: Option<[f32; 2]>,
+    /// Clone tool: where the source lies relative to the brush, in screen pixels.
+    clone_offset: Option<[f32; 2]>,
     env: Environment,
     /// Recently used projects, newest first.
     recent: Vec<PathBuf>,
@@ -445,6 +456,8 @@ impl App {
             brush: Brush::default(),
             rng: std::cell::Cell::new(0x9e37_79b9),
             pressure: 1.0,
+            clone_source: None,
+            clone_offset: None,
             env: Environment::default(),
             recent: files::load_recent(),
             symmetry: 0,
@@ -1368,9 +1381,12 @@ impl App {
         if b.opacity_jitter > 0.0 {
             opacity_scale *= 1.0 - b.opacity_jitter * (rnd() * 0.5 + 0.5);
         }
-        let shape = [angle, b.shape as f32, next_random(&self.rng) * 100.0, self.symmetry as f32];
+        let copies = matches!(self.tool, Tool::Smudge | Tool::Clone);
+        // Smudge and clone read from a point on screen, which a mirrored stroke would get wrong.
+        let symmetry = if copies { 0 } else { self.symmetry };
+        let shape = [angle, b.shape as f32, next_random(&self.rng) * 100.0, symmetry as f32];
         // Where the symmetry plane sits on its axis: the middle of the model.
-        let plane = match self.symmetry {
+        let plane = match symmetry {
             0 => 0.0,
             axis => {
                 let (lo, hi) = self.mesh.bounds();
@@ -1381,6 +1397,19 @@ impl App {
         let c = &self.channels;
         let erase = self.tool == Tool::Erase;
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        if copies && target == Target::Content {
+            let offset = match self.tool {
+                Tool::Clone => self.clone_offset.unwrap_or([0.0; 2]),
+                _ => [-dir[0] * brush[2] * b.smudge_distance, -dir[1] * brush[2] * b.smudge_distance],
+            };
+            return Stamp {
+                brush,
+                color: [offset[0], offset[1], 0.0, plane],
+                values: [0.0, 0.0, opacity, 0.0],
+                enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
+                shape,
+            };
+        }
         match target {
             // Masks: paint white to reveal, erase to black to hide.
             Target::Mask => Stamp {
@@ -2014,12 +2043,14 @@ impl App {
             self.symmetry = if self.symmetry == 0 { 1 } else { 0 };
             self.status = if self.symmetry == 0 { "Symmetry off".into() } else { "Symmetry on: strokes are mirrored across X".into() };
         }
-        let (smaller, larger, paint, erase, frame) = ui.input(|i| {
+        let (smaller, larger, paint, erase, smudge, clone, frame) = ui.input(|i| {
             (
                 i.key_pressed(Key::OpenBracket),
                 i.key_pressed(Key::CloseBracket),
                 i.key_pressed(Key::P) || i.key_pressed(Key::Num1),
                 i.key_pressed(Key::E) || i.key_pressed(Key::Num2),
+                i.key_pressed(Key::S) && !i.modifiers.any() || i.key_pressed(Key::Num3),
+                i.key_pressed(Key::K) && !i.modifiers.any() || i.key_pressed(Key::Num4),
                 i.key_pressed(Key::F) && !i.modifiers.any(),
             )
         });
@@ -2034,6 +2065,12 @@ impl App {
         }
         if erase {
             self.tool = Tool::Erase;
+        }
+        if smudge {
+            self.tool = Tool::Smudge;
+        }
+        if clone {
+            self.tool = Tool::Clone;
         }
         if frame {
             self.frame_model();

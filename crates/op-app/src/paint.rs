@@ -60,6 +60,8 @@ pub struct StampView<'a> {
     pub size_px: [u32; 2],
     pub near_far: [f32; 2],
     pub depth: &'a wgpu::TextureView,
+    /// The UV the camera saw at each pixel (Rg32Float, -1 where nothing was drawn).
+    pub uv: &'a wgpu::TextureView,
 }
 
 pub struct MeshBuffers<'a> {
@@ -82,6 +84,8 @@ pub enum PaintOp {
     /// Snapshot the target so the stroke that follows can be undone.
     BeginStroke { layer: NodeId, target: Target },
     Stamps { layer: NodeId, target: Target, stamps: Vec<Stamp> },
+    /// Stamps that copy paint from elsewhere on the surface (smudge and clone); content only.
+    Smudge { layer: NodeId, stamps: Vec<Stamp> },
     /// Stamps drawn directly in UV space: `brush` is (u, v, radius in UV units, hardness).
     Stamps2d { layer: NodeId, target: Target, stamps: Vec<Stamp> },
     /// Reset the target (content: transparent; mask: its initial value). Pair with BeginStroke.
@@ -222,6 +226,10 @@ impl StrokeSnap {
 pub struct PaintGpu {
     pipeline_content: wgpu::RenderPipeline,
     pipeline_mask: wgpu::RenderPipeline,
+    pipeline_smudge: wgpu::RenderPipeline,
+    smudge_layout: wgpu::BindGroupLayout,
+    /// A copy of the layer being smudged, so stamps read what was there before them.
+    scratch: Option<Layer>,
     /// The same brushes drawn directly in UV space (the 2D view).
     pipeline_content_2d: wgpu::RenderPipeline,
     pipeline_mask_2d: wgpu::RenderPipeline,
@@ -369,6 +377,69 @@ impl PaintGpu {
         let pipeline_content =
             make("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_mask = make("fs_mask", &[target(MASK_FORMAT, straight)]);
+        let smudge_tex = |binding, filterable| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let smudge_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("smudge_layout"),
+            entries: &[
+                smudge_tex(0, false),
+                smudge_tex(1, true),
+                smudge_tex(2, true),
+                smudge_tex(3, true),
+                smudge_tex(4, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let smudge_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("smudge_pl"),
+            bind_group_layouts: &[Some(&stamp_layout), Some(&smudge_layout)],
+            immediate_size: 0,
+        });
+        let pipeline_smudge = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("fs_smudge"),
+            layout: Some(&smudge_pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &vertex_attrs,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Stamp>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &instance_attrs,
+                    }),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_smudge"),
+                compilation_options: Default::default(),
+                targets: &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let shader_2d = device.create_shader_module(wgpu::include_wgsl!("shaders/stamp2d.wgsl"));
         let pl_2d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("stamp2d_pl"), bind_group_layouts: &[], immediate_size: 0 });
@@ -425,6 +496,9 @@ impl PaintGpu {
         Self {
             pipeline_content,
             pipeline_mask,
+            pipeline_smudge,
+            smudge_layout,
+            scratch: None,
             pipeline_content_2d,
             pipeline_mask_2d,
             stamp_layout,
@@ -582,6 +656,7 @@ impl PaintGpu {
         self.redo.clear();
         self.output = Layer::new(device, size);
         self.output.clear(encoder);
+        self.scratch = None;
         self.normal.resize(device, size);
         self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
         self.compositor.set_size(size);
@@ -820,6 +895,76 @@ impl PaintGpu {
                     pass.set_pipeline(pipeline);
                     pass.set_vertex_buffer(0, self.instance_buf.slice(offset..offset + n as u64 * stride));
                     pass.draw(0..6, 0..n as u32);
+                    self.cursor += n;
+                    dirty = true;
+                }
+                PaintOp::Smudge { layer, stamps } => {
+                    let Some(mesh) = &mesh else { continue };
+                    let Some(c) = self.store.get(layer).and_then(|g| g.content.as_ref()) else { continue };
+                    let n = stamps.len().min(MAX_STAMPS - self.cursor);
+                    if n == 0 {
+                        continue;
+                    }
+                    if self.scratch.as_ref().is_none_or(|s| s.size != self.size) {
+                        self.scratch = Some(Layer::new(device, self.size));
+                    }
+                    let scratch = self.scratch.as_ref().unwrap();
+                    scratch.copy_from(encoder, c);
+                    let sv = scratch.views();
+                    let smudge_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("smudge_bind"),
+                        layout: &self.smudge_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view.uv) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sv[0]) },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&sv[1]) },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&sv[2]) },
+                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&sv[3]) },
+                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                        ],
+                    });
+                    let views = c.views()[..4].to_vec();
+                    let stride = std::mem::size_of::<Stamp>() as u64;
+                    let offset = self.cursor as u64 * stride;
+                    queue.write_buffer(&self.instance_buf, offset, bytemuck::cast_slice(&stamps[..n]));
+                    queue.write_buffer(
+                        &self.globals_buf,
+                        0,
+                        bytemuck::bytes_of(&StampGlobals {
+                            view_proj: view.view_proj,
+                            camera_pos: view.camera_pos,
+                            viewport: [view.size_px[0] as f32, view.size_px[1] as f32, view.near_far[0], view.near_far[1]],
+                            tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
+                        }),
+                    );
+                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("stamp_bind"),
+                        layout: &self.stamp_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: self.globals_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view.depth) },
+                        ],
+                    });
+                    let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+                    let attachments: Vec<_> = views
+                        .iter()
+                        .map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: load }))
+                        .collect();
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("smudge_pass"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&self.pipeline_smudge);
+                    pass.set_bind_group(0, &bind, &[]);
+                    pass.set_bind_group(1, &smudge_bind, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_vertex_buffer(1, self.instance_buf.slice(offset..offset + n as u64 * stride));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(mesh.first_index..mesh.first_index + mesh.index_count, 0, 0..n as u32);
                     self.cursor += n;
                     dirty = true;
                 }

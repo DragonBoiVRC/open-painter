@@ -36,7 +36,11 @@ impl App {
         let mut stamps = Vec::new();
         let mut stamp_target = None;
         let modal_open = self.dialog.is_some() || self.confirm.is_some();
-        let painting = resp.is_pointer_button_down_on() && primary_down && !mods.alt && !mods.command && !modal_open;
+        let copies = matches!(self.tool, crate::Tool::Smudge | crate::Tool::Clone);
+        if copies && resp.is_pointer_button_down_on() && primary_down {
+            self.status = "Smudge and clone work in the 3D view".into();
+        }
+        let painting = resp.is_pointer_button_down_on() && primary_down && !mods.alt && !mods.command && !modal_open && !copies;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {

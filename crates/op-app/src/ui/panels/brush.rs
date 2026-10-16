@@ -11,12 +11,19 @@ impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Brush", |ui| {
             ui.horizontal(|ui| {
-                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase")] {
+                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone")] {
                     if ui.selectable_label(self.tool == tool, label).clicked() {
                         self.tool = tool;
                     }
                 }
             });
+            if self.tool == Tool::Smudge {
+                slider_row(ui, "Smear distance", &mut self.brush.smudge_distance, 0.05..=1.5);
+                hint(ui, "Drags the paint under the brush along the stroke. Works on the layer's content in the 3D view.");
+            }
+            if self.tool == Tool::Clone {
+                hint(ui, "Ctrl+click to choose where to copy from, then paint. The offset stays until you pick a new source.");
+            }
             slider_row(ui, "Size", &mut self.brush.radius_pts, 2.0..=300.0);
             slider_row(ui, "Hardness", &mut self.brush.hardness, 0.0..=1.0);
             slider_row(ui, "Opacity", &mut self.brush.opacity, 0.0..=1.0);

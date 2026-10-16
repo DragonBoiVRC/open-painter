@@ -240,6 +240,12 @@ impl App {
                     if tool_button(ui, ph::ERASER, "Erase (E)", self.tool == Tool::Erase).clicked() {
                         self.tool = Tool::Erase;
                     }
+                    if tool_button(ui, ph::HAND_POINTING, "Smudge (S)", self.tool == Tool::Smudge).clicked() {
+                        self.tool = Tool::Smudge;
+                    }
+                    if tool_button(ui, ph::COPY_SIMPLE, "Clone (K): Ctrl+click sets the source", self.tool == Tool::Clone).clicked() {
+                        self.tool = Tool::Clone;
+                    }
                     ui.add_space(6.0);
                     ui.separator();
                     ui.add_space(6.0);

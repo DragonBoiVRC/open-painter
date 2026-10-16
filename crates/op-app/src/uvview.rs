@@ -283,12 +283,14 @@ impl ViewportGpu {
     pub fn apply_batches(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, batches: &[SetBatch]) {
         let queued = std::mem::take(&mut self.queued);
         let depth = self.dummy_depth.create_view(&Default::default());
+        let uv = self.dummy_uv.create_view(&Default::default());
         let view = crate::paint::StampView {
             view_proj: [[0.0; 4]; 4],
             camera_pos: [0.0; 4],
             size_px: [1, 1],
             near_far: [0.1, 10.0],
             depth: &depth,
+            uv: &uv,
         };
         for b in queued.iter().chain(batches) {
             crate::viewport::apply_batch(&mut self.sets, None, device, queue, encoder, b, &view);
