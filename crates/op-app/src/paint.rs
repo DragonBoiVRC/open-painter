@@ -88,6 +88,10 @@ pub enum PaintOp {
     /// Snapshot the target so the stroke that follows can be undone.
     BeginStroke { layer: NodeId, target: Target },
     Stamps { layer: NodeId, target: Target, stamps: Vec<Stamp> },
+    /// Limit the stroke that follows `BeginStroke` to `opacity`: its stamps build up in a separate
+    /// buffer that is laid over the pre-stroke snapshot at that opacity. For masks, `mask_value` is
+    /// the value being painted (stamps paint 1 into the buffer to record coverage).
+    StrokeOpacity { layer: NodeId, target: Target, opacity: f32, mask_value: f32 },
     /// The eraser: stamps take coverage away from a layer's content. With `uv` the stamps are in
     /// UV space like `Stamps2d`.
     Erase { layer: NodeId, stamps: Vec<Stamp>, uv: bool },
@@ -230,12 +234,33 @@ impl StrokeSnap {
     }
 }
 
+/// A stroke whose opacity is capped (see `PaintOp::StrokeOpacity`).
+struct StrokeLimit {
+    layer: NodeId,
+    target: Target,
+    opacity: f32,
+    mask_value: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlendParams {
+    v: [f32; 4],
+}
+
 pub struct PaintGpu {
     pipeline_content: wgpu::RenderPipeline,
     pipeline_mask: wgpu::RenderPipeline,
     pipeline_erase: wgpu::RenderPipeline,
     pipeline_erase_2d: wgpu::RenderPipeline,
     pipeline_smudge: wgpu::RenderPipeline,
+    pipeline_resolve: wgpu::RenderPipeline,
+    resolve_layout: wgpu::BindGroupLayout,
+    pipeline_resolve_mask: wgpu::RenderPipeline,
+    resolve_mask_layout: wgpu::BindGroupLayout,
+    stroke_limit: Option<StrokeLimit>,
+    stroke_buf: Option<Layer>,
+    stroke_mask_buf: Option<wgpu::Texture>,
     smudge_layout: wgpu::BindGroupLayout,
     /// A copy of the layer being smudged, so stamps read what was there before them.
     scratch: Option<Layer>,
@@ -488,6 +513,55 @@ impl PaintGpu {
             cache: None,
         });
 
+        let plain_tex = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let params_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        };
+        let replace = |format| Some(wgpu::ColorTargetState::from(format));
+        let make_resolve = |label: &str, module: &wgpu::ShaderModule, entry: &str, layout: &wgpu::BindGroupLayout, targets: &[Option<wgpu::ColorTargetState>]| {
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState { module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+                fragment: Some(wgpu::FragmentState { module, entry_point: Some(entry), compilation_options: Default::default(), targets }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let mut resolve_entries = vec![params_entry];
+        resolve_entries.extend((1..=8).map(plain_tex));
+        let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("resolve_layout"), entries: &resolve_entries });
+        let resolve_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/strokeblend.wgsl"));
+        let pipeline_resolve = make_resolve(
+            "stroke_resolve",
+            &resolve_shader,
+            "fs_content",
+            &resolve_layout,
+            &[replace(BASE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT)],
+        );
+        let resolve_mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("resolve_mask_layout"),
+            entries: &[params_entry, plain_tex(1), plain_tex(2)],
+        });
+        let resolve_mask_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/strokeblend_mask.wgsl"));
+        let pipeline_resolve_mask = make_resolve("stroke_resolve_mask", &resolve_mask_shader, "fs_mask", &resolve_mask_layout, &[replace(MASK_FORMAT)]);
+
         let shader_2d = device.create_shader_module(wgpu::include_wgsl!("shaders/stamp2d.wgsl"));
         let pl_2d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("stamp2d_pl"), bind_group_layouts: &[], immediate_size: 0 });
         let make_2d = |entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
@@ -547,6 +621,13 @@ impl PaintGpu {
             pipeline_erase,
             pipeline_erase_2d,
             pipeline_smudge,
+            pipeline_resolve,
+            resolve_layout,
+            pipeline_resolve_mask,
+            resolve_mask_layout,
+            stroke_limit: None,
+            stroke_buf: None,
+            stroke_mask_buf: None,
             smudge_layout,
             scratch: None,
             images: None,
@@ -709,6 +790,9 @@ impl PaintGpu {
         self.output = Layer::new(device, size);
         self.output.clear(encoder);
         self.scratch = None;
+        self.stroke_limit = None;
+        self.stroke_buf = None;
+        self.stroke_mask_buf = None;
         self.normal.resize(device, size);
         self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
         self.compositor.set_size(size);
@@ -805,6 +889,84 @@ impl PaintGpu {
 
     /// Apply this frame's operations, then recomposite the layer stack if anything
     /// changed. Must run before the scene pass so the viewport shows the result at once.
+    /// True if stamps for `layer`/`target` should build up in the stroke buffer.
+    fn limits(&self, layer: &NodeId, target: Target) -> bool {
+        self.stroke_limit.as_ref().is_some_and(|l| l.layer == *layer && l.target == target)
+    }
+
+    /// The textures stamps draw into while a stroke is limited.
+    fn limit_views(&self, target: Target) -> Vec<wgpu::TextureView> {
+        match target {
+            Target::Content => self.stroke_buf.as_ref().map(|b| b.views()[..4].to_vec()).unwrap_or_default(),
+            Target::Mask => self.stroke_mask_buf.iter().map(|m| m.create_view(&Default::default())).collect(),
+        }
+    }
+
+    /// Rebuild the limited layer as the pre-stroke snapshot with the stroke buffer laid over it.
+    fn resolve_limited(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        let Some(l) = &self.stroke_limit else { return };
+        let Some(snap) = self.undo.last().filter(|s| s.layer == l.layer) else { return };
+        let Some(g) = self.store.get(&l.layer) else { return };
+        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("stroke_blend_params"),
+            contents: bytemuck::bytes_of(&BlendParams { v: [l.opacity, l.mask_value, 0.0, 0.0] }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+        match (l.target, &snap.tex) {
+            (Target::Content, SnapTex::Content(snapshot)) => {
+                let (Some(buf), Some(dst)) = (&self.stroke_buf, &g.content) else { return };
+                let (sv, bv, dv) = (snapshot.views(), buf.views(), dst.views());
+                let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }];
+                for i in 0..4 {
+                    entries.push(wgpu::BindGroupEntry { binding: 1 + i as u32, resource: wgpu::BindingResource::TextureView(&sv[i]) });
+                    entries.push(wgpu::BindGroupEntry { binding: 5 + i as u32, resource: wgpu::BindingResource::TextureView(&bv[i]) });
+                }
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("resolve_bind"), layout: &self.resolve_layout, entries: &entries });
+                let attachments: Vec<_> = dv[..4]
+                    .iter()
+                    .map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: load }))
+                    .collect();
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("stroke_resolve_pass"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pipeline_resolve);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            (Target::Mask, SnapTex::Mask(snapshot)) => {
+                let (Some(buf), Some(dst)) = (&self.stroke_mask_buf, &g.mask) else { return };
+                let (sv, bv, dv) = (snapshot.create_view(&Default::default()), buf.create_view(&Default::default()), dst.create_view(&Default::default()));
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("resolve_mask_bind"),
+                    layout: &self.resolve_mask_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sv) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&bv) },
+                    ],
+                });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("stroke_resolve_mask_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &dv, depth_slice: None, resolve_target: None, ops: load })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pipeline_resolve_mask);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            _ => {}
+        }
+    }
+
     /// Everything the stamp shaders need for this frame: camera, tile and stencil placement.
     fn stamp_globals(&self, view: &StampView<'_>, stencil_on: bool, place: [f32; 4], flip: bool) -> StampGlobals {
         let (w, h) = (view.size_px[0] as f32, view.size_px[1] as f32);
@@ -868,6 +1030,7 @@ impl PaintGpu {
         for op in ops {
             match op {
                 PaintOp::BeginStroke { layer, target } => {
+                    self.stroke_limit = None;
                     if let Some(s) = self.snapshot_of(device, encoder, *layer, *target) {
                         self.undo.push(s);
                         self.redo.clear();
@@ -976,6 +1139,8 @@ impl PaintGpu {
                             None => continue,
                         },
                     };
+                    let limited = self.limits(layer, *target);
+                    let views = if limited { self.limit_views(*target) } else { views };
                     let stride = std::mem::size_of::<Stamp>() as u64;
                     let offset = self.cursor as u64 * stride;
                     queue.write_buffer(&self.instance_buf, offset, bytemuck::cast_slice(&stamps[..n]));
@@ -995,8 +1160,36 @@ impl PaintGpu {
                     pass.set_pipeline(pipeline);
                     pass.set_vertex_buffer(0, self.instance_buf.slice(offset..offset + n as u64 * stride));
                     pass.draw(0..6, 0..n as u32);
+                    drop(pass);
+                    if limited {
+                        self.resolve_limited(device, encoder);
+                    }
                     self.cursor += n;
                     dirty = true;
+                }
+                PaintOp::StrokeOpacity { layer, target, opacity, mask_value } => {
+                    // Only meaningful straight after the BeginStroke that snapshotted this target.
+                    let has_snapshot = self.undo.last().is_some_and(|s| {
+                        s.layer == *layer && matches!((&s.tex, target), (SnapTex::Content(_), Target::Content) | (SnapTex::Mask(_), Target::Mask))
+                    });
+                    if !has_snapshot || !self.store.contains_key(layer) || !opacity.is_finite() || *opacity >= 0.999 {
+                        continue;
+                    }
+                    match target {
+                        Target::Content => {
+                            if self.stroke_buf.as_ref().is_none_or(|b| b.size != self.size) {
+                                self.stroke_buf = Some(Layer::new(device, self.size));
+                            }
+                            self.stroke_buf.as_ref().unwrap().clear(encoder);
+                        }
+                        Target::Mask => {
+                            if self.stroke_mask_buf.is_none() {
+                                self.stroke_mask_buf = Some(make_mask_texture(device, self.size));
+                            }
+                            clear_textures(encoder, &[&self.stroke_mask_buf.as_ref().unwrap().create_view(&Default::default())], wgpu::Color::TRANSPARENT);
+                        }
+                    }
+                    self.stroke_limit = Some(StrokeLimit { layer: *layer, target: *target, opacity: opacity.clamp(0.0, 1.0), mask_value: *mask_value });
                 }
                 PaintOp::Erase { layer, stamps, uv } => {
                     let Some(c) = self.store.get(layer).and_then(|g| g.content.as_ref()) else { continue };
@@ -1115,6 +1308,8 @@ impl PaintGpu {
                             None => continue,
                         },
                     };
+                    let limited = self.limits(layer, *target);
+                    let views = if limited { self.limit_views(*target) } else { views };
                     let stride = std::mem::size_of::<Stamp>() as u64;
                     let offset = self.cursor as u64 * stride;
                     queue.write_buffer(&self.instance_buf, offset, bytemuck::cast_slice(&stamps[..n]));
@@ -1138,6 +1333,10 @@ impl PaintGpu {
                     pass.set_vertex_buffer(1, self.instance_buf.slice(offset..offset + n as u64 * stride));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(mesh.first_index..mesh.first_index + mesh.index_count, 0, 0..n as u32);
+                    drop(pass);
+                    if limited {
+                        self.resolve_limited(device, encoder);
+                    }
                     self.cursor += n;
                     dirty = true;
                 }

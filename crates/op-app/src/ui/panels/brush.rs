@@ -29,7 +29,8 @@ impl App {
             }
             slider_row(ui, "Size", &mut self.brush.radius_pts, 2.0..=300.0);
             slider_row(ui, "Hardness", &mut self.brush.hardness, 0.0..=1.0);
-            slider_row(ui, "Opacity", &mut self.brush.opacity, 0.0..=1.0);
+            slider_row(ui, "Flow", &mut self.brush.opacity, 0.0..=1.0).on_hover_text("Opacity of each dab: overlapping dabs build up");
+            slider_row(ui, "Stroke opacity", &mut self.brush.stroke_opacity, 0.0..=1.0).on_hover_text("Caps the opacity of a whole stroke, however many dabs overlap. Applies to painting and masks, not to smudge, clone or erase on layer content.");
             slider_row(ui, "Spacing", &mut self.brush.spacing, 0.02..=1.0);
             slider_row(ui, "Lazy mouse", &mut self.brush.lazy_radius, 0.0..=200.0).on_hover_text("The brush trails the cursor on a string this long, which smooths wobbly strokes. 0 is off.");
         });

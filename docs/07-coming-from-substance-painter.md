@@ -43,6 +43,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Texture sets are the model's materials. Hide or isolate a set with the eye icon in the Texture Sets panel.
 - Lighting has four built-in procedural environments, and you can load your own HDRI (Radiance .hdr or OpenEXR, lat-long) in Display Settings - Environment. Loaded files are kept in the app's data folder (`environments/`) and listed in the HDRI menu. Reflections use a mip chain and diffuse light uses spherical harmonics, a fast approximation of Painter's prefiltered maps.
 - Mask levels (black, white, gamma, invert) live on the mask in Properties - Layer.
+- Brush Opacity is now called Flow (the opacity of each dab, so overlaps build up) and there is a separate Stroke opacity that caps a whole stroke, like Painter's. Stroke opacity applies to painting, projection and masks.
 - Lazy mouse (Properties - Brush, "Lazy mouse") makes the brush trail the cursor on a string for smooth strokes.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.

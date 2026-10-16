@@ -1110,6 +1110,65 @@ mod tests {
         assert!(after > 0, "the eraser took more than its footprint");
     }
 
+    /// A stroke limited to an opacity never exceeds it, however many dabs overlap, and builds on
+    /// what was there before the stroke. Undo removes it whole.
+    #[test]
+    fn stroke_opacity_caps_overlapping_dabs() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let front = sphere_uv(rig.front);
+        let c = SIZE as f32 / 2.0;
+
+        // Three overlapping full-strength dabs in one stroke limited to 50%.
+        let dab = || dab(c, 30.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[
+            PaintOp::BeginStroke { layer, target: Target::Content },
+            PaintOp::StrokeOpacity { layer, target: Target::Content, opacity: 0.5, mask_value: 0.0 },
+            PaintOp::Stamps { layer, target: Target::Content, stamps: vec![dab()] },
+        ]);
+        rig.run(&doc, &[PaintOp::Stamps { layer, target: Target::Content, stamps: vec![dab(), dab()] }]);
+        let (value, cover) = texel_rg(&rig.metal(), front);
+        assert!((cover as i32 - 128).abs() <= 4, "coverage {cover}, expected about half");
+        assert!(value as i32 <= cover as i32 + 1 && (value as i32) >= cover as i32 - 4, "value {value} vs coverage {cover}: the colour is full strength");
+
+        // A second limited stroke on top builds on the first: 1 - 0.5 * 0.5 = 75%.
+        rig.run(&doc, &[
+            PaintOp::BeginStroke { layer, target: Target::Content },
+            PaintOp::StrokeOpacity { layer, target: Target::Content, opacity: 0.5, mask_value: 0.0 },
+            PaintOp::Stamps { layer, target: Target::Content, stamps: vec![dab(), dab()] },
+        ]);
+        let (_, cover2) = texel_rg(&rig.metal(), front);
+        assert!((cover2 as i32 - 192).abs() <= 5, "second stroke coverage {cover2}, expected about 75%");
+
+        rig.run(&doc, &[PaintOp::UndoStroke]);
+        let (_, back) = texel_rg(&rig.metal(), front);
+        assert!((back as i32 - 128).abs() <= 4, "undo should return to the first stroke, got {back}");
+        rig.run(&doc, &[PaintOp::UndoStroke]);
+        assert_eq!(texel_rg(&rig.metal(), front).1, 0, "undoing the first stroke empties the layer");
+    }
+
+    /// The same cap for mask strokes: painting 1 at 50% moves a black mask to half.
+    #[test]
+    fn stroke_opacity_applies_to_masks() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "metal", fill(None, Some(1.0), None));
+        doc.find_mut(layer).unwrap().mask = Some(Mask::new(false));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let c = SIZE as f32 / 2.0;
+        let mut reveal = dab(c, 30.0, 1.0, [0.0; 4]);
+        reveal.values[0] = 1.0; // the mask value; limited strokes paint 1 to record coverage
+        rig.run(&doc, &[
+            PaintOp::BeginStroke { layer, target: Target::Mask },
+            PaintOp::StrokeOpacity { layer, target: Target::Mask, opacity: 0.5, mask_value: 1.0 },
+            PaintOp::Stamps { layer, target: Target::Mask, stamps: vec![reveal, reveal] },
+        ]);
+        let (value, _) = texel_rg(&rig.metal(), sphere_uv(rig.front));
+        assert!((value as i32 - 128).abs() <= 6, "metallic through a half-revealed mask: {value}");
+    }
+
     #[test]
     fn projective_brush_paints_visible_side_only_and_undoes() {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };

@@ -45,7 +45,10 @@ const DEFAULT_PADDING: u32 = 8;
 struct Brush {
     radius_pts: f32,
     hardness: f32,
+    /// Opacity of each dab, so overlapping dabs build up ("flow").
     opacity: f32,
+    /// Cap on the opacity of a whole stroke, however many dabs overlap; 1 is no cap.
+    stroke_opacity: f32,
     /// Stamp spacing as a fraction of the brush radius.
     spacing: f32,
     /// The stamp shape: 0 round, 1 square, 2 diamond, 3 chalk, 4 streaks.
@@ -74,6 +77,7 @@ impl Default for Brush {
             radius_pts: 24.0,
             hardness: 0.6,
             opacity: 1.0,
+            stroke_opacity: 1.0,
             spacing: 0.15,
             shape: 0,
             angle: 0.0,
@@ -355,6 +359,8 @@ struct App {
     clone_offset: Option<[f32; 2]>,
     /// Lazy mouse: where the brush is, while a stroke is under way.
     lazy_pos: Option<[f32; 2]>,
+    /// The stroke under way is capped by `brush.stroke_opacity`; mask stamps then record coverage.
+    stroke_limited: bool,
     env: Environment,
     /// Recently used projects, newest first.
     recent: Vec<PathBuf>,
@@ -494,6 +500,7 @@ impl App {
             clone_source: None,
             clone_offset: None,
             lazy_pos: None,
+            stroke_limited: false,
             env: Environment::default(),
             recent: files::load_recent(),
             symmetry: 0,
@@ -1454,7 +1461,8 @@ impl App {
             Target::Mask => Stamp {
                 brush,
                 color: [0.0, 0.0, 0.0, plane],
-                values: [if erase { 0.0 } else { 1.0 }, 0.0, opacity, 0.0],
+                // A capped stroke records coverage by painting 1; the real value goes with the cap.
+                values: [if erase && !self.stroke_limited { 0.0 } else { 1.0 }, 0.0, opacity, 0.0],
                 enables: [0.0; 4],
                 shape,
             },
@@ -1488,11 +1496,23 @@ impl App {
 
     /// Advance the stroke to `to`, emitting evenly spaced stamps along the path.
     /// Start a stroke at `from` without stamping there, so the next `stroke_to` draws a line out of it.
+    /// Cap the stroke that just began at the brush's stroke opacity, where that makes sense.
+    fn push_stroke_limit(&mut self, layer: NodeId, target: Target) {
+        let k = self.brush.stroke_opacity;
+        let tool_ok = matches!(self.tool, Tool::Paint | Tool::Project) || (self.tool == Tool::Erase && target == Target::Mask);
+        self.stroke_limited = k < 0.999 && tool_ok;
+        if self.stroke_limited {
+            let mask_value = if self.tool == Tool::Erase { 0.0 } else { 1.0 };
+            self.pending.push(PaintOp::StrokeOpacity { layer, target, opacity: k, mask_value });
+        }
+    }
+
     fn begin_line(&mut self, from: [f32; 2], ppp: f32, layer: NodeId, target: Target) {
         let spacing = (self.brush.radius_pts * ppp * self.brush.spacing).max(1.0);
         self.stroke = Stroke { active: true, last_px: from, next_in: spacing };
         self.pending.push(PaintOp::BeginStroke { layer, target });
         self.push_hist(Hist::Stroke);
+        self.push_stroke_limit(layer, target);
     }
 
     /// Lazy mouse: where the brush goes when the cursor is at `cursor`. The brush only moves once
@@ -1514,6 +1534,7 @@ impl App {
             self.stroke = Stroke { active: true, last_px: to, next_in: spacing };
             self.pending.push(PaintOp::BeginStroke { layer, target });
             self.push_hist(Hist::Stroke);
+            self.push_stroke_limit(layer, target);
             out.push(self.make_stamp(to, ppp, target, [0.0; 2]));
             return;
         }
@@ -1542,6 +1563,7 @@ impl App {
             self.stroke = Stroke { active: true, last_px: to, next_in: spacing };
             self.pending.push(PaintOp::BeginStroke { layer, target });
             self.push_hist(Hist::Stroke);
+            self.push_stroke_limit(layer, target);
             out.push(self.make_stamp_raw(at(to), target, [0.0; 2]));
             return;
         }
