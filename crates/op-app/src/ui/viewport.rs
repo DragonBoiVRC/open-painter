@@ -94,13 +94,22 @@ impl App {
             self.camera.zoom(ui.input(|i| i.smooth_scroll_delta.y));
         }
 
-        // I: pick the colour under the cursor into the paint colour.
-        if resp.hovered() && !self.dialog.is_some() && ui.input(|i| i.key_pressed(egui::Key::I) && !i.modifiers.any()) && !ui.ctx().egui_wants_keyboard_input() {
+        // I: pick the colour under the cursor into the paint colour; Shift+I picks every channel
+        // (a material picker): colour, metallic, roughness and height.
+        if resp.hovered() && !self.dialog.is_some() && ui.input(|i| i.key_pressed(egui::Key::I) && !i.modifiers.command && !i.modifiers.alt) && !ui.ctx().egui_wants_keyboard_input() {
             if let Some(pos) = resp.hover_pos() {
-                match self.sample_color_at(rect, pos) {
-                    Some(c) => {
-                        self.channels.base_color = c;
-                        self.status = "Picked the colour under the cursor.".into();
+                let everything = mods.shift;
+                match self.sample_surface_at(rect, pos) {
+                    Some(s) => {
+                        self.channels.base_color = s.color;
+                        if everything {
+                            self.channels.metallic = s.metallic;
+                            self.channels.roughness = s.roughness;
+                            self.channels.height_value = s.height;
+                            self.status = "Picked the colour, metallic, roughness and height under the cursor.".into();
+                        } else {
+                            self.status = "Picked the colour under the cursor.".into();
+                        }
                     }
                     None => self.status = "No painted surface under the cursor to pick from.".into(),
                 }

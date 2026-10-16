@@ -1869,7 +1869,7 @@ impl App {
                         ("P / E  or  1 / 2", "paint / erase"),
                         ("S / K / J / G  or  3 / 4 / 5 / 6", "smudge / clone / projection / fill"),
                         ("Ctrl + click (clone)", "set the clone source"),
-                        ("I", "pick the colour under the cursor"),
+                        ("I / Shift+I", "pick the colour / every channel under the cursor"),
                         ("L", "toggle symmetry"),
                         ("C", "cycle base color / roughness / metallic views"),
                         ("[  ]", "smaller / larger brush"),
