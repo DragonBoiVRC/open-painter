@@ -36,12 +36,15 @@ pub struct Vertex {
 }
 
 /// How a fill decides which triangles belong together.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Connect {
     /// Triangles that meet at a shared position *and* UV: one UV island.
     UvIsland,
     /// Triangles that meet at a shared position, across UV seams: one piece of the mesh.
     MeshPart,
+    /// Triangles that share an edge and face (nearly) the same way: one flat face, however many
+    /// triangles it is cut into. The tolerance is the largest turn between neighbours, in degrees.
+    FlatFace(f32),
 }
 
 /// A run of triangles that share a material: one texture set. `first_index` and `index_count`
@@ -208,13 +211,16 @@ impl Mesh {
         let Some(range) = self.set_ranges().into_iter().find(|r| (r.first_index as usize..(r.first_index + r.index_count) as usize).contains(&first)) else {
             return Vec::new();
         };
+        let tris: Vec<usize> = (range.first_index as usize..(range.first_index + range.index_count) as usize).step_by(3).collect();
+        if let Connect::FlatFace(tolerance) = how {
+            return self.flat_face(first, &tris, tolerance);
+        }
         let key = |i: u32| {
             let v = &self.vertices[i as usize];
             let p = v.position.map(f32::to_bits);
             let uv = if how == Connect::UvIsland { v.uv.map(f32::to_bits) } else { [0, 0] };
             (p, uv)
         };
-        let tris: Vec<usize> = (range.first_index as usize..(range.first_index + range.index_count) as usize).step_by(3).collect();
         // Which triangles touch each corner key.
         let mut by_key: std::collections::HashMap<([u32; 3], [u32; 2]), Vec<usize>> = std::collections::HashMap::new();
         for &t in &tris {
@@ -232,6 +238,45 @@ impl Mesh {
                 for &n in by_key.get(&key(self.indices[t + c])).into_iter().flatten() {
                     if seen.insert(n) {
                         stack.push(n);
+                    }
+                }
+            }
+        }
+        order.sort_unstable();
+        order
+    }
+
+    /// Triangles reachable from `first` across shared edges without turning more than `tolerance`
+    /// degrees from the triangle next to them.
+    fn flat_face(&self, first: usize, tris: &[usize], tolerance: f32) -> Vec<usize> {
+        let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
+        let normal = |t: usize| {
+            let (a, b, c) = (pos(self.indices[t]), pos(self.indices[t + 1]), pos(self.indices[t + 2]));
+            (b - a).cross(c - a).normalize_or_zero()
+        };
+        let edge = |a: u32, b: u32| {
+            let (pa, pb) = (self.vertices[a as usize].position.map(f32::to_bits), self.vertices[b as usize].position.map(f32::to_bits));
+            if pa <= pb { (pa, pb) } else { (pb, pa) }
+        };
+        let mut by_edge: std::collections::HashMap<([u32; 3], [u32; 3]), Vec<usize>> = std::collections::HashMap::new();
+        for &t in tris {
+            for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+                by_edge.entry(edge(self.indices[t + a], self.indices[t + b])).or_default().push(t);
+            }
+        }
+        let min_dot = tolerance.clamp(0.0, 180.0).to_radians().cos();
+        let mut seen = std::collections::HashSet::new();
+        let mut order = Vec::new();
+        let mut stack = vec![first];
+        seen.insert(first);
+        while let Some(t) = stack.pop() {
+            order.push(t);
+            let n = normal(t);
+            for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+                for &other in by_edge.get(&edge(self.indices[t + a], self.indices[t + b])).into_iter().flatten() {
+                    if !seen.contains(&other) && normal(other).dot(n) >= min_dot {
+                        seen.insert(other);
+                        stack.push(other);
                     }
                 }
             }
@@ -667,5 +712,24 @@ mod tests {
         assert_eq!(hit.0, 1);
         assert!(hit.1 == 6 || hit.1 == 9);
         assert!(m.raycast_triangle_where(Vec3::new(1.5, 0.2, 5.0), -Vec3::Z, |s| s == 0).is_none(), "set b is hidden");
+    }
+
+    #[test]
+    fn a_flat_face_follows_edges_and_stops_at_creases() {
+        // A unit square in the z=0 plane (two triangles) with a second square standing up from its
+        // right edge, and a third square far away that touches nothing.
+        let v = |x: f32, y: f32, z: f32| Vertex { position: [x, y, z], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] };
+        let vertices = vec![
+            v(0.0, 0.0, 0.0), v(1.0, 0.0, 0.0), v(1.0, 1.0, 0.0), v(0.0, 1.0, 0.0), // flat quad
+            v(1.0, 0.0, 1.0), v(1.0, 1.0, 1.0),                                      // wall above the right edge
+            v(5.0, 5.0, 0.0), v(6.0, 5.0, 0.0), v(6.0, 6.0, 0.0),                    // a lone triangle
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2, 6, 7, 8];
+        let m = Mesh { vertices, indices, sets: Vec::new() };
+        assert_eq!(m.connected_triangles(0, Connect::FlatFace(5.0)), vec![0, 3], "the flat quad, not the wall");
+        assert_eq!(m.connected_triangles(6, Connect::FlatFace(5.0)), vec![6, 9], "the wall is its own face");
+        assert_eq!(m.connected_triangles(12, Connect::FlatFace(5.0)), vec![12]);
+        // A generous tolerance walks over the crease.
+        assert_eq!(m.connected_triangles(0, Connect::FlatFace(100.0)), vec![0, 3, 6, 9]);
     }
 }

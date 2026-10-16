@@ -243,7 +243,7 @@ impl App {
                     if tool_button(ui, ph::HAND_POINTING, "Smudge (S)", self.tool == Tool::Smudge).clicked() {
                         self.tool = Tool::Smudge;
                     }
-                    if tool_button(ui, ph::PAINT_BUCKET, "Fill (G): click a UV island, mesh part or texture set. Shift+click hides on a mask", self.tool == Tool::Fill).clicked() {
+                    if tool_button(ui, ph::PAINT_BUCKET, "Fill (G): click a face, UV island, mesh part or texture set. Shift+click hides on a mask", self.tool == Tool::Fill).clicked() {
                         self.tool = Tool::Fill;
                     }
                     if tool_button(ui, ph::PROJECTOR_SCREEN, "Projection (J): paint the stencil picture onto the model", self.tool == Tool::Project).clicked() {

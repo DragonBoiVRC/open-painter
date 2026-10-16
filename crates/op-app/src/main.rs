@@ -181,16 +181,19 @@ enum Tool {
 /// What a click with the fill tool covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FillScope {
+    /// One flat face of the mesh (a quad, or a run of coplanar triangles).
+    Face,
     UvIsland,
     MeshPart,
     TextureSet,
 }
 
 impl FillScope {
-    const ALL: [FillScope; 3] = [FillScope::UvIsland, FillScope::MeshPart, FillScope::TextureSet];
+    const ALL: [FillScope; 4] = [FillScope::Face, FillScope::UvIsland, FillScope::MeshPart, FillScope::TextureSet];
 
     fn label(self) -> &'static str {
         match self {
+            FillScope::Face => "Face",
             FillScope::UvIsland => "UV island",
             FillScope::MeshPart => "Mesh part",
             FillScope::TextureSet => "Texture set",
@@ -548,7 +551,7 @@ impl App {
             clone_offset: None,
             lazy_pos: None,
             stroke_limited: false,
-            fill_scope: FillScope::UvIsland,
+            fill_scope: FillScope::Face,
             env: Environment::default(),
             recent: files::load_recent(),
             symmetry: 0,
@@ -1669,6 +1672,7 @@ impl App {
             return;
         };
         let firsts: Vec<usize> = match self.fill_scope {
+            FillScope::Face => self.mesh.connected_triangles(first, op_mesh::Connect::FlatFace(8.0)),
             FillScope::UvIsland => self.mesh.connected_triangles(first, op_mesh::Connect::UvIsland),
             FillScope::MeshPart => self.mesh.connected_triangles(first, op_mesh::Connect::MeshPart),
             FillScope::TextureSet => {
