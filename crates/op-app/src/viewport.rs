@@ -148,6 +148,11 @@ pub(crate) fn apply_batch(
 
 pub struct ViewportGpu {
     pbr: wgpu::RenderPipeline,
+    wire_pipeline: wgpu::RenderPipeline,
+    /// Every edge of the mesh once, as a line list over the vertex buffer, and its index count.
+    wire_edges: Option<(wgpu::Buffer, u32)>,
+    /// Draw the edges over the model.
+    pub show_wire: bool,
     /// The HDR environment the shader reflects when the lighting preset asks for it.
     env: crate::envmap::EnvGpu,
     uv_pipeline: wgpu::RenderPipeline,
@@ -314,6 +319,47 @@ impl ViewportGpu {
             cache: None,
         });
 
+        let wire_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/wire3d.wgsl"));
+        let wire_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wire3d_pl"),
+            bind_group_layouts: &[Some(&globals_layout)],
+            immediate_size: 0,
+        });
+        let wire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wire3d"),
+            layout: Some(&wire_pl),
+            vertex: wgpu::VertexState {
+                module: &wire_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attrs,
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &wire_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let uv_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/uvbuf.wgsl"));
         let uv_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("uvbuf_pl"),
@@ -418,6 +464,9 @@ impl ViewportGpu {
 
         Self {
             pbr,
+            wire_pipeline,
+            wire_edges: None,
+            show_wire: false,
             env,
             uv_pipeline,
             dummy_uv,
@@ -509,6 +558,25 @@ impl ViewportGpu {
         }));
         self.index_count = mesh.indices.len() as u32;
         self.cpu_indices = mesh.indices.clone();
+        self.wire_edges = {
+            let mut seen = std::collections::HashSet::new();
+            let mut edges: Vec<u32> = Vec::new();
+            for t in mesh.indices.chunks_exact(3) {
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    if seen.insert((a.min(b), a.max(b))) {
+                        edges.extend([a, b]);
+                    }
+                }
+            }
+            (!edges.is_empty()).then(|| {
+                let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mesh_edges"),
+                    contents: bytemuck::cast_slice(&edges),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                (buf, edges.len() as u32)
+            })
+        };
         self.uv.generation += 1;
         self.ranges = mesh.set_ranges().iter().map(|s| (s.first_index, s.index_count)).collect();
         let layout = mesh.unit_ranges(udim);
@@ -748,6 +816,13 @@ impl ViewportGpu {
                 }
             }
         }
+        if let (true, Some(v), Some((edges, count))) = (self.show_wire, &self.vbuf, &self.wire_edges) {
+            pass.set_pipeline(&self.wire_pipeline);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_vertex_buffer(0, v.slice(..));
+            pass.set_index_buffer(edges.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..*count, 0, 0..1);
+        }
         drop(pass);
 
         // The UV buffer, for the next frame's smudge and clone stamps.
@@ -808,6 +883,8 @@ pub struct ViewportCallback {
     /// The set shown with the baked-map preview.
     pub active: usize,
     pub hidden: Vec<bool>,
+    /// Draw the mesh edges over the model.
+    pub wireframe: bool,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -822,6 +899,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         if let Some(gpu) = resources.get_mut::<ViewportGpu>() {
             gpu.active = self.active.min(gpu.sets.len().saturating_sub(1));
             gpu.hidden = self.hidden.clone();
+            gpu.show_wire = self.wireframe;
             gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
         }
         Vec::new()
@@ -2370,6 +2448,30 @@ mod tests {
         rig.gpu.set_environment(&rig.device, &rig.queue, None);
         rig.run(&doc, &[]);
         assert_eq!(center_pixel(&rig), procedural);
+    }
+
+    /// The wireframe overlay draws the mesh edges on the visible side of the model only.
+    #[test]
+    fn the_wireframe_overlay_draws_edges() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let doc = Document::with_default_material();
+        let frame = |rig: &Rig| {
+            let tex = &rig.gpu.offscreen.as_ref().expect("a frame was rendered").color;
+            crate::gpu_io::read_texture(&rig.device, &rig.queue, tex, SIZE, 4)
+        };
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let plain = frame(&rig);
+        rig.gpu.show_wire = true;
+        rig.run(&doc, &[]);
+        let lines = frame(&rig);
+        let darker = plain.chunks_exact(4).zip(lines.chunks_exact(4)).filter(|(a, b)| (a[0] as i32 - b[0] as i32) > 12).count();
+        let brighter = plain.chunks_exact(4).zip(lines.chunks_exact(4)).filter(|(a, b)| (b[0] as i32 - a[0] as i32) > 12).count();
+        assert!(darker > 300, "edges should darken some pixels, only {darker} changed");
+        assert!(darker < (SIZE * SIZE) as usize / 2, "the overlay covered most of the frame: {darker}");
+        assert_eq!(brighter, 0, "lines never brighten the surface");
+        rig.gpu.show_wire = false;
+        rig.run(&doc, &[]);
+        assert_eq!(frame(&rig), plain, "switching it off restores the plain render");
     }
 
     /// Preview modes: 0 shaded, 1 the map as-is, 2 shaded with the map darkening the ambient light.

@@ -425,6 +425,8 @@ struct App {
     uv_cam: Option<uvview::UvCamera>,
     uv_channel: uvview::Channel,
     uv_wire: bool,
+    /// Draw the mesh edges over the 3D model.
+    show_wireframe: bool,
     /// The set last scrolled into view in the Texture Sets list.
     sets_scrolled: usize,
     confirm: Option<Pending>,
@@ -568,6 +570,7 @@ impl App {
             uv_cam: None,
             uv_channel: uvview::Channel::Base,
             uv_wire: true,
+            show_wireframe: false,
             sets_scrolled: usize::MAX,
             confirm: None,
             after_save: None,
@@ -1891,6 +1894,7 @@ impl App {
                         ("Ctrl + click (clone)", "set the clone source"),
                         ("I / Shift+I", "pick the colour / every channel under the cursor"),
                         ("L", "toggle symmetry"),
+                        ("W", "show or hide the mesh edges"),
                         ("C", "cycle base color / roughness / metallic / emissive views"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
@@ -2215,6 +2219,9 @@ impl App {
             };
             self.set_view(next);
             self.status = format!("Viewport: {}", crate::ui::viewport::view_label(next));
+        }
+        if ui.input(|i| i.key_pressed(Key::W) && !i.modifiers.any()) {
+            self.show_wireframe = !self.show_wireframe;
         }
         if ui.input(|i| i.key_pressed(Key::L) && !i.modifiers.any()) {
             self.symmetry = if self.symmetry == 0 { 1 } else { 0 };

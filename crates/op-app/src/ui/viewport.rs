@@ -248,7 +248,7 @@ impl App {
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ViewportCallback { globals, size_px, batches, active: self.active, hidden: self.hidden_flags() },
+            ViewportCallback { globals, size_px, batches, active: self.active, hidden: self.hidden_flags(), wireframe: self.show_wireframe },
         ));
 
         // Brush outline: dark under light so it reads on any surface.
@@ -345,6 +345,9 @@ impl App {
                                 }
                             }
                         });
+                        if ui.selectable_label(self.show_wireframe, ph::POLYGON).on_hover_text("Show the mesh edges (W)").clicked() {
+                            self.show_wireframe = !self.show_wireframe;
+                        }
                         let on = self.symmetry != 0;
                         let label = format!("{}  {}", ph::BUTTERFLY, ["Symmetry", "X", "Y", "Z"][self.symmetry as usize]);
                         if ui.selectable_label(on, label).on_hover_text("Mirror strokes (L). Choose the axis in Properties - Paint.").clicked() {
