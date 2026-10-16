@@ -31,8 +31,8 @@ assets/         CC0 only
 | M3 | Export presets (PBR MR, Unity, Unreal packed, glTF) PNG/EXR/TGA; project save/load; autosave |
 | M4 | Baking: world normal, AO, curvature, thickness, position, ID (embree-like BVH on CPU, then GPU) |
 | M5 | Smart-material/mask system (own graph-based procedural nodes: noise, gradients, curvature-driven edge wear) - done, see docs/05-procedural.md |
-| M6 | Plugin API (events + scripting), shelves/resources, environment/IBL library |
-| M7 | UDIM, text, stencils/alphas, particle brushes, import-only `.spp` best effort |
+| M6 | Plugin API (events + scripting), shelves/resources, environment/IBL library - shelves and HDRI environments are done, the plugin API is not |
+| M7 | UDIM, text, stencils/alphas, particle brushes, import-only `.spp` best effort - UDIM and stencils/alphas are done (plus smudge, clone, projection, fill and more), text, particle brushes and `.spp` import are not |
 
 ## Honest scope
 Painter is ~15 years and hundreds of engineer-years of work. A credible solo/AI-assisted
