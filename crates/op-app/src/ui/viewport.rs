@@ -270,6 +270,7 @@ impl App {
             params: [FALLBACK_METALLIC, FALLBACK_ROUGHNESS, near, far],
             env: [self.env.rotation.to_radians(), 2f32.powf(self.env.exposure), self.env.light, self.env.preset as f32],
             inv_view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).inverse().to_cols_array_2d(),
+            clip: self.section_plane(),
             bg: [if self.env.show_background { 1.0 } else { 0.0 }, self.env.background_blur, self.env.tonemap as f32, if self.env.show_transparency { 1.0 } else { 0.0 }],
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(

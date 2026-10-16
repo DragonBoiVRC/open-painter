@@ -10,6 +10,7 @@ struct Globals {
     env: vec4<f32>,            // rotation (rad), exposure scale, direct light intensity, preset
     inv_view_proj: mat4x4<f32>,
     bg: vec4<f32>,             // x: show the environment, y: blur 0..1, z: tone mapping (0 filmic, 1 Reinhard, 2 none)
+    clip: vec4<f32>,           // section plane: cut where dot(position, xyz) > w (all zero: none)
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -160,9 +161,13 @@ fn environment(dir: vec3<f32>, blur: f32) -> vec3<f32> {
 }
 
 @fragment
-fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let uv_t = i.uv - tile.xy;
+    // Back faces are dropped (as culling would), except when a section plane opens the model up: then
+    // the inside is shown, lit as the surface it is.
+    let section_on = dot(g.clip.xyz, g.clip.xyz) > 0.5;
     var n = normalize(i.normal);
+    if (!front) { n = -n; }
     let v = normalize(g.camera_pos.xyz - i.world_pos);
     let l = normalize(g.light_dir.xyz);
     let h = normalize(v + l);
@@ -233,6 +238,9 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
 
     // See-through paint is shown dithered: the surface is dropped from the picture (and its depth) in
     // proportion to how transparent it is. Switched off with bg.w = 0.
+    if ((!front && !section_on) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
+        discard;
+    }
     if (g.bg.w > 0.5 && opacity < 0.999) {
         let noise = fract(sin(dot(i.clip.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453);
         if (opacity <= noise) { discard; }

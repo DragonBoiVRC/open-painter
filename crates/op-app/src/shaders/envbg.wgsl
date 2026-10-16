@@ -10,6 +10,7 @@ struct Globals {
     env: vec4<f32>,            // rotation (rad), exposure scale, direct light intensity, preset
     inv_view_proj: mat4x4<f32>,
     bg: vec4<f32>,             // x: show the environment, y: blur 0..1, z: tone mapping
+    clip: vec4<f32>,
 };
 
 struct EnvParams {

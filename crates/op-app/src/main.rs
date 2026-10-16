@@ -442,6 +442,8 @@ struct App {
     uv_wire: bool,
     /// A colour-selection mask waiting for the user to click the piece of the model it should select.
     pick_id_for: Option<NodeId>,
+    /// Section plane: axis (0 off, 1 x, 2 y, 3 z), position as a fraction of the model's size, flipped.
+    section: (u32, f32, bool),
     /// Draw the mesh edges over the 3D model.
     show_wireframe: bool,
     /// Paint reaches surfaces hidden behind others, and surfaces turned away from the camera.
@@ -599,6 +601,7 @@ impl App {
             uv_channel: uvview::Channel::Base,
             uv_wire: true,
             show_wireframe: false,
+            section: (0, 0.5, false),
             pick_id_for: None,
             paint_through: false,
             paint_backfaces: false,
@@ -1717,6 +1720,24 @@ impl App {
         self.push_hist(Hist::Stroke);
         self.thumbs_dirty();
         self.status = format!("Filled {} triangle(s).", firsts.len());
+    }
+
+    /// The section plane for the shaders: the model is cut away where `dot(position, xyz) > w`.
+    fn section_plane(&self) -> [f32; 4] {
+        let (axis, at, flip) = self.section;
+        if axis == 0 {
+            return [0.0; 4];
+        }
+        let (lo, hi) = self.mesh.bounds();
+        let i = axis as usize - 1;
+        let position = lo[i] + (hi[i] - lo[i]) * at.clamp(0.0, 1.0);
+        let mut n = [0.0f32; 3];
+        n[i] = 1.0;
+        if flip {
+            n[i] = -1.0;
+            return [n[0], n[1], n[2], -position];
+        }
+        [n[0], n[1], n[2], position]
     }
 
     fn clear_target(&mut self) {

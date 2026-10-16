@@ -61,6 +61,8 @@ struct StampGlobals {
     stencil_xf: [f32; 4],
     /// 1 where paint ignores occlusion (x) or back faces (y).
     through: [f32; 4],
+    /// Section plane: surfaces where dot(position, xyz) > w are cut away.
+    clip: [f32; 4],
 }
 
 /// Camera state the stamp pass needs; supplied each frame.
@@ -74,6 +76,8 @@ pub struct StampView<'a> {
     pub uv: &'a wgpu::TextureView,
     /// Paint reaches surfaces hidden behind others (`[0]`) and surfaces facing away (`[1]`).
     pub through: [bool; 2],
+    /// Section plane (see `Globals::clip`).
+    pub clip: [f32; 4],
 }
 
 pub struct MeshBuffers<'a> {
@@ -1100,6 +1104,7 @@ impl PaintGpu {
             stencil: [place[0] * w, place[1] * h, half_h, half_h],
             stencil_xf: [place[3].cos(), place[3].sin(), if stencil_on { 1.0 } else { 0.0 }, if flip { 1.0 } else { 0.0 }],
             through: [view.through[0] as u32 as f32, view.through[1] as u32 as f32, 0.0, 0.0],
+            clip: view.clip,
         }
     }
 

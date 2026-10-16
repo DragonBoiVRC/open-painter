@@ -22,8 +22,10 @@ pub struct Globals {
     pub env: [f32; 4],
     pub inv_view_proj: [[f32; 4]; 4],
     /// x: draw the HDR environment behind the model, y: how blurred it is (0..1), z: tone mapping
-    /// (0 filmic, 1 Reinhard, 2 none).
+    /// (0 filmic, 1 Reinhard, 2 none), w: show see-through paint.
     pub bg: [f32; 4],
+    /// Section plane: surfaces where `dot(position, xyz) > w` are cut away; all zero for no plane.
+    pub clip: [f32; 4],
 }
 
 struct Offscreen {
@@ -315,10 +317,8 @@ impl ViewportGpu {
                 compilation_options: Default::default(),
                 targets: &[Some(COLOR_FORMAT.into())],
             }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
+            // Back faces are dropped in the shader so a section plane can show the inside.
+            primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
@@ -425,7 +425,7 @@ impl ViewportGpu {
                 compilation_options: Default::default(),
                 targets: &[Some(UV_FORMAT.into())],
             }),
-            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
@@ -825,6 +825,7 @@ impl ViewportGpu {
             depth: &depth,
             uv: &off.uv_view,
             through: self.paint_through,
+            clip: globals.clip,
         };
         let bufs = match (&self.vbuf, &self.ibuf) {
             (Some(v), Some(i)) => Some((v, i)),
@@ -1045,6 +1046,7 @@ mod tests {
                 env: [0.0, 1.0, 1.0, 0.0],
                 inv_view_proj: cam.view_proj(1.0).inverse().to_cols_array_2d(),
                 bg: [0.0; 4],
+                clip: [0.0; 4],
             };
             Some(Self { device, queue, gpu, globals, front: cp.normalize() })
         }
@@ -1651,6 +1653,41 @@ mod tests {
         rig.globals.light_dir[3] = 8.0;
         rig.run(&glass, &[]);
         assert!(frame_center(&rig)[0] < 10, "opacity 0 reads black in the channel view");
+    }
+
+    /// A section plane cuts the model open: the cut-away part is neither drawn nor paintable, and the
+    /// inside shows (and takes paint) instead.
+    #[test]
+    fn a_section_plane_opens_the_model_for_painting_inside() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        let mut shaded = Document::with_default_material();
+        let _ = &mut shaded;
+        let painted = |rig: &mut Rig, clip: [f32; 4]| {
+            rig.globals.clip = clip;
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            rig.run(&doc, &[]); // a frame with the plane, so the stamp pass sees its depth
+            let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+            rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+            let m = rig.metal();
+            (texel_rg(&m, sphere_uv(rig.front)).1 > 200, texel_rg(&m, sphere_uv(-rig.front)).1 > 200)
+        };
+        assert_eq!(painted(&mut rig, [0.0; 4]), (true, false), "no plane: the near surface takes the paint");
+        // Cut away everything with x > 0, which includes the surface facing the camera.
+        assert_eq!(painted(&mut rig, [1.0, 0.0, 0.0, 0.0]), (false, true), "the cut-away surface is skipped and the inside takes the paint");
+
+        // The picture changes too: the inside is visible where the surface used to be.
+        let frame = |rig: &Rig| center_pixel(rig);
+        let lit = Document::with_default_material();
+        rig.globals.clip = [0.0; 4];
+        rig.run(&lit, &[PaintOp::Reset(SIZE)]);
+        let whole = frame(&rig);
+        rig.globals.clip = [1.0, 0.0, 0.0, 0.0];
+        rig.run(&lit, &[]);
+        let cut = frame(&rig);
+        assert_ne!(whole, cut, "the section should show something else at the centre");
+        assert!(cut[3] == 255 && (cut[0] > 40 || cut[1] > 40 || cut[2] > 40), "the inside is lit, not empty: {cut:?}");
     }
 
     /// Paint reaches the far side of the model only when both "through" options are on.

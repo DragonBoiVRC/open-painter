@@ -14,6 +14,7 @@ struct StampGlobals {
     stencil: vec4<f32>,    // centre px, half-size px
     stencil_xf: vec4<f32>, // cos, sin of the rotation, 1 if a stencil is on, 1 if mirrored
     through: vec4<f32>,    // x: ignore occlusion, y: paint back faces
+    clip: vec4<f32>,       // section plane: cut where dot(position, xyz) > w (all zero: none)
 };
 
 @group(0) @binding(0) var<uniform> sg: StampGlobals;
@@ -160,6 +161,8 @@ fn mirror_dir(n: vec3<f32>, axis: i32) -> vec3<f32> {
 // The stamp's alpha for a surface point, or -1.0 if it is rejected (outside the brush,
 // back-facing, or hidden behind nearer geometry).
 fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    // Parts of the model cut away by the section plane cannot be painted.
+    if (dot(sg.clip.xyz, sg.clip.xyz) > 0.5 && dot(world_pos, sg.clip.xyz) > sg.clip.w) { return -1.0; }
     let clip = sg.view_proj * vec4<f32>(world_pos, 1.0);
     if (clip.w <= 0.0) { return -1.0; }
     let ndc = clip.xyz / clip.w;
@@ -191,7 +194,9 @@ fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 
     // Back-facing surfaces never take paint.
     let to_cam = normalize(sg.camera_pos.xyz - world_pos);
-    if (sg.through.y < 0.5 && dot(normalize(normal), to_cam) <= 0.0) { return -1.0; }
+    // With a section plane the inside of the model is shown, so turned-away surfaces can be painted too.
+    let section_on = dot(sg.clip.xyz, sg.clip.xyz) > 0.5;
+    if (sg.through.y < 0.5 && !section_on && dot(normalize(normal), to_cam) <= 0.0) { return -1.0; }
 
     // Occlusion against what the camera actually sees (previous viewport depth).
     let seen = textureLoad(depth_tex, vec2<i32>(px), 0);

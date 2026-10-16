@@ -73,6 +73,20 @@ impl App {
             });
             hint(ui, "Orbit with Alt + left drag. The buttons look along an axis; F frames the model.");
         });
+        section(ui, "Section plane", |ui| {
+            ui.horizontal(|ui| {
+                for (axis, label) in [(0, "Off"), (1, "X"), (2, "Y"), (3, "Z")] {
+                    if ui.selectable_label(self.section.0 == axis, label).clicked() {
+                        self.section.0 = axis;
+                    }
+                }
+            });
+            if self.section.0 != 0 {
+                super::slider_row(ui, "Position", &mut self.section.1, 0.0..=1.0);
+                ui.checkbox(&mut self.section.2, "Cut the other side");
+            }
+            hint(ui, "Cuts the model open so you can paint inside it. Cut-away surfaces cannot be painted.");
+        });
         section(ui, "Shading", |ui| {
             let current = self.view;
             let mut view = current;

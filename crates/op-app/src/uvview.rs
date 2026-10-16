@@ -298,6 +298,7 @@ impl ViewportGpu {
             depth: &depth,
             uv: &uv,
             through: [false; 2],
+            clip: [0.0; 4],
         };
         for b in queued.iter().chain(batches) {
             crate::viewport::apply_batch(&mut self.sets, None, device, queue, encoder, b, &view);
