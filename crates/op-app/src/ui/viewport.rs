@@ -167,6 +167,7 @@ impl App {
                         self.status = msg.into();
                         self.stroke.active = false;
                     } else {
+                        let local = if self.tool == Tool::Clone || mods.shift { local } else { self.lazy_follow(local, ppp) };
                         self.stroke_to(local, ppp, layer, target, &mut stamps);
                         self.line_anchor = Some(crate::LineAnchor { px: local, layer, target, camera });
                         stamp_target = Some((layer, target));
@@ -239,6 +240,14 @@ impl App {
             if core > 3.0 {
                 p.circle_stroke(pos, core, Stroke::new(1.0, Color32::from_white_alpha(70)));
             }
+        }
+
+        // Lazy mouse: show the string between the brush and the cursor.
+        if let (true, Some(brush), Some(cursor)) = (self.stroke.active && self.brush.lazy_radius > 0.0, self.lazy_pos, resp.hover_pos()) {
+            let at = Pos2::new(rect.min.x + brush[0] / ppp, rect.min.y + brush[1] / ppp);
+            let p = ui.painter().with_clip_rect(rect);
+            p.line_segment([at, cursor], Stroke::new(1.5, Color32::from_rgb(0xff, 0xd0, 0x40)));
+            p.circle_filled(at, 2.5, Color32::from_rgb(0xff, 0xd0, 0x40));
         }
 
         // The stencil, drawn faintly over the model so it can be lined up.

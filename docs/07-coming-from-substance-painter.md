@@ -43,6 +43,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Texture sets are the model's materials. Hide or isolate a set with the eye icon in the Texture Sets panel.
 - Lighting uses built-in procedural environments rather than HDRI files.
 - Mask levels (black, white, gamma, invert) live on the mask in Properties - Layer.
+- Lazy mouse (Properties - Brush, "Lazy mouse") makes the brush trail the cursor on a string for smooth strokes.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.
 - Brush alpha and stencils: pick an image from the texture library in Properties - Brush ("Image and stencil"). The Image stamp shapes each dab; a stencil is laid over the screen and paint only lands where it is bright. Tick "Move it in the viewport" to drag and scroll it into place.

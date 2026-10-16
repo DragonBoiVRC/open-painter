@@ -61,6 +61,8 @@ struct Brush {
     /// Pen pressure scales the size and/or the opacity of each stamp.
     pressure_size: bool,
     pressure_opacity: bool,
+    /// Lazy mouse: the brush trails the cursor on a string this long (screen points); 0 is off.
+    lazy_radius: f32,
     /// How far back along the stroke the smudge picks paint up from, in brush radii.
     smudge_distance: f32,
 }
@@ -82,6 +84,7 @@ impl Default for Brush {
             pressure_size: true,
             pressure_opacity: false,
             smudge_distance: 0.4,
+            lazy_radius: 0.0,
         }
     }
 }
@@ -102,6 +105,18 @@ impl Default for Environment {
     fn default() -> Self {
         Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0 }
     }
+}
+
+/// One step of the lazy mouse: the brush at `pos` is pulled toward `cursor` by a string of length
+/// `string`, and only moves once the string is taut.
+fn lazy_step(pos: [f32; 2], cursor: [f32; 2], string: f32) -> [f32; 2] {
+    let d = [cursor[0] - pos[0], cursor[1] - pos[1]];
+    let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    if len <= string || len <= f32::EPSILON {
+        return pos;
+    }
+    let k = (len - string) / len;
+    [pos[0] + d[0] * k, pos[1] + d[1] * k]
 }
 
 /// A cheap deterministic generator for brush jitter: the same stroke jitters the same way.
@@ -334,6 +349,8 @@ struct App {
     clone_source: Option<[f32; 2]>,
     /// Clone tool: where the source lies relative to the brush, in screen pixels.
     clone_offset: Option<[f32; 2]>,
+    /// Lazy mouse: where the brush is, while a stroke is under way.
+    lazy_pos: Option<[f32; 2]>,
     env: Environment,
     /// Recently used projects, newest first.
     recent: Vec<PathBuf>,
@@ -470,6 +487,7 @@ impl App {
             pressure: 1.0,
             clone_source: None,
             clone_offset: None,
+            lazy_pos: None,
             env: Environment::default(),
             recent: files::load_recent(),
             symmetry: 0,
@@ -1470,6 +1488,19 @@ impl App {
         self.push_hist(Hist::Stroke);
     }
 
+    /// Lazy mouse: where the brush goes when the cursor is at `cursor`. The brush only moves once
+    /// the cursor pulls the string taut, so the stroke smooths out hand wobble.
+    fn lazy_follow(&mut self, cursor: [f32; 2], ppp: f32) -> [f32; 2] {
+        let string = self.brush.lazy_radius * ppp;
+        if string <= 0.0 || !self.stroke.active {
+            self.lazy_pos = Some(cursor);
+            return cursor;
+        }
+        let p = lazy_step(self.lazy_pos.unwrap_or(cursor), cursor, string);
+        self.lazy_pos = Some(p);
+        p
+    }
+
     fn stroke_to(&mut self, to: [f32; 2], ppp: f32, layer: NodeId, target: Target, out: &mut Vec<Stamp>) {
         let spacing = (self.brush.radius_pts * ppp * self.brush.spacing).max(1.0);
         if !self.stroke.active {
@@ -2142,4 +2173,23 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("open-painter", options, Box::new(|cc| Ok(Box::new(App::new(cc, initial)))))
+}
+
+#[cfg(test)]
+mod lazy_tests {
+    use super::lazy_step;
+
+    #[test]
+    fn the_brush_stays_put_while_the_string_is_slack() {
+        assert_eq!(lazy_step([10.0, 10.0], [14.0, 13.0], 6.0), [10.0, 10.0]);
+    }
+
+    #[test]
+    fn a_taut_string_drags_the_brush_to_exactly_the_string_length() {
+        let p = lazy_step([0.0, 0.0], [30.0, 40.0], 20.0);
+        // The cursor is 50 away, so the brush ends up 20 from it, along the line between them.
+        assert!((p[0] - 18.0).abs() < 1e-4 && (p[1] - 24.0).abs() < 1e-4, "{p:?}");
+        let rest = ((30.0 - p[0]).powi(2) + (40.0 - p[1]).powi(2)).sqrt();
+        assert!((rest - 20.0).abs() < 1e-4);
+    }
 }

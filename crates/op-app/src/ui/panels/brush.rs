@@ -31,6 +31,7 @@ impl App {
             slider_row(ui, "Hardness", &mut self.brush.hardness, 0.0..=1.0);
             slider_row(ui, "Opacity", &mut self.brush.opacity, 0.0..=1.0);
             slider_row(ui, "Spacing", &mut self.brush.spacing, 0.02..=1.0);
+            slider_row(ui, "Lazy mouse", &mut self.brush.lazy_radius, 0.0..=200.0).on_hover_text("The brush trails the cursor on a string this long, which smooths wobbly strokes. 0 is off.");
         });
         section(ui, "Symmetry", |ui| {
             ui.horizontal(|ui| {
