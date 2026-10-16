@@ -260,7 +260,9 @@ impl App {
         let (near, far) = self.camera.near_far();
         let globals = Globals {
             view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).to_cols_array_2d(),
-            camera_pos: [cam.x, cam.y, cam.z, 1.0],
+            // w is 1 for a perspective camera and 0 for an orthographic one.
+            camera_pos: [cam.x, cam.y, cam.z, if self.camera.ortho { 0.0 } else { 1.0 }],
+            forward: { let (_, _, f) = self.camera.basis(); [f.x, f.y, f.z, 0.0] },
             light_dir: [
                 light.x,
                 light.y,

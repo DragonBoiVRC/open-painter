@@ -51,6 +51,8 @@ pub struct Stamp {
 struct StampGlobals {
     view_proj: [[f32; 4]; 4],
     camera_pos: [f32; 4],
+    /// Where the camera looks; used instead of the direction to the camera when it is orthographic.
+    forward: [f32; 4],
     /// width px, height px, near, far
     viewport: [f32; 4],
     /// UV offset of the tile being painted (u, v, 0, 0).
@@ -69,6 +71,8 @@ struct StampGlobals {
 pub struct StampView<'a> {
     pub view_proj: [[f32; 4]; 4],
     pub camera_pos: [f32; 4],
+    /// Where the camera looks (see `Globals::forward`).
+    pub forward: [f32; 4],
     pub size_px: [u32; 2],
     pub near_far: [f32; 2],
     pub depth: &'a wgpu::TextureView,
@@ -1267,6 +1271,7 @@ impl PaintGpu {
         StampGlobals {
             view_proj: view.view_proj,
             camera_pos: view.camera_pos,
+            forward: view.forward,
             viewport: [w, h, view.near_far[0], view.near_far[1]],
             tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
             stencil: [place[0] * w, place[1] * h, half_h, half_h],

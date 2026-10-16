@@ -9,11 +9,13 @@ pub struct OrbitCamera {
     pub yaw: f32,
     pub pitch: f32,
     pub fov_y: f32,
+    /// Orthographic projection: no perspective, objects keep their size however far they are.
+    pub ortho: bool,
 }
 
 impl Default for OrbitCamera {
     fn default() -> Self {
-        Self { target: Vec3::ZERO, distance: 4.0, yaw: 0.6, pitch: 0.35, fov_y: 45f32.to_radians() }
+        Self { target: Vec3::ZERO, distance: 4.0, yaw: 0.6, pitch: 0.35, fov_y: 45f32.to_radians(), ortho: false }
     }
 }
 
@@ -108,7 +110,14 @@ impl OrbitCamera {
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let view = glam::camera::rh::view::look_at_mat4(self.position(), self.target, Vec3::Y);
         let (near, far) = self.near_far();
-        let proj = glam::camera::rh::proj::directx::perspective(self.fov_y, aspect.max(1e-3), near, far);
+        let aspect = aspect.max(1e-3);
+        let proj = if self.ortho {
+            // The same height of the scene is visible as in perspective at the target's distance.
+            let half_h = self.distance * (self.fov_y * 0.5).tan();
+            glam::camera::rh::proj::directx::orthographic(-half_h * aspect, half_h * aspect, -half_h, half_h, near, far)
+        } else {
+            glam::camera::rh::proj::directx::perspective(self.fov_y, aspect, near, far)
+        };
         proj * view
     }
 }
@@ -144,6 +153,28 @@ mod tests {
         assert!((c.position() - c.target).normalize().y > 0.99);
         c.set_view(ViewPreset::Bottom);
         assert!((c.position() - c.target).normalize().y < -0.99);
+    }
+
+    #[test]
+    fn orthographic_keeps_sizes_constant_with_distance() {
+        let mut c = OrbitCamera { ortho: true, ..Default::default() };
+        let size_at = |c: &OrbitCamera, depth_offset: f32| {
+            // Two points one unit apart across the view, at a given depth along the view direction.
+            let (right, _, forward) = c.basis();
+            let base = c.target + forward * depth_offset;
+            let (a, b) = (c.view_proj(1.0) * base.extend(1.0), c.view_proj(1.0) * (base + right).extend(1.0));
+            ((b.x / b.w) - (a.x / a.w)).abs()
+        };
+        let (near_size, far_size) = (size_at(&c, -1.0), size_at(&c, 1.0));
+        assert!((near_size - far_size).abs() < 1e-5, "orthographic: {near_size} vs {far_size}");
+        c.ortho = false;
+        assert!(size_at(&c, -1.0) > size_at(&c, 1.0) * 1.1, "perspective shrinks with distance");
+        // The target stays in the middle of the view either way.
+        for ortho in [false, true] {
+            c.ortho = ortho;
+            let clip = c.view_proj(1.5) * c.target.extend(1.0);
+            assert!((clip.x / clip.w).abs() < 1e-4 && (clip.y / clip.w).abs() < 1e-4);
+        }
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct Globals {
     pub bg: [f32; 4],
     /// Section plane: surfaces where `dot(position, xyz) > w` are cut away; all zero for no plane.
     pub clip: [f32; 4],
+    /// The direction the camera looks along (matters for an orthographic camera, whose rays are parallel).
+    pub forward: [f32; 4],
 }
 
 struct Offscreen {
@@ -823,6 +825,7 @@ impl ViewportGpu {
         let view = StampView {
             view_proj: globals.view_proj,
             camera_pos: globals.camera_pos,
+            forward: globals.forward,
             size_px: size,
             near_far: [globals.params[2], globals.params[3]],
             depth: &depth,
@@ -1078,6 +1081,7 @@ mod tests {
                 inv_view_proj: cam.view_proj(1.0).inverse().to_cols_array_2d(),
                 bg: [0.0; 4],
                 clip: [0.0; 4],
+                forward: [-cp.x, -cp.y, -cp.z, 0.0],
             };
             Some(Self { device, queue, gpu, globals, front: cp.normalize() })
         }
@@ -1857,6 +1861,36 @@ mod tests {
         rig.globals.light_dir[3] = 0.0;
         rig.run(&doc, &[]);
         assert_ne!(center_pixel(&rig), shown);
+    }
+
+    /// An orthographic camera paints the visible side only, like a perspective one: the view direction
+    /// (not the direction to a camera position) decides what faces away.
+    #[test]
+    fn an_orthographic_camera_paints_the_visible_side_only() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut cam = OrbitCamera::default();
+        cam.frame(Vec3::splat(-1.0), Vec3::splat(1.0));
+        cam.ortho = true;
+        let p = cam.position();
+        let (_, _, f) = cam.basis();
+        rig.globals.view_proj = cam.view_proj(1.0).to_cols_array_2d();
+        rig.globals.inv_view_proj = cam.view_proj(1.0).inverse().to_cols_array_2d();
+        rig.globals.camera_pos = [p.x, p.y, p.z, 0.0];
+        rig.globals.forward = [f.x, f.y, f.z, 0.0];
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        rig.run(&doc, &[]);
+        let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let m = rig.metal();
+        assert!(texel_rg(&m, sphere_uv(rig.front)).1 > 200, "the near side is painted");
+        assert_eq!(texel_rg(&m, sphere_uv(-rig.front)).1, 0, "the far side is not");
+        // The lit sphere is drawn under the orthographic projection too.
+        rig.globals.light_dir[3] = 0.0;
+        rig.run(&Document::with_default_material(), &[PaintOp::Reset(SIZE)]);
+        let c = center_pixel(&rig);
+        assert!(c[0] > 30, "the model is drawn: {c:?}");
     }
 
     /// Paint reaches the far side of the model only when both "through" options are on.

@@ -11,6 +11,7 @@ struct Globals {
     inv_view_proj: mat4x4<f32>,
     bg: vec4<f32>,             // x: show the environment, y: blur 0..1, z: tone mapping
     clip: vec4<f32>,
+    forward: vec4<f32>,        // where the camera looks (parallel rays when camera_pos.w is 0)
 };
 
 struct EnvParams {
@@ -59,7 +60,7 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let far = g.inv_view_proj * vec4<f32>(i.ndc, 1.0, 1.0);
-    let dir = normalize(far.xyz / far.w - g.camera_pos.xyz);
+    let dir = select(normalize(g.forward.xyz), normalize(far.xyz / far.w - g.camera_pos.xyz), g.camera_pos.w > 0.5);
     let c = cos(g.env.x);
     let s = sin(g.env.x);
     let d = vec3<f32>(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);

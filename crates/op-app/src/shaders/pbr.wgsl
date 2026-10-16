@@ -11,6 +11,7 @@ struct Globals {
     inv_view_proj: mat4x4<f32>,
     bg: vec4<f32>,             // x: show the environment, y: blur 0..1, z: tone mapping (0 filmic, 1 Reinhard, 2 none)
     clip: vec4<f32>,           // section plane: cut where dot(position, xyz) > w (all zero: none)
+    forward: vec4<f32>,        // where the camera looks (parallel rays when camera_pos.w is 0)
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -170,7 +171,9 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     let section_on = dot(g.clip.xyz, g.clip.xyz) > 0.5;
     var n = normalize(i.normal);
     if (!front) { n = -n; }
-    let v = normalize(g.camera_pos.xyz - i.world_pos);
+    // The direction to the camera: from the surface point, or against the view direction when the
+    // camera is orthographic.
+    let v = select(-normalize(g.forward.xyz), normalize(g.camera_pos.xyz - i.world_pos), g.camera_pos.w > 0.5);
     let l = normalize(g.light_dir.xyz);
     let h = normalize(v + l);
 

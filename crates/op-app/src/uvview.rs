@@ -293,6 +293,7 @@ impl ViewportGpu {
         let view = crate::paint::StampView {
             view_proj: [[0.0; 4]; 4],
             camera_pos: [0.0; 4],
+            forward: [0.0; 4],
             size_px: [1, 1],
             near_far: [0.1, 10.0],
             depth: &depth,

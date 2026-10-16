@@ -9,6 +9,7 @@
 struct StampGlobals {
     view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
+    forward: vec4<f32>,
     viewport: vec4<f32>,   // width px, height px, near, far
     tile: vec4<f32>,       // UV offset of the tile being painted
     stencil: vec4<f32>,    // centre px, half-size px
@@ -144,6 +145,8 @@ struct FsOut {
 fn linear_depth(z: f32) -> f32 {
     let n = sg.viewport.z;
     let f = sg.viewport.w;
+    // An orthographic depth buffer is already linear.
+    if (sg.camera_pos.w < 0.5) { return n + z * (f - n); }
     return n * f / (f - z * (f - n));
 }
 
@@ -200,7 +203,7 @@ fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     }
 
     // Back-facing surfaces never take paint.
-    let to_cam = normalize(sg.camera_pos.xyz - world_pos);
+    let to_cam = select(-normalize(sg.forward.xyz), normalize(sg.camera_pos.xyz - world_pos), sg.camera_pos.w > 0.5);
     // With a section plane the inside of the model is shown, so turned-away surfaces can be painted too.
     let section_on = dot(sg.clip.xyz, sg.clip.xyz) > 0.5;
     if (sg.through.y < 0.5 && !section_on && dot(normalize(normal), to_cam) <= 0.0) { return -1.0; }

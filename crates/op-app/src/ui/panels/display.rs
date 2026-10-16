@@ -64,6 +64,11 @@ impl App {
             if super::slider_row(ui, "Field of view", &mut fov, 10.0..=110.0).changed() {
                 self.camera.fov_y = fov.clamp(10.0, 110.0).to_radians();
             }
+            ui.horizontal(|ui| {
+                ui.label("Projection");
+                ui.selectable_value(&mut self.camera.ortho, false, "Perspective");
+                ui.selectable_value(&mut self.camera.ortho, true, "Orthographic");
+            });
             ui.horizontal_wrapped(|ui| {
                 for v in crate::camera::ViewPreset::ALL {
                     if ui.button(v.label()).clicked() {
