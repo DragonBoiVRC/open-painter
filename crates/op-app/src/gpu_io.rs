@@ -62,3 +62,14 @@ pub fn write_texture(device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, 
         wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
     );
 }
+
+/// Decode an IEEE half-precision float (the compositor's RGBA16F output).
+pub fn f16_to_f32(h: u16) -> f32 {
+    let (sign, exp, frac) = ((h >> 15) & 1, (h >> 10) & 0x1f, (h & 0x3ff) as f32);
+    let v = match exp {
+        0 => frac / 1024.0 * 2f32.powi(-14),
+        31 => f32::INFINITY,
+        e => (1.0 + frac / 1024.0) * 2f32.powi(e as i32 - 15),
+    };
+    if sign == 1 { -v } else { v }
+}

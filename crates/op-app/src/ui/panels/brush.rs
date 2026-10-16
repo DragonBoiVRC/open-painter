@@ -72,7 +72,10 @@ impl App {
                     ("Ctrl + right drag", "brush size / hardness"),
                     ("[  ]", "brush size"),
                     ("P  E", "paint / erase"),
+                    ("I", "pick the colour under the cursor"),
                     ("L", "mirror strokes (symmetry)"),
+                    ("C", "cycle channel views"),
+                    ("Tab", "hide panels"),
                     ("F", "frame the model"),
                 ] {
                     ui.label(egui::RichText::new(keys).color(theme::TEXT));

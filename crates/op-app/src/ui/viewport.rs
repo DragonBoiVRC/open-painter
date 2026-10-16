@@ -9,6 +9,19 @@ use egui_phosphor::regular as ph;
 use glam::Vec3;
 use op_core::{MeshMap, FALLBACK_BASE, FALLBACK_METALLIC, FALLBACK_ROUGHNESS};
 
+/// The viewport mode as shown in menus and the status bar.
+pub(crate) fn view_label(v: View) -> String {
+    match v {
+        View::Shaded => "Shaded".to_string(),
+        View::ShadedAo => "Shaded + baked AO".to_string(),
+        View::PaintedNormal => "Normal map".to_string(),
+        View::Channel(0) => "Base color".to_string(),
+        View::Channel(1) => "Roughness".to_string(),
+        View::Channel(_) => "Metallic".to_string(),
+        View::Map(m) => m.label().to_string(),
+    }
+}
+
 impl App {
     /// Re-aim the camera so the whole model is in view.
     pub(crate) fn frame_model(&mut self) {
@@ -18,16 +31,14 @@ impl App {
 
     /// A compact "shading mode" dropdown, used by the viewport overlay.
     pub(crate) fn view_combo(&mut self, ui: &mut egui::Ui) {
-        let label = |v: View| match v {
-            View::Shaded => "Shaded".to_string(),
-            View::ShadedAo => "Shaded + baked AO".to_string(),
-            View::PaintedNormal => "Normal map".to_string(),
-            View::Map(m) => m.label().to_string(),
-        };
+        let label = view_label;
         let mut view = self.view;
         egui::ComboBox::from_id_salt("viewport_shading").selected_text(label(self.view)).width(150.0).show_ui(ui, |ui| {
             ui.selectable_value(&mut view, View::Shaded, "Shaded");
             ui.selectable_value(&mut view, View::PaintedNormal, "Normal map");
+            for c in 0..3 {
+                ui.selectable_value(&mut view, View::Channel(c), view_label(View::Channel(c)));
+            }
             if self.baked0().contains_key(&MeshMap::AmbientOcclusion) {
                 ui.selectable_value(&mut view, View::ShadedAo, "Shaded + baked AO");
             }
@@ -70,6 +81,19 @@ impl App {
         }
         if resp.hovered() {
             self.camera.zoom(ui.input(|i| i.smooth_scroll_delta.y));
+        }
+
+        // I: pick the colour under the cursor into the paint colour.
+        if resp.hovered() && !self.dialog.is_some() && ui.input(|i| i.key_pressed(egui::Key::I) && !i.modifiers.any()) && !ui.ctx().egui_wants_keyboard_input() {
+            if let Some(pos) = resp.hover_pos() {
+                match self.sample_color_at(rect, pos) {
+                    Some(c) => {
+                        self.channels.base_color = c;
+                        self.status = "Picked the colour under the cursor.".into();
+                    }
+                    None => self.status = "No painted surface under the cursor to pick from.".into(),
+                }
+            }
         }
 
         let mut stamps = Vec::new();
@@ -136,6 +160,7 @@ impl App {
                     View::Map(_) => 1.0,
                     View::ShadedAo => 2.0,
                     View::PaintedNormal => 3.0,
+                    View::Channel(c) => 4.0 + c as f32,
                 },
             ],
             // Shown only where the layer stack leaves a pixel uncovered.

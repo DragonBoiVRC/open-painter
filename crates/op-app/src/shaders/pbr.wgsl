@@ -130,7 +130,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
 
     let pv = textureSample(preview_tex, preview_samp, uv_t);
     let nmap = textureSample(paint_normal, paint_samp, uv_t).rgb;
-    if (g.light_dir.w > 2.5) {
+    if (g.light_dir.w > 2.5 && g.light_dir.w < 3.5) {
         return vec4<f32>(nmap, 1.0);
     }
     // Cotangent frame from screen-space derivatives. The image's +Y is up, and v grows downwards.
@@ -151,7 +151,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     if (g.light_dir.w > 0.5 && g.light_dir.w < 1.5) {
         return vec4<f32>(pv.rgb, 1.0);
     }
-    let ao = select(1.0, pv.r, g.light_dir.w >= 1.5);
+    let ao = select(1.0, pv.r, g.light_dir.w >= 1.5 && g.light_dir.w < 2.5);
     let pb = textureSample(paint_base, paint_samp, uv_t);
     let pm = textureSample(paint_metal, paint_samp, uv_t);
     let pr = textureSample(paint_rough, paint_samp, uv_t);
@@ -160,6 +160,13 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let a = roughness * roughness;
     let albedo = pb.rgb + g.base_color.rgb * (1.0 - pb.a);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    // Single-channel views: the painted value, unlit.
+    if (g.light_dir.w > 3.5) {
+        let mode = i32(g.light_dir.w + 0.5);
+        if (mode == 4) { return vec4<f32>(to_srgb(albedo), 1.0); }
+        if (mode == 5) { return vec4<f32>(vec3<f32>(roughness), 1.0); }
+        return vec4<f32>(vec3<f32>(metallic), 1.0);
+    }
 
     let n_dot_l = max(dot(n, l), 0.0);
     let n_dot_v = max(dot(n, v), 1e-4);

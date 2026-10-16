@@ -30,6 +30,9 @@ impl App {
             let mut view = current;
             ui.selectable_value(&mut view, View::Shaded, "Shaded");
             ui.selectable_value(&mut view, View::PaintedNormal, "Normal map (painted height + baked normal)");
+            for c in 0..3 {
+                ui.selectable_value(&mut view, View::Channel(c), crate::ui::viewport::view_label(View::Channel(c)));
+            }
             ui.add_enabled_ui(self.baked0().contains_key(&MeshMap::AmbientOcclusion), |ui| {
                 ui.selectable_value(&mut view, View::ShadedAo, "Shaded with baked ambient occlusion");
             });

@@ -297,6 +297,32 @@ impl App {
     }
 
     /// Make the texture set under `pos` (a point in the viewport `rect`) the active one.
+    /// The colour painted at the point under the cursor, as sRGB (what the paint colour swatch holds).
+    pub(crate) fn sample_color_at(&self, rect: egui::Rect, pos: egui::Pos2) -> Option<[f32; 3]> {
+        let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+        let ndc = glam::Vec2::new((pos.x - rect.min.x) / w * 2.0 - 1.0, 1.0 - (pos.y - rect.min.y) / h * 2.0);
+        let inv = self.camera.view_proj(w / h).inverse();
+        let near = inv.project_point3(ndc.extend(0.0));
+        let far = inv.project_point3(ndc.extend(1.0));
+        let (set, _, uv) = self.mesh.raycast_uv_where(near, (far - near).normalize_or_zero(), |s| !self.hidden_sets.contains(&s))?;
+        let renderer = self.render_state.renderer.read();
+        let gpu = renderer.callback_resources.get::<ViewportGpu>()?;
+        let paint = gpu.sets.get(set)?;
+        let size = paint.size();
+        // Only the first UV tile is sampled; a model that spreads over tiles reports no colour elsewhere.
+        if !(0.0..1.0).contains(&uv[0]) || !(0.0..1.0).contains(&uv[1]) {
+            return None;
+        }
+        let texels = crate::gpu_io::read_texture(&self.render_state.device, &self.render_state.queue, &paint.output.base, size, 8);
+        let (x, y) = (((uv[0] * size as f32) as u32).min(size - 1), ((uv[1] * size as f32) as u32).min(size - 1));
+        let i = ((y * size + x) * 8) as usize;
+        let c = |k: usize| crate::gpu_io::f16_to_f32(u16::from_le_bytes([texels[i + k * 2], texels[i + k * 2 + 1]]));
+        // Premultiplied over the fallback colour the viewport shows where nothing is painted.
+        let alpha = c(3);
+        let lin = [0, 1, 2].map(|k| c(k) + op_core::FALLBACK_BASE[k] * (1.0 - alpha));
+        Some(lin.map(|v| linear_to_srgb(v.clamp(0.0, 1.0))))
+    }
+
     pub(crate) fn pick_set_at(&mut self, rect: egui::Rect, pos: egui::Pos2) {
         if self.set_ranges_len() < 2 {
             return;
@@ -423,4 +449,8 @@ mod tests {
         assert_eq!(SetState::fresh(64, 3).bakes.len(), 3, "one baked-map slot per UV tile");
         assert_eq!(SetState::fresh(64, 0).bakes.len(), 1, "at least one");
     }
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }

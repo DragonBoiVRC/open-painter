@@ -110,8 +110,13 @@ impl Mesh {
     /// Like [`Mesh::raycast_set`], but only sets for which `visible` is true can be hit; the others are
     /// seen through.
     pub fn raycast_set_where(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool) -> Option<(usize, f32)> {
+        self.raycast_uv_where(origin, dir, visible).map(|(set, dist, _)| (set, dist))
+    }
+
+    /// The nearest visible surface along a ray: its texture set, the distance and the UV coordinate hit.
+    pub fn raycast_uv_where(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool) -> Option<(usize, f32, [f32; 2])> {
         let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
-        let mut best: Option<(usize, f32)> = None;
+        let mut best: Option<(usize, f32, [f32; 2])> = None;
         for (set, r) in self.set_ranges().iter().enumerate() {
             if !visible(set) {
                 continue;
@@ -138,8 +143,10 @@ impl Mesh {
                     continue;
                 }
                 let dist = e2.dot(q) * inv;
-                if dist > 0.0 && best.is_none_or(|(_, d)| dist < d) {
-                    best = Some((set, dist));
+                if dist > 0.0 && best.is_none_or(|(_, d, _)| dist < d) {
+                    let uv = |i: u32| Vec2::from(self.vertices[i as usize].uv);
+                    let hit = uv(t[0]) * (1.0 - u - v) + uv(t[1]) * u + uv(t[2]) * v;
+                    best = Some((set, dist, hit.to_array()));
                 }
             }
         }
@@ -364,6 +371,19 @@ fn append_node(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raycast_reports_the_uv_under_the_ray() {
+        let m = Mesh::uv_sphere(1.0, 96, 48);
+        let target = Vec3::new(0.3, 0.5, 0.8).normalize();
+        let (set, dist, uv) = m.raycast_uv_where(target * 3.0, -target, |_| true).expect("the ray hits the sphere");
+        assert_eq!(set, 0);
+        assert!((dist - 2.0).abs() < 0.01, "front surface is 2 away: {dist}");
+        let v = target.y.acos() / std::f32::consts::PI;
+        let u = target.z.atan2(target.x).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
+        assert!((uv[0] - u).abs() < 0.01 && (uv[1] - v).abs() < 0.01, "uv {uv:?} vs {:?}", [u, v]);
+        assert!(m.raycast_uv_where(Vec3::new(5.0, 5.0, 5.0), Vec3::X, |_| true).is_none(), "a miss reports nothing");
+    }
 
     #[test]
     fn sphere_is_unit_and_indexed_in_range() {

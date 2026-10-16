@@ -211,6 +211,8 @@ enum View {
     ShadedAo,
     /// The normal map made from painted height and the baked normal, shown as colour.
     PaintedNormal,
+    /// One painted channel on its own: 0 base color, 1 roughness, 2 metallic.
+    Channel(u32),
     /// A baked map, shown as-is.
     Map(MeshMap),
 }
@@ -888,13 +890,13 @@ impl App {
     /// Switch what the viewport shows, uploading the baked maps it needs (one per UV tile).
     fn set_view(&mut self, view: View) {
         let wanted = |b: &sets::TileBake| match view {
-            View::Shaded | View::PaintedNormal => None,
+            View::Shaded | View::PaintedNormal | View::Channel(_) => None,
             View::ShadedAo => b.baked.get(&MeshMap::AmbientOcclusion).cloned(),
             View::Map(m) => b.baked.get(&m).cloned(),
         };
         let sources: Vec<Option<BakedMap>> = self.bakes.iter().map(wanted).collect();
         // A view none of whose maps are baked falls back to the normal shaded view.
-        let view = if sources.iter().all(Option::is_none) && view != View::PaintedNormal { View::Shaded } else { view };
+        let view = if sources.iter().all(Option::is_none) && view != View::PaintedNormal && !matches!(view, View::Channel(_)) { View::Shaded } else { view };
         let images: Vec<Option<(u32, Vec<u8>)>> = sources
             .iter()
             .map(|src| {
@@ -1655,7 +1657,9 @@ impl App {
                         ("Ctrl + click", "pick the texture set under the cursor"),
                         ("H / Shift+H", "hide or show the active material / show all"),
                         ("P / E", "paint / erase"),
+                        ("I", "pick the colour under the cursor"),
                         ("L", "toggle symmetry"),
+                        ("C", "cycle base color / roughness / metallic views"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
                         ("Alt + left drag", "orbit"),
@@ -1969,6 +1973,16 @@ impl App {
         }
         if rename {
             self.layer_command(layers::LayerCmd::Rename);
+        }
+        if ui.input(|i| i.key_pressed(Key::C) && !i.modifiers.any()) {
+            // C steps through the painted channels and back to the lit view.
+            let next = match self.view {
+                View::Shaded => View::Channel(0),
+                View::Channel(n) if n < 2 => View::Channel(n + 1),
+                _ => View::Shaded,
+            };
+            self.set_view(next);
+            self.status = format!("Viewport: {}", crate::ui::viewport::view_label(next));
         }
         if ui.input(|i| i.key_pressed(Key::L) && !i.modifiers.any()) {
             self.symmetry = if self.symmetry == 0 { 1 } else { 0 };
