@@ -136,6 +136,8 @@ pub(crate) fn apply_batch(
 
 pub struct ViewportGpu {
     pbr: wgpu::RenderPipeline,
+    /// The HDR environment the shader reflects when the lighting preset asks for it.
+    env: crate::envmap::EnvGpu,
     uv_pipeline: wgpu::RenderPipeline,
     /// A 1x1 "nothing drawn" UV buffer for when the 3D view is not drawn.
     pub(crate) dummy_uv: wgpu::Texture,
@@ -257,10 +259,11 @@ impl ViewportGpu {
             )
             .create_view(&Default::default());
         let preview_bind = make_preview_bind(device, &preview_layout, &white_view, &preview_sampler);
+        let env = crate::envmap::EnvGpu::new(device, queue);
         let pbr_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/pbr.wgsl"));
         let pbr_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pbr_pl"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&paint.material_layout), Some(&preview_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&paint.material_layout), Some(&preview_layout), Some(&env.layout)],
             immediate_size: 0,
         });
         let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
@@ -403,6 +406,7 @@ impl ViewportGpu {
 
         Self {
             pbr,
+            env,
             uv_pipeline,
             dummy_uv,
             blit,
@@ -552,6 +556,11 @@ impl ViewportGpu {
                 }
             }
         }
+    }
+
+    /// Use `image` as the HDR environment (or drop it with `None`).
+    pub fn set_environment(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: Option<&op_image::hdr::HdrImage>) {
+        self.env.set(device, queue, image);
     }
 
     /// Set the pictures brush strokes read (stamp alpha and stencil).
@@ -722,6 +731,7 @@ impl ViewportGpu {
                     let preview = if set == self.active { self.preview_tiles.get(ti).unwrap_or(&self.preview_bind) } else { &self.preview_bind };
                     pass.set_bind_group(1, paint.material_bind(), &[]);
                     pass.set_bind_group(2, preview, &[]);
+                    pass.set_bind_group(3, &self.env.bind, &[]);
                     pass.draw_indexed(first..first + count, 0, 0..1);
                 }
             }
@@ -1998,6 +2008,35 @@ mod tests {
         let px = crate::gpu_io::read_texture(&rig.device, &rig.queue, tex, SIZE, 4);
         let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
         [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    }
+
+    /// The HDRI lighting preset lights the model from the loaded picture: brighter picture, brighter
+    /// model, and a red picture gives red light. Without a picture it falls back to the procedural look.
+    #[test]
+    fn an_hdr_environment_lights_the_model() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let doc = Document::with_default_material();
+        rig.globals.light_dir[3] = 0.0;
+        rig.globals.env = [0.0, 1.0, 0.0, 4.0]; // no key light, HDRI preset
+        let flat = |v: [f32; 3]| op_image::hdr::HdrImage { width: 32, height: 16, rgb: (0..32 * 16).flat_map(|_| v).collect() };
+
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let procedural = center_pixel(&rig); // no picture loaded yet: preset 4 is ignored by the shader
+        rig.gpu.set_environment(&rig.device, &rig.queue, Some(&flat([0.2, 0.2, 0.2])));
+        rig.run(&doc, &[]);
+        let dim = center_pixel(&rig);
+        rig.gpu.set_environment(&rig.device, &rig.queue, Some(&flat([2.0, 2.0, 2.0])));
+        rig.run(&doc, &[]);
+        let bright = center_pixel(&rig);
+        assert!(bright[0] as i32 > dim[0] as i32 + 40, "a brighter environment should light the model more: {dim:?} -> {bright:?}");
+        rig.gpu.set_environment(&rig.device, &rig.queue, Some(&flat([2.0, 0.0, 0.0])));
+        rig.run(&doc, &[]);
+        let red = center_pixel(&rig);
+        assert!(red[0] as i32 > red[1] as i32 + 30 && red[0] as i32 > red[2] as i32 + 30, "a red environment should give red light: {red:?}");
+        // Dropping the picture goes back to the procedural environment.
+        rig.gpu.set_environment(&rig.device, &rig.queue, None);
+        rig.run(&doc, &[]);
+        assert_eq!(center_pixel(&rig), procedural);
     }
 
     /// Preview modes: 0 shaded, 1 the map as-is, 2 shaded with the map darkening the ambient light.

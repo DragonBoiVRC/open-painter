@@ -338,3 +338,101 @@ mod tests {
         }
     }
 }
+
+/// File extensions an HDR environment can come in.
+const HDRI_EXTENSIONS: [&str; 3] = ["hdr", "exr", "png"];
+
+/// A file name that is safe to keep in the environments folder.
+fn hdri_file_name(name: &str) -> String {
+    let clean: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') { c } else { '_' }).collect();
+    let clean = clean.trim_matches(|c| c == '.' || c == ' ').to_string();
+    if clean.is_empty() { "environment.hdr".into() } else { clean.chars().take(96).collect() }
+}
+
+impl App {
+    /// The environments saved in the library folder, by file name.
+    pub(crate) fn hdri_library(&self) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(files::environments_dir()) else { return Vec::new() };
+        let mut names: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| HDRI_EXTENSIONS.contains(&x.to_ascii_lowercase().as_str())))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        names
+    }
+
+    /// Ask for an HDR environment file, keep a copy in the library and use it.
+    pub(crate) fn start_hdri_import(&mut self) {
+        if self.hdri_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Some(path) = rfd::FileDialog::new().add_filter("HDR environments", &HDRI_EXTENSIONS).set_title("Load an HDR environment").pick_file() else {
+                let _ = tx.send(Err(String::new()));
+                return;
+            };
+            let _ = tx.send(read_hdri(&path, true));
+        });
+        self.hdri_rx = Some(rx);
+        self.status = "Reading the environment...".into();
+    }
+
+    /// Use an environment from the library folder.
+    pub(crate) fn use_hdri_from_library(&mut self, name: &str) {
+        if self.hdri_rx.is_some() {
+            return;
+        }
+        let path = files::environments_dir().join(hdri_file_name(name));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_hdri(&path, false));
+        });
+        self.hdri_rx = Some(rx);
+        self.status = "Reading the environment...".into();
+    }
+
+    pub(crate) fn poll_hdri(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.hdri_rx else { return };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.hdri_rx = None;
+                match result {
+                    Ok((name, img)) => {
+                        let mut renderer = self.render_state.renderer.write();
+                        if let Some(gpu) = renderer.callback_resources.get_mut::<ViewportGpu>() {
+                            gpu.set_environment(&self.render_state.device, &self.render_state.queue, Some(&img));
+                        }
+                        drop(renderer);
+                        self.env.preset = 4;
+                        self.status = format!("Lighting from {name}");
+                        self.hdri_name = Some(name);
+                    }
+                    Err(e) if e.is_empty() => self.status.clear(),
+                    Err(e) => self.status = format!("Could not use that environment: {e}"),
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(150)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.hdri_rx = None,
+        }
+    }
+}
+
+/// Read and decode an environment on a worker thread; with `save`, also copy it into the library.
+fn read_hdri(path: &Path, save: bool) -> Result<(String, op_image::hdr::HdrImage), String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() as usize > op_image::MAX_FILE_BYTES {
+        return Err("the file is too large".into());
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let img = op_image::hdr::decode_hdr(&bytes).map_err(|e| e.to_string())?;
+    let name = hdri_file_name(&path.file_name().and_then(|n| n.to_str()).unwrap_or("environment.hdr").to_string());
+    if save {
+        let dir = files::environments_dir();
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(dir.join(&name), &bytes);
+        }
+    }
+    Ok((name, img))
+}

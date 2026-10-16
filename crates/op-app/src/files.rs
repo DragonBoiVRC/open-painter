@@ -55,6 +55,10 @@ pub fn textures_dir() -> PathBuf {
     data_dir().join("textures")
 }
 
+pub fn environments_dir() -> PathBuf {
+    data_dir().join("environments")
+}
+
 pub fn presets_dir() -> PathBuf {
     data_dir().join("presets")
 }

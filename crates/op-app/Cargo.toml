@@ -12,6 +12,7 @@ egui = "0.37.0"
 egui-phosphor = { version = "0.14.0", path = "../egui-phosphor" }
 egui_dock = { version = "0.21.1", path = "../egui_dock", features = ["serde"] }
 glam = "0.34.1"
+half = "2"
 op-image = { version = "0.0.1", path = "../op-image" }
 op-bake = { version = "0.0.1", path = "../op-bake" }
 op-core = { version = "0.0.1", path = "../op-core" }

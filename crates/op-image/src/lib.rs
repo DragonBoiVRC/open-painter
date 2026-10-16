@@ -1,6 +1,8 @@
 //! Texture images for fill layers: decoding with limits, content ids, mip chains, thumbnails and
 //! guessing which channel an image is meant for from its file name. No GPU code here.
 
+pub mod hdr;
+
 use image::{imageops::FilterType, DynamicImage, ImageReader, RgbaImage};
 use op_core::Slot;
 use std::io::Cursor;

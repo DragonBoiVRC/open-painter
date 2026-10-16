@@ -28,6 +28,16 @@ struct Globals {
 @group(2) @binding(0) var preview_tex: texture_2d<f32>;
 @group(2) @binding(1) var preview_samp: sampler;
 
+// The HDR environment: a lat-long picture with mips (rougher reflections read blurrier mips) and
+// diffuse spherical harmonics. info.y is 1 when a picture is loaded.
+struct EnvParams {
+    sh: array<vec4<f32>, 9>,
+    info: vec4<f32>,
+};
+@group(3) @binding(0) var<uniform> envp: EnvParams;
+@group(3) @binding(1) var env_tex: texture_2d<f32>;
+@group(3) @binding(2) var env_samp: sampler;
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -96,6 +106,21 @@ fn environment(dir: vec3<f32>, blur: f32) -> vec3<f32> {
     let c = cos(g.env.x);
     let s = sin(g.env.x);
     let d = vec3<f32>(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);
+    if (envp.info.y > 0.5 && i32(g.env.w + 0.5) == 4) {
+        if (blur >= 0.999) {
+            // The diffuse light: spherical harmonics of the whole picture.
+            let sh = envp.sh;
+            let e = sh[0].xyz * 0.282095
+                + sh[1].xyz * 0.488603 * d.y + sh[2].xyz * 0.488603 * d.z + sh[3].xyz * 0.488603 * d.x
+                + sh[4].xyz * 1.092548 * d.x * d.y + sh[5].xyz * 1.092548 * d.y * d.z
+                + sh[6].xyz * 0.315392 * (3.0 * d.z * d.z - 1.0)
+                + sh[7].xyz * 1.092548 * d.x * d.z + sh[8].xyz * 0.546274 * (d.x * d.x - d.y * d.y);
+            return max(e, vec3<f32>(0.0));
+        }
+        let uv = vec2<f32>(atan2(d.z, d.x) / 6.2831853 + 0.5, acos(clamp(d.y, -1.0, 1.0)) / 3.1415927);
+        let lod = clamp(blur, 0.0, 1.0) * max(envp.info.x - 1.0, 0.0);
+        return textureSampleLevel(env_tex, env_samp, uv, lod).rgb;
+    }
     let preset = i32(g.env.w + 0.5);
     let up = d.y * 0.5 + 0.5;
     if (preset == 1) {

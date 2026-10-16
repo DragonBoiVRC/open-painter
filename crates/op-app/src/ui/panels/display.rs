@@ -4,18 +4,36 @@ use super::{hint, section};
 use crate::{App, View};
 use op_core::MeshMap;
 
-const ENVIRONMENTS: [&str; 4] = ["Studio", "Outdoor", "Sunset", "Neutral"];
+const ENVIRONMENTS: [&str; 5] = ["Studio", "Outdoor", "Sunset", "Neutral", "HDRI"];
 
 impl App {
     pub(crate) fn display_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Environment", |ui| {
             ui.horizontal(|ui| {
                 ui.label("Lighting");
-                egui::ComboBox::from_id_salt("environment").selected_text(ENVIRONMENTS[self.env.preset as usize % 4]).show_ui(ui, |ui| {
-                    for (i, name) in ENVIRONMENTS.iter().enumerate() {
+                let shown = match (self.env.preset, &self.hdri_name) {
+                    (4, Some(name)) => name.clone(),
+                    (p, _) => ENVIRONMENTS[p as usize % 5].to_string(),
+                };
+                egui::ComboBox::from_id_salt("environment").selected_text(shown).show_ui(ui, |ui| {
+                    for (i, name) in ENVIRONMENTS.iter().enumerate().take(4) {
                         ui.selectable_value(&mut self.env.preset, i as u32, *name);
                     }
                 });
+            });
+            ui.horizontal(|ui| {
+                ui.label("HDRI");
+                let library = self.hdri_library();
+                egui::ComboBox::from_id_salt("hdri_library").selected_text(self.hdri_name.clone().unwrap_or_else(|| "None".into())).show_ui(ui, |ui| {
+                    for name in &library {
+                        if ui.selectable_label(self.hdri_name.as_ref() == Some(name) && self.env.preset == 4, name).clicked() {
+                            self.use_hdri_from_library(name);
+                        }
+                    }
+                });
+                if ui.button("Load...").on_hover_text("Choose a Radiance .hdr or OpenEXR environment picture").clicked() {
+                    self.start_hdri_import();
+                }
             });
             super::slider_row(ui, "Rotation", &mut self.env.rotation, 0.0..=360.0);
             super::slider_row(ui, "Exposure", &mut self.env.exposure, -3.0..=3.0);

@@ -2001,6 +2001,7 @@ dependencies = [
  "egui-phosphor",
  "egui_dock",
  "glam",
+ "half",
  "image",
  "op-bake",
  "op-core",

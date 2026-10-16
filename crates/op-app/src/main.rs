@@ -1,5 +1,6 @@
 mod camera;
 mod composite;
+mod envmap;
 mod files;
 mod gpu_io;
 mod images;
@@ -335,6 +336,9 @@ struct App {
     show_stencil: bool,
     place_stencil: bool,
     import_rx: Option<Receiver<Vec<PathBuf>>>,
+    /// An HDRI being read in the background, and the one in use.
+    hdri_rx: Option<Receiver<Result<(String, op_image::hdr::HdrImage), String>>>,
+    hdri_name: Option<String>,
     /// Groups folded shut in the layers panel.
     collapsed: std::collections::HashSet<NodeId>,
     /// Layer being renamed in place, with its draft name.
@@ -478,6 +482,8 @@ impl App {
             show_stencil: true,
             place_stencil: false,
             import_rx: None,
+            hdri_rx: None,
+            hdri_name: None,
             collapsed: Default::default(),
             renaming: None,
             target: Target::Content,
@@ -1182,6 +1188,7 @@ impl App {
         }
         self.poll_picker(ctx);
         self.poll_texture_import(ctx);
+        self.poll_hdri(ctx);
         let used = self.doc.texture_ids();
         self.ensure_tex_thumbs(ctx, &used);
         self.refresh_thumbs(ctx);
