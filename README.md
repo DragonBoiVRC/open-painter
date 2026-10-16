@@ -8,14 +8,19 @@ baked mesh maps, height-to-normal painting, UDIM tiles and export presets.
 
 - Import FBX (binary, multi-material), OBJ and glTF; each material becomes a texture set.
 - Layer stack with groups, blend modes, fill and paint layers, masks and generated masks.
-- Brush painting in 3D (projective) and in the 2D UV view, with Base color, Metallic, Roughness and
-  Height channels; height becomes a tangent-space normal map.
+- Brush painting in 3D (projective) and in the 2D UV view, with Base color, Metallic, Roughness,
+  Height, Emissive and Opacity channels; height becomes a tangent-space normal map.
+- Paint, erase, smudge, clone, projection and fill tools; image-tip brushes, stencils, pen pressure,
+  stroke opacity vs flow, lazy mouse and saved brush presets.
+- Per-layer colour adjustment, filters (blur, sharpen, levels, warp, ...), per-channel blend modes and
+  fill layers that project textures triplanar or along an axis.
 - Show, hide or isolate individual materials in the 3D view.
 - Optional UV tiles (UDIM): one texture per tile, baked and exported separately.
 - CPU baking (AO, curvature, thickness, normals, position, ID and more), including from a high-poly mesh.
 - Export presets (PBR, Unity, Unreal, glTF, and import of Substance Painter `.spexp` presets).
 - Imported textures (Base Color, Normal, Height, ...) dragged from the shelf onto a fill layer's channel slots.
-- Brush shapes, rotation, jitter and mirror symmetry; environment lighting and single-channel views.
+- Brush shapes, rotation, jitter and mirror symmetry; HDRI or procedural environment lighting, wireframe,
+  anti-aliasing and single-channel views.
 - Dockable interface; the layout is remembered.
 
 Coming from Substance Painter? See [docs/07-coming-from-substance-painter.md](docs/07-coming-from-substance-painter.md).
