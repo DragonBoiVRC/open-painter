@@ -12,6 +12,7 @@ struct Globals {
     bg: vec4<f32>,             // x: show the environment, y: blur 0..1, z: tone mapping
     clip: vec4<f32>,
     forward: vec4<f32>,        // where the camera looks (parallel rays when camera_pos.w is 0)
+    ssao: vec4<f32>,
 };
 
 struct EnvParams {

@@ -66,6 +66,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Hide parts (7): click a face, UV island, mesh part or texture set to hide it so you can paint what is behind (Shift+click shows it, "Show all parts" resets). Hidden parts are a view setting and are not saved with the project.
 - Mask view: the backslash key shows the selected layer's mask on the model as grey (white reveals, black hides); press it again to go back.
 - Your lighting and display choices, including the HDRI in use, are remembered between sessions.
+- Ambient occlusion (screen space) in Display Settings darkens creases and where parts meet; it is a viewport look only.
 - Lazy mouse (Properties - Brush, "Lazy mouse") makes the brush trail the cursor on a string for smooth strokes.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.

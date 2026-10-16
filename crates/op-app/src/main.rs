@@ -115,6 +115,11 @@ struct Environment {
     show_transparency: bool,
     /// Smooth jagged edges in the 3D view (FXAA).
     fxaa: bool,
+    /// Screen-space ambient occlusion: darkens creases and where parts meet.
+    ssao: bool,
+    ssao_strength: f32,
+    /// Its reach in screen points.
+    ssao_radius: f32,
 }
 
 /// The display settings that are kept between sessions: the lighting and the HDRI in use.
@@ -149,6 +154,8 @@ impl DisplaySettings {
         e.light = fin(e.light, 1.0, 0.0, 3.0);
         e.background_blur = fin(e.background_blur, 0.3, 0.0, 1.0);
         e.tonemap = e.tonemap.min(2);
+        e.ssao_strength = fin(e.ssao_strength, 0.8, 0.0, 1.0);
+        e.ssao_radius = fin(e.ssao_radius, 12.0, 2.0, 40.0);
         me.fov_degrees = if me.fov_degrees.is_finite() && me.fov_degrees > 0.0 { me.fov_degrees.clamp(10.0, 110.0) } else { 45.0 };
         me
     }
@@ -156,7 +163,7 @@ impl DisplaySettings {
 
 impl Default for Environment {
     fn default() -> Self {
-        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true, fxaa: true }
+        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true, fxaa: true, ssao: false, ssao_strength: 0.8, ssao_radius: 12.0 }
     }
 }
 

@@ -51,6 +51,11 @@ impl App {
             });
             ui.checkbox(&mut self.env.show_transparency, "Show opacity (see-through paint)").on_hover_text("See-through paint is drawn as dithered holes; switch off to see the model solid");
             ui.checkbox(&mut self.env.fxaa, "Smooth edges (anti-aliasing)");
+            ui.checkbox(&mut self.env.ssao, "Ambient occlusion (screen space)").on_hover_text("Darkens creases and where parts meet. A look for the viewport only: it is not painted or exported.");
+            if self.env.ssao {
+                super::slider_row(ui, "AO strength", &mut self.env.ssao_strength, 0.0..=1.0);
+                super::slider_row(ui, "AO radius", &mut self.env.ssao_radius, 2.0..=40.0);
+            }
             super::slider_row(ui, "Rotation", &mut self.env.rotation, 0.0..=360.0);
             super::slider_row(ui, "Exposure", &mut self.env.exposure, -3.0..=3.0);
             super::slider_row(ui, "Key light", &mut self.env.light, 0.0..=3.0);

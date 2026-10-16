@@ -12,6 +12,7 @@ struct Globals {
     bg: vec4<f32>,             // x: show the environment, y: blur 0..1, z: tone mapping (0 filmic, 1 Reinhard, 2 none)
     clip: vec4<f32>,           // section plane: cut where dot(position, xyz) > w (all zero: none)
     forward: vec4<f32>,        // where the camera looks (parallel rays when camera_pos.w is 0)
+    ssao: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;

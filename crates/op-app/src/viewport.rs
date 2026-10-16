@@ -28,6 +28,8 @@ pub struct Globals {
     pub clip: [f32; 4],
     /// The direction the camera looks along (matters for an orthographic camera, whose rays are parallel).
     pub forward: [f32; 4],
+    /// Screen-space ambient occlusion: x strength (0 is off), y radius in pixels.
+    pub ssao: [f32; 4],
 }
 
 struct Offscreen {
@@ -157,6 +159,8 @@ pub(crate) fn apply_batch(
 pub struct ViewportGpu {
     pbr: wgpu::RenderPipeline,
     wire_pipeline: wgpu::RenderPipeline,
+    ssao_pipeline: wgpu::RenderPipeline,
+    ssao_depth_layout: wgpu::BindGroupLayout,
     bg_pipeline: wgpu::RenderPipeline,
     /// An HDR environment is loaded (so there is something to draw behind the model).
     env_loaded: bool,
@@ -363,6 +367,47 @@ impl ViewportGpu {
             multiview_mask: None,
             cache: None,
         });
+        let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ssao_depth_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let ssao_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/ssao.wgsl"));
+        let ssao_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ssao_pl"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&depth_layout)],
+            immediate_size: 0,
+        });
+        // Multiply the finished picture by the occlusion: dst = src * dst.
+        let multiply = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Dst, dst_factor: wgpu::BlendFactor::Zero, operation: wgpu::BlendOperation::Add };
+        let ssao_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ssao"),
+            layout: Some(&ssao_pl),
+            vertex: wgpu::VertexState { module: &ssao_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &ssao_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: COLOR_FORMAT,
+                    blend: Some(wgpu::BlendState { color: multiply, alpha: wgpu::BlendComponent::REPLACE }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let wire_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/wire3d.wgsl"));
         let wire_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("wire3d_pl"),
@@ -525,6 +570,8 @@ impl ViewportGpu {
         Self {
             pbr,
             wire_pipeline,
+            ssao_pipeline,
+            ssao_depth_layout: depth_layout,
             bg_pipeline,
             env_loaded: false,
             wire_edges: None,
@@ -918,6 +965,32 @@ impl ViewportGpu {
         }
         drop(pass);
 
+        // Screen-space ambient occlusion multiplies the finished picture.
+        if globals.ssao[0] > 0.0 {
+            let depth_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ssao_depth_bind"),
+                layout: &self.ssao_depth_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&off.depth_view) }],
+            });
+            let mut ao_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssao_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            ao_pass.set_pipeline(&self.ssao_pipeline);
+            ao_pass.set_bind_group(0, &self.globals_bind, &[]);
+            ao_pass.set_bind_group(1, &depth_bind, &[]);
+            ao_pass.draw(0..3, 0..1);
+        }
+
         // The UV buffer, for the next frame's smudge and clone stamps.
         let mut uv_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("uvbuf_pass"),
@@ -1082,6 +1155,7 @@ mod tests {
                 bg: [0.0; 4],
                 clip: [0.0; 4],
                 forward: [-cp.x, -cp.y, -cp.z, 0.0],
+                ssao: [0.0; 4],
             };
             Some(Self { device, queue, gpu, globals, front: cp.normalize() })
         }
@@ -1891,6 +1965,48 @@ mod tests {
         rig.run(&Document::with_default_material(), &[PaintOp::Reset(SIZE)]);
         let c = center_pixel(&rig);
         assert!(c[0] > 30, "the model is drawn: {c:?}");
+    }
+
+    /// Screen-space occlusion darkens a crease (where a floor meets a wall) and leaves open floor alone.
+    #[test]
+    fn ssao_darkens_creases_and_not_open_surfaces() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        // A floor (y = 0) and a wall rising from its far edge (z = -1), each drawn from both sides.
+        let v = |x: f32, y: f32, z: f32, nx: f32, ny: f32, nz: f32| Vertex { position: [x, y, z], normal: [nx, ny, nz], uv: [(x + 1.0) / 2.0, (z + 1.0) / 2.0] };
+        let vertices = vec![
+            v(-1.0, 0.0, -1.0, 0.0, 1.0, 0.0), v(1.0, 0.0, -1.0, 0.0, 1.0, 0.0), v(1.0, 0.0, 1.0, 0.0, 1.0, 0.0), v(-1.0, 0.0, 1.0, 0.0, 1.0, 0.0),
+            v(-1.0, 1.0, -1.0, 0.0, 0.0, 1.0), v(1.0, 1.0, -1.0, 0.0, 0.0, 1.0),
+        ];
+        let mut indices = vec![0, 2, 1, 0, 3, 2, 0, 1, 5, 0, 5, 4];
+        indices.extend([0, 1, 2, 0, 2, 3, 0, 5, 1, 0, 4, 5]);
+        rig.gpu.set_mesh(&rig.device, &Mesh { vertices, indices, sets: Vec::new() });
+        let doc = Document::with_default_material();
+        rig.globals.light_dir[3] = 0.0;
+        rig.globals.env = [0.0, 1.0, 0.0, 3.0]; // flat, even light: only occlusion can darken
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let px_of = |rig: &Rig, p: Vec3| {
+            let m = glam::Mat4::from_cols_array_2d(&rig.globals.view_proj);
+            let c = m * p.extend(1.0);
+            let (x, y) = (c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+            ((x * SIZE as f32) as u32, (y * SIZE as f32) as u32)
+        };
+        let read = |rig: &Rig, at: (u32, u32)| {
+            let tex = &rig.gpu.offscreen.as_ref().expect("a frame").color;
+            let px = crate::gpu_io::read_texture(&rig.device, &rig.queue, tex, SIZE, 4);
+            let i = ((at.1 * SIZE + at.0) * 4) as usize;
+            px[i] as i32
+        };
+        let (near_crease, open_floor) = (px_of(&rig, Vec3::new(0.0, 0.0, -0.93)), px_of(&rig, Vec3::new(0.0, 0.0, 0.6)));
+        let (near_off, open_off) = (read(&rig, near_crease), read(&rig, open_floor));
+        assert!(near_off > 30 && open_off > 30, "the floor is lit: {near_off} {open_off}");
+        rig.globals.ssao = [1.0, 14.0, 0.0, 0.0];
+        rig.run(&doc, &[]);
+        let (near_on, open_on) = (read(&rig, near_crease), read(&rig, open_floor));
+        assert!(near_on < near_off - 12, "the crease should darken: {near_off} -> {near_on}");
+        assert!((open_on - open_off).abs() <= 3, "open floor must stay as it was: {open_off} -> {open_on}");
+        rig.globals.ssao = [0.0; 4];
+        rig.run(&doc, &[]);
+        assert_eq!(read(&rig, near_crease), near_off, "off means off");
     }
 
     /// Paint reaches the far side of the model only when both "through" options are on.
