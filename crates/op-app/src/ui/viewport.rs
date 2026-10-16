@@ -59,6 +59,16 @@ impl App {
         let (mods, primary_down) = ui.input(|i| (i.modifiers, i.pointer.primary_down()));
         let alt = mods.alt;
         let d = resp.drag_delta();
+        // Pen pressure arrives as touch force; a mouse (no touch events) paints at full pressure.
+        self.pressure = ui.input(|i| {
+            let mut p = if primary_down { self.pressure } else { 1.0 };
+            for e in &i.events {
+                if let egui::Event::Touch { force: Some(f), phase, .. } = e {
+                    p = if matches!(phase, egui::TouchPhase::End | egui::TouchPhase::Cancel) { 1.0 } else { f.clamp(0.0, 1.0) };
+                }
+            }
+            p
+        });
 
         // Navigation: Alt+left orbits, middle pans, Alt+right zooms, scroll zooms.
         if resp.dragged_by(egui::PointerButton::Primary) && alt {

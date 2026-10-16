@@ -43,5 +43,6 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Texture sets are the model's materials. Hide or isolate a set with the eye icon in the Texture Sets panel.
 - Lighting uses built-in procedural environments rather than HDRI files.
 - Mask levels (black, white, gamma, invert) live on the mask in Properties - Layer.
+- Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Not here yet: the clone, smudge and projection tools, layer filters and effects, anchor points,
-  pen pressure, and path tracing.
+  and path tracing.

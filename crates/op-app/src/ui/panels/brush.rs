@@ -48,6 +48,11 @@ impl App {
             slider_row(ui, "Scatter", &mut self.brush.position_jitter, 0.0..=4.0);
             slider_row(ui, "Opacity jitter", &mut self.brush.opacity_jitter, 0.0..=1.0);
         });
+        section(ui, "Pen pressure", |ui| {
+            ui.checkbox(&mut self.brush.pressure_size, "Pressure changes size");
+            ui.checkbox(&mut self.brush.pressure_opacity, "Pressure changes opacity");
+            hint(ui, "Only affects pens that report pressure; a mouse paints at full pressure.");
+        });
         section(ui, "Paint channels", |ui| {
             hint(ui, "Used when painting layer content. Masks paint white (reveal) and erase to black (hide).");
             ui.horizontal(|ui| {

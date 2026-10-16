@@ -58,6 +58,9 @@ struct Brush {
     size_jitter: f32,
     position_jitter: f32,
     opacity_jitter: f32,
+    /// Pen pressure scales the size and/or the opacity of each stamp.
+    pressure_size: bool,
+    pressure_opacity: bool,
 }
 
 impl Default for Brush {
@@ -74,6 +77,8 @@ impl Default for Brush {
             size_jitter: 0.0,
             position_jitter: 0.0,
             opacity_jitter: 0.0,
+            pressure_size: true,
+            pressure_opacity: false,
         }
     }
 }
@@ -308,6 +313,8 @@ struct App {
     tool: Tool,
     brush: Brush,
     rng: std::cell::Cell<u32>,
+    /// Pen pressure 0..1 as last reported by the input device; 1 for a mouse.
+    pressure: f32,
     env: Environment,
     /// Recently used projects, newest first.
     recent: Vec<PathBuf>,
@@ -437,6 +444,7 @@ impl App {
             tool: Tool::Paint,
             brush: Brush::default(),
             rng: std::cell::Cell::new(0x9e37_79b9),
+            pressure: 1.0,
             env: Environment::default(),
             recent: files::load_recent(),
             symmetry: 0,
@@ -1341,6 +1349,12 @@ impl App {
             angle += dir[1].atan2(dir[0]);
         }
         let mut opacity_scale = 1.0;
+        if b.pressure_size {
+            brush[2] *= self.pressure.max(0.05);
+        }
+        if b.pressure_opacity {
+            opacity_scale *= self.pressure;
+        }
         if b.angle_jitter > 0.0 {
             angle += rnd() * b.angle_jitter * std::f32::consts::PI;
         }
@@ -1352,7 +1366,7 @@ impl App {
             brush[1] += rnd() * b.position_jitter * brush[2];
         }
         if b.opacity_jitter > 0.0 {
-            opacity_scale = 1.0 - b.opacity_jitter * (rnd() * 0.5 + 0.5);
+            opacity_scale *= 1.0 - b.opacity_jitter * (rnd() * 0.5 + 0.5);
         }
         let shape = [angle, b.shape as f32, next_random(&self.rng) * 100.0, self.symmetry as f32];
         // Where the symmetry plane sits on its axis: the middle of the model.
