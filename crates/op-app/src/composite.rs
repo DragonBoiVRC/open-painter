@@ -554,6 +554,14 @@ impl Compositor {
                 Filter::Warp { amount, .. } if amount <= 0.0 => continue,
                 Filter::Warp { amount, scale } => vec![(4, [amount, scale, 0.0, 0.0])],
                 Filter::Threshold { position, softness } => vec![(5, [position, softness, 0.0, 0.0])],
+                Filter::Pixelate { size } if size < 1.5 => continue,
+                Filter::Pixelate { size } => vec![(6, [size, 0.0, 0.0, 0.0])],
+                Filter::HueSaturation { hue, saturation, brightness } => {
+                    if hue == 0.0 && saturation == 1.0 && brightness == 1.0 {
+                        continue;
+                    }
+                    vec![(7, [hue / 360.0, saturation, brightness, 0.0])]
+                }
             };
             let start = current.take();
             let source = start.as_ref().unwrap_or(input);

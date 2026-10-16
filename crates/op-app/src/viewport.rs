@@ -1467,6 +1467,15 @@ mod tests {
         let (warp_cover, _) = stats(&rig);
         assert!(warp_cover > plain_cover / 2 && warp_cover < plain_cover * 2, "warp: {plain_cover} -> {warp_cover}");
 
+        // Pixelate keeps the paint's extent about the same; hue/saturation leaves values and coverage alone.
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Pixelate { size: 8.0 }];
+        rig.run(&doc, &[]);
+        let (pix_cover, _) = stats(&rig);
+        assert!(pix_cover > plain_cover / 2 && pix_cover < plain_cover * 2, "pixelate: {plain_cover} -> {pix_cover}");
+        doc.find_mut(layer).unwrap().filters = vec![Filter::HueSaturation { hue: 120.0, saturation: 1.5, brightness: 0.5 }];
+        rig.run(&doc, &[]);
+        assert_eq!(stats(&rig).0, plain_cover, "hue/saturation changed coverage");
+
         doc.find_mut(layer).unwrap().filters.clear();
         rig.run(&doc, &[]);
         assert_eq!(stats(&rig).0, plain_cover, "the stored paint changed");

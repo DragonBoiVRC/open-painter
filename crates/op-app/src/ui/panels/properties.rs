@@ -292,6 +292,12 @@ fn filters_ui(ui: &mut egui::Ui, filters: &mut Vec<Filter>) -> bool {
                     changed |= super::slider_row(ui, "Position", position, 0.0..=1.0).changed();
                     changed |= super::slider_row(ui, "Softness", softness, 0.0..=1.0).changed();
                 }
+                Filter::Pixelate { size } => changed |= super::slider_row(ui, "Block size", size, 1.0..=128.0).changed(),
+                Filter::HueSaturation { hue, saturation, brightness } => {
+                    changed |= super::slider_row(ui, "Hue", hue, -180.0..=180.0).changed();
+                    changed |= super::slider_row(ui, "Saturation", saturation, 0.0..=2.0).changed();
+                    changed |= super::slider_row(ui, "Brightness", brightness, 0.0..=2.0).changed();
+                }
             }
             ui.separator();
         });

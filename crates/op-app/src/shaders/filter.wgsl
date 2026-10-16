@@ -7,6 +7,8 @@
 //   kind 3: levels
 //   kind 4: warp (displace by smooth noise)
 //   kind 5: threshold
+//   kind 6: pixelate (v.x = block size)
+//   kind 7: hue / saturation / brightness (v = hue turns, saturation, brightness)
 
 struct Params {
     kind: vec4<u32>,   // x: kind
@@ -126,6 +128,35 @@ fn map_color_t(s: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(vec3<f32>(threshold(c.r), threshold(c.g), threshold(c.b)) * cov, cov);
 }
 
+fn rgb2hsv(c: vec3<f32>) -> vec3<f32> {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    let d = mx - mn;
+    var h = 0.0;
+    if (d > 1e-6) {
+        if (mx == c.r) { h = ((c.g - c.b) / d) / 6.0; }
+        else if (mx == c.g) { h = (2.0 + (c.b - c.r) / d) / 6.0; }
+        else { h = (4.0 + (c.r - c.g) / d) / 6.0; }
+    }
+    return vec3<f32>(fract(h + 1.0), select(0.0, d / mx, mx > 0.0), mx);
+}
+
+fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
+    let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
+    let q = abs(fract(vec3<f32>(c.x) + k) * 6.0 - 3.0);
+    return c.z * mix(vec3<f32>(1.0), clamp(q - 1.0, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
+}
+
+fn map_hsb(s: vec4<f32>) -> vec4<f32> {
+    let cov = s.a;
+    if (cov <= 0.0) { return s; }
+    var h = rgb2hsv(clamp(s.rgb / cov, vec3<f32>(0.0), vec3<f32>(1.0)));
+    h.x = fract(h.x + p.v.x + 1.0);
+    h.y = clamp(h.y * p.v.y, 0.0, 1.0);
+    h.z = clamp(h.z * p.v.z, 0.0, 1.0);
+    return vec4<f32>(hsv2rgb(h) * cov, cov);
+}
+
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
     let xy = vec2<i32>(pos.xy);
@@ -171,6 +202,22 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         o.height = map_scalar_t(load(a_height, xy));
         o.emissive = map_color_t(load(a_emissive, xy));
         o.opacity = map_scalar_t(load(a_opacity, xy));
+    } else if (kind == 6u) {
+        let size = max(p.v.x, 1.0);
+        let c = vec2<i32>((floor(vec2<f32>(xy) / size) + 0.5) * size);
+        o.base = load(a_base, c);
+        o.metal = load(a_metal, c);
+        o.rough = load(a_rough, c);
+        o.height = load(a_height, c);
+        o.emissive = load(a_emissive, c);
+        o.opacity = load(a_opacity, c);
+    } else if (kind == 7u) {
+        o.base = map_hsb(load(a_base, xy));
+        o.metal = load(a_metal, xy);
+        o.rough = load(a_rough, xy);
+        o.height = load(a_height, xy);
+        o.emissive = map_hsb(load(a_emissive, xy));
+        o.opacity = load(a_opacity, xy);
     } else {
         o.base = map_color(load(a_base, xy), kind);
         o.metal = map_scalar(load(a_metal, xy), kind);
