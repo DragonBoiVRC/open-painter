@@ -14,6 +14,7 @@ struct Params {
     xf2: vec4<f32>,     // cos and sin of the texture rotation, then the UV offset of this tile (u, v)
     dims: vec4<f32>,    // texture size in pixels
     lv: vec4<f32>,      // mask levels: black, white, gamma, invert
+    adj: vec4<f32>,     // colour adjustment: hue (radians), saturation, brightness, contrast (tex.w: on)
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -121,6 +122,42 @@ fn tex_uv(frag: vec2<f32>) -> vec2<f32> {
     return (r + vec2<f32>(0.5)) * p.xf.xy + p.xf.zw;
 }
 
+fn to_srgb3(c: vec3<f32>) -> vec3<f32> {
+    let v = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(1.055 * pow(v, vec3<f32>(1.0 / 2.4)) - 0.055, v * 12.92, v <= vec3<f32>(0.0031308));
+}
+
+fn to_linear3(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+// Hue, saturation, brightness and contrast in sRGB space (see ColorAdjust::apply).
+fn adjust_color(rgb: vec3<f32>) -> vec3<f32> {
+    let s = to_srgb3(rgb);
+    let mx = max(s.r, max(s.g, s.b));
+    let mn = min(s.r, min(s.g, s.b));
+    let d = mx - mn;
+    var h = 0.0;
+    if (d > 1e-6) {
+        if (mx == s.r) { h = (s.g - s.b) / d; h = h - 6.0 * floor(h / 6.0); }
+        else if (mx == s.g) { h = (s.b - s.r) / d + 2.0; }
+        else { h = (s.r - s.g) / d + 4.0; }
+    }
+    var sat = select(d / mx, 0.0, mx <= 1e-6);
+    h = h + p.adj.x * 57.29578 / 60.0;
+    h = h - 6.0 * floor(h / 6.0);
+    sat = clamp(sat * p.adj.y, 0.0, 1.0);
+    var o = vec3<f32>(0.0);
+    for (var c = 0; c < 3; c = c + 1) {
+        let n = select(select(1.0, 3.0, c == 1), 5.0, c == 0);
+        var k = n + h;
+        k = k - 6.0 * floor(k / 6.0);
+        let m = clamp(min(k, 4.0 - k), 0.0, 1.0);
+        o[c] = mx - mx * sat * m;
+    }
+    return to_linear3(clamp((o - 0.5) * p.adj.w + 0.5 + p.adj.z, vec3<f32>(0.0), vec3<f32>(1.0)));
+}
+
 fn decode_normal(v: vec3<f32>, flip_green: bool) -> vec3<f32> {
     var n = v * 2.0 - vec3<f32>(1.0);
     if (flip_green) { n.y = -n.y; }
@@ -185,6 +222,10 @@ fn fs_main(i: FsIn) -> Out {
         color = select(vec3<f32>(0.0), sb.rgb / sb.a, sb.a > 0.0);
         metal = unpremul(sm.r, sm.g);
         rough = unpremul(sr.r, sr.g);
+    }
+
+    if (p.tex.w != 0u) {
+        color = adjust_color(color);
     }
 
     var mask = 1.0;

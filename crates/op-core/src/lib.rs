@@ -457,6 +457,67 @@ impl Mask {
     }
 }
 
+/// Hue, saturation, brightness and contrast of a layer's base colour, applied in sRGB space.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColorAdjust {
+    /// Degrees around the colour wheel, -180..180.
+    pub hue: f32,
+    /// Multiplier: 0 is grey, 1 unchanged, 2 doubles the colourfulness.
+    pub saturation: f32,
+    /// Added to every channel, -1..1.
+    pub brightness: f32,
+    /// Multiplier around mid grey: 1 unchanged.
+    pub contrast: f32,
+}
+
+impl Default for ColorAdjust {
+    fn default() -> Self {
+        Self { hue: 0.0, saturation: 1.0, brightness: 0.0, contrast: 1.0 }
+    }
+}
+
+pub fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+}
+
+impl ColorAdjust {
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The same value with anything non-finite replaced and everything clamped to its range.
+    pub fn sanitized(self) -> Self {
+        let f = |v: f32, d: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        Self { hue: f(self.hue, 0.0, -360.0, 360.0), saturation: f(self.saturation, 1.0, 0.0, 4.0), brightness: f(self.brightness, 0.0, -1.0, 1.0), contrast: f(self.contrast, 1.0, 0.0, 4.0) }
+    }
+
+    /// Adjust a linear RGB colour. The CPU twin of the compositor's `adjust_color`.
+    pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let a = self.sanitized();
+        let s = rgb.map(|c| linear_to_srgb(c.clamp(0.0, 1.0)));
+        let (max, min) = (s[0].max(s[1]).max(s[2]), s[0].min(s[1]).min(s[2]));
+        let d = max - min;
+        let mut h = if d <= 1e-6 {
+            0.0
+        } else if max == s[0] {
+            ((s[1] - s[2]) / d).rem_euclid(6.0)
+        } else if max == s[1] {
+            (s[2] - s[0]) / d + 2.0
+        } else {
+            (s[0] - s[1]) / d + 4.0
+        };
+        let sat = if max <= 1e-6 { 0.0 } else { d / max };
+        h = (h + a.hue / 60.0).rem_euclid(6.0);
+        let sat = (sat * a.saturation).clamp(0.0, 1.0);
+        let k = |n: f32| {
+            let k = (n + h).rem_euclid(6.0);
+            max - max * sat * k.min(4.0 - k).clamp(0.0, 1.0)
+        };
+        let hsv = [k(5.0), k(3.0), k(1.0)];
+        hsv.map(|c| srgb_to_linear(((c - 0.5) * a.contrast + 0.5 + a.brightness).clamp(0.0, 1.0)))
+    }
+}
+
 /// Levels and invert for a mask: the input range `black..white` is stretched to 0..1, `gamma` > 1
 /// brightens the midtones, and `invert` flips the result.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -509,6 +570,9 @@ pub struct Node {
     pub blend: BlendMode,
     pub mask: Option<Mask>,
     pub kind: NodeKind,
+    /// Colour correction of what this layer (or group) puts down.
+    #[serde(default)]
+    pub adjust: ColorAdjust,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -681,6 +745,7 @@ impl Document {
             blend: BlendMode::Normal,
             mask: None,
             kind,
+            adjust: ColorAdjust::default(),
         };
         let list = match parent.and_then(|p| self.find_mut(p)) {
             Some(Node { kind: NodeKind::Group { children }, .. }) => children,
@@ -845,6 +910,25 @@ impl Document {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn colour_adjust_leaves_identity_alone_and_moves_hue_saturation_and_brightness() {
+        use super::{linear_to_srgb, ColorAdjust};
+        let near = |a: [f32; 3], b: [f32; 3]| (0..3).all(|i| (a[i] - b[i]).abs() < 1e-3);
+        let c = [0.6, 0.2, 0.1];
+        assert!(near(ColorAdjust::default().apply(c), c), "identity round-trips");
+        let red = [1.0, 0.0, 0.0];
+        assert!(near(ColorAdjust { hue: 120.0, ..Default::default() }.apply(red), [0.0, 1.0, 0.0]), "red turned a third of the wheel is green");
+        assert!(near(ColorAdjust { hue: 360.0, ..Default::default() }.apply(c), c), "a full turn is no change");
+        let grey = ColorAdjust { saturation: 0.0, ..Default::default() }.apply(c);
+        assert!((grey[0] - grey[1]).abs() < 1e-4 && (grey[1] - grey[2]).abs() < 1e-4, "no saturation is grey: {grey:?}");
+        let up = ColorAdjust { brightness: 0.2, ..Default::default() }.apply([0.2, 0.2, 0.2]);
+        assert!(linear_to_srgb(up[0]) > linear_to_srgb(0.2) + 0.19, "brightness lifts in sRGB: {up:?}");
+        let flat = ColorAdjust { contrast: 0.0, ..Default::default() }.apply(c);
+        assert!(near(flat.map(linear_to_srgb), [0.5; 3]), "no contrast is mid grey");
+        let junk = ColorAdjust { hue: f32::NAN, saturation: f32::INFINITY, brightness: f32::NAN, contrast: -3.0 };
+        assert!(junk.apply(c).iter().all(|v| v.is_finite()), "nonsense settings stay finite");
+    }
+
     use super::*;
 
     #[test]

@@ -24,6 +24,8 @@ struct Params {
     dims: [f32; 4],
     /// Mask levels: black, white, gamma, invert (0 or 1).
     lv: [f32; 4],
+    /// Colour adjustment: hue (radians), saturation, brightness, contrast.
+    adj: [f32; 4],
 }
 
 enum Src<'a> {
@@ -259,10 +261,14 @@ impl Compositor {
             color: [color[0], color[1], color[2], 0.0],
             vals: [node.opacity, metal, rough, height],
             mode: [is_fill, mask.is_some() as u32, node.blend.index(), bits],
-            tex: [tex_bits, invert_bits, flip, 0],
+            tex: [tex_bits, invert_bits, flip, (!node.adjust.is_identity()) as u32],
             xf: xf.0,
             xf2: [xf.1[0], xf.1[1], self.tile[0], self.tile[1]],
             dims: [self.size as f32, 0.0, 0.0, 0.0],
+            adj: {
+                let a = node.adjust.sanitized();
+                [a.hue.to_radians(), a.saturation, a.brightness, a.contrast]
+            },
             lv: {
                 let a = node.mask.as_ref().map(|m| m.adjust).unwrap_or_default();
                 let finite = |v: f32, d: f32| if v.is_finite() { v } else { d };

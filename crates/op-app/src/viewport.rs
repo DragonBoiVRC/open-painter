@@ -1788,6 +1788,38 @@ mod tests {
         assert!(check(&mut rig, op_core::MaskAdjust { gamma: 2.0, ..Default::default() }).0 > 0.6, "gamma > 1 brightens");
     }
 
+    /// A layer's colour adjustment matches `ColorAdjust::apply`, on a fill layer and on a group.
+    #[test]
+    fn colour_adjustment_matches_the_cpu_twin() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let srgb = [0.8, 0.45, 0.2];
+        let lin = srgb.map(op_core::srgb_to_linear);
+        for adjust in [
+            op_core::ColorAdjust::default(),
+            op_core::ColorAdjust { hue: 90.0, ..Default::default() },
+            op_core::ColorAdjust { hue: -40.0, saturation: 0.5, ..Default::default() },
+            op_core::ColorAdjust { brightness: 0.15, contrast: 1.4, ..Default::default() },
+            op_core::ColorAdjust { saturation: 0.0, ..Default::default() },
+        ] {
+            let mut doc = Document::default();
+            let layer = doc.add(None, None, "fill", fill(Some(srgb), None, None));
+            doc.find_mut(layer).unwrap().adjust = adjust;
+            let group = doc.add(None, None, "group", NodeKind::Group { children: Vec::new() });
+            doc.add(Some(group), None, "inner", fill(Some(srgb), None, None));
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            let got = base_at(&rig, (0.5, 0.5));
+            // The group sits on top and covers the fill, so judge the group's own adjustment instead.
+            let want_plain = lin;
+            assert!(near(got, want_plain), "an unadjusted group over an adjusted fill shows the group: {got:?}");
+            doc.find_mut(layer).unwrap().visible = false;
+            doc.find_mut(group).unwrap().adjust = adjust;
+            rig.run(&doc, &[]);
+            let got = base_at(&rig, (0.5, 0.5));
+            let want = adjust.apply(lin);
+            assert!(near(got, want), "{adjust:?}: GPU {got:?} vs CPU {want:?}");
+        }
+    }
+
     /// A generated mask uploaded with `SetMask` gates its layer like a painted one.
     #[test]
     fn generated_mask_content_is_uploaded_and_composited() {

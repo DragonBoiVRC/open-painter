@@ -24,6 +24,17 @@ impl App {
             });
             changed |= ui.add(egui::Slider::new(&mut node.opacity, 0.0..=1.0).text("Opacity")).changed();
 
+            egui::CollapsingHeader::new("Colour adjustment").id_salt("colour_adjust").default_open(!node.adjust.is_identity()).show(ui, |ui| {
+                changed |= super::slider_row(ui, "Hue", &mut node.adjust.hue, -180.0..=180.0).changed();
+                changed |= super::slider_row(ui, "Saturation", &mut node.adjust.saturation, 0.0..=2.0).changed();
+                changed |= super::slider_row(ui, "Brightness", &mut node.adjust.brightness, -1.0..=1.0).changed();
+                changed |= super::slider_row(ui, "Contrast", &mut node.adjust.contrast, 0.0..=2.0).changed();
+                if ui.add_enabled(!node.adjust.is_identity(), egui::Button::new("Reset")).clicked() {
+                    node.adjust = Default::default();
+                    changed = true;
+                }
+            });
+
             if let NodeKind::Fill(f) = &mut node.kind {
                 ui.add_space(4.0);
                 changed |= super::fill::fill_controls(ui, f, &self.assets, &self.tex_thumbs);
