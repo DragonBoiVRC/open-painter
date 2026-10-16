@@ -13,6 +13,7 @@ struct Params {
     xf: vec4<f32>,      // texture tiling x, y and offset x, y
     xf2: vec4<f32>,     // cos and sin of the texture rotation, then the UV offset of this tile (u, v)
     dims: vec4<f32>,    // texture size in pixels
+    lv: vec4<f32>,      // mask levels: black, white, gamma, invert
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -189,6 +190,10 @@ fn fs_main(i: FsIn) -> Out {
     var mask = 1.0;
     if (p.mode.y == 1u) {
         mask = textureLoad(mask_tex, xy, 0).r;
+        // Levels: stretch black..white to 0..1, apply gamma, optionally invert (see MaskAdjust::apply).
+        let stretched = clamp((mask - p.lv.x) / max(p.lv.y - p.lv.x, 1e-4), 0.0, 1.0);
+        let lifted = pow(stretched, 1.0 / p.lv.z);
+        mask = select(lifted, 1.0 - lifted, p.lv.w > 0.5);
     }
     let k = p.vals.x * mask;
 

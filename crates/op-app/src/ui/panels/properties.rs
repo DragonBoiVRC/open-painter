@@ -60,6 +60,18 @@ impl App {
                             mask_action = Some(None);
                         }
                     });
+                    egui::CollapsingHeader::new("Mask levels").id_salt("mask_levels").default_open(!m.adjust.is_identity()).show(ui, |ui| {
+                        changed |= super::slider_row(ui, "Black", &mut m.adjust.black, 0.0..=1.0).changed();
+                        changed |= super::slider_row(ui, "White", &mut m.adjust.white, 0.0..=1.0).changed();
+                        changed |= super::slider_row(ui, "Gamma", &mut m.adjust.gamma, 0.2..=5.0).changed();
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut m.adjust.invert, "Invert").changed();
+                            if ui.add_enabled(!m.adjust.is_identity(), egui::Button::new("Reset")).clicked() {
+                                m.adjust = Default::default();
+                                changed = true;
+                            }
+                        });
+                    });
                     match &mut m.generator {
                         Some(gen) => {
                             ui.label("Generated from the baked maps:");

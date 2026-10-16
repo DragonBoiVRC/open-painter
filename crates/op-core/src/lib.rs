@@ -442,15 +442,52 @@ pub struct Mask {
     /// until it is frozen (the generator removed).
     #[serde(default)]
     pub generator: Option<Generator>,
+    /// Levels applied to the mask's value where it is used (painting still edits the raw mask).
+    #[serde(default)]
+    pub adjust: MaskAdjust,
 }
 
 impl Mask {
     pub fn new(init_white: bool) -> Self {
-        Self { enabled: true, init_white, generator: None }
+        Self { enabled: true, init_white, generator: None, adjust: MaskAdjust::default() }
     }
 
     pub fn generated(generator: Generator) -> Self {
-        Self { enabled: true, init_white: true, generator: Some(generator) }
+        Self { enabled: true, init_white: true, generator: Some(generator), adjust: MaskAdjust::default() }
+    }
+}
+
+/// Levels and invert for a mask: the input range `black..white` is stretched to 0..1, `gamma` > 1
+/// brightens the midtones, and `invert` flips the result.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaskAdjust {
+    pub black: f32,
+    pub white: f32,
+    pub gamma: f32,
+    pub invert: bool,
+}
+
+impl Default for MaskAdjust {
+    fn default() -> Self {
+        Self { black: 0.0, white: 1.0, gamma: 1.0, invert: false }
+    }
+}
+
+impl MaskAdjust {
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The adjusted value of a mask sample in 0..1. Nonsense settings (NaN, an empty range) fall
+    /// back to something harmless instead of poisoning the render.
+    pub fn apply(&self, v: f32) -> f32 {
+        let black = if self.black.is_finite() { self.black.clamp(0.0, 1.0) } else { 0.0 };
+        let white = if self.white.is_finite() { self.white.clamp(0.0, 1.0) } else { 1.0 };
+        let gamma = if self.gamma.is_finite() { self.gamma.clamp(0.1, 10.0) } else { 1.0 };
+        let span = (white - black).max(1e-4);
+        let stretched = ((v - black) / span).clamp(0.0, 1.0);
+        let out = stretched.powf(1.0 / gamma);
+        if self.invert { 1.0 - out } else { out }
     }
 }
 

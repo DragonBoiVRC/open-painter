@@ -1757,6 +1757,37 @@ mod tests {
         assert_eq!(center_pixel(&rig), shaded);
     }
 
+    /// Mask levels reshape the mask where it is used: stretch, gamma and invert.
+    #[test]
+    fn mask_levels_stretch_gamma_and_invert_the_mask() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "metal", fill(None, Some(1.0), None));
+        doc.find_mut(layer).unwrap().mask = Some(Mask::new(true));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        // A flat mask of 0.5 (128).
+        let n = (SIZE * SIZE) as usize;
+        rig.run(&doc, &[PaintOp::SetMask { layer, size: SIZE, bytes: vec![128; n] }]);
+        let coverage = |rig: &Rig| texel_rg(&rig.metal(), (0.5, 0.5)).1 as f32 / 255.0;
+        let check = |rig: &mut Rig, adjust: op_core::MaskAdjust| {
+            let mut d = doc.clone();
+            d.find_mut(layer).unwrap().mask.as_mut().unwrap().adjust = adjust;
+            rig.run(&d, &[]);
+            (coverage(rig), adjust.apply(128.0 / 255.0))
+        };
+        for adjust in [
+            op_core::MaskAdjust::default(),
+            op_core::MaskAdjust { black: 0.25, white: 0.75, ..Default::default() },
+            op_core::MaskAdjust { gamma: 2.0, ..Default::default() },
+            op_core::MaskAdjust { invert: true, ..Default::default() },
+            op_core::MaskAdjust { black: 0.6, ..Default::default() },
+        ] {
+            let (got, want) = check(&mut rig, adjust);
+            assert!((got - want).abs() < 0.02, "{adjust:?}: GPU {got} vs CPU {want}");
+        }
+        assert!(check(&mut rig, op_core::MaskAdjust { gamma: 2.0, ..Default::default() }).0 > 0.6, "gamma > 1 brightens");
+    }
+
     /// A generated mask uploaded with `SetMask` gates its layer like a painted one.
     #[test]
     fn generated_mask_content_is_uploaded_and_composited() {

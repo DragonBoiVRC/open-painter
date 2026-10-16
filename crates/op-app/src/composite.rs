@@ -22,6 +22,8 @@ struct Params {
     xf: [f32; 4],
     xf2: [f32; 4],
     dims: [f32; 4],
+    /// Mask levels: black, white, gamma, invert (0 or 1).
+    lv: [f32; 4],
 }
 
 enum Src<'a> {
@@ -261,6 +263,11 @@ impl Compositor {
             xf: xf.0,
             xf2: [xf.1[0], xf.1[1], self.tile[0], self.tile[1]],
             dims: [self.size as f32, 0.0, 0.0, 0.0],
+            lv: {
+                let a = node.mask.as_ref().map(|m| m.adjust).unwrap_or_default();
+                let finite = |v: f32, d: f32| if v.is_finite() { v } else { d };
+                [finite(a.black, 0.0).clamp(0.0, 1.0), finite(a.white, 1.0).clamp(0.0, 1.0), finite(a.gamma, 1.0).clamp(0.1, 10.0), a.invert as u32 as f32]
+            },
         };
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("composite_params"),

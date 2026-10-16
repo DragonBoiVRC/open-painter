@@ -1668,7 +1668,7 @@ impl App {
                         ("Ctrl+PageUp / PageDown", "previous / next texture set"),
                         ("Ctrl + click", "pick the texture set under the cursor"),
                         ("H / Shift+H", "hide or show the active material / show all"),
-                        ("P / E", "paint / erase"),
+                        ("P / E  or  1 / 2", "paint / erase"),
                         ("I", "pick the colour under the cursor"),
                         ("L", "toggle symmetry"),
                         ("C", "cycle base color / roughness / metallic views"),
@@ -2004,8 +2004,8 @@ impl App {
             (
                 i.key_pressed(Key::OpenBracket),
                 i.key_pressed(Key::CloseBracket),
-                i.key_pressed(Key::P),
-                i.key_pressed(Key::E),
+                i.key_pressed(Key::P) || i.key_pressed(Key::Num1),
+                i.key_pressed(Key::E) || i.key_pressed(Key::Num2),
                 i.key_pressed(Key::F) && !i.modifiers.any(),
             )
         });

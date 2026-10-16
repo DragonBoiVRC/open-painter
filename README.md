@@ -14,7 +14,11 @@ baked mesh maps, height-to-normal painting, UDIM tiles and export presets.
 - Optional UV tiles (UDIM): one texture per tile, baked and exported separately.
 - CPU baking (AO, curvature, thickness, normals, position, ID and more), including from a high-poly mesh.
 - Export presets (PBR, Unity, Unreal, glTF, and import of Substance Painter `.spexp` presets).
+- Imported textures (Base Color, Normal, Height, ...) dragged from the shelf onto a fill layer's channel slots.
+- Brush shapes, rotation, jitter and mirror symmetry; environment lighting and single-channel views.
 - Dockable interface; the layout is remembered.
+
+Coming from Substance Painter? See [docs/07-coming-from-substance-painter.md](docs/07-coming-from-substance-painter.md).
 
 ## Run it
 
