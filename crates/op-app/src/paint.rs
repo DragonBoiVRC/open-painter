@@ -123,9 +123,20 @@ pub enum PaintOp {
     CopyLayers(Vec<(NodeId, NodeId)>),
     /// The baked tangent-space normal map of this set as RGBA8 (`None` removes it). It is combined
     /// with painted height in the viewport's normal map. Ignored if `size` is not the set's.
-    SetBakedNormal { size: u32, rgba8: Option<Vec<u8>> },
+    SetBakedNormal { size: u32, rgba8: Option<Vec<u8>>, projection: Option<ProjectionData> },
     /// Like `Reset`, then restore saved texture contents (opening a project).
     Load { size: u32, blobs: Vec<TextureBlob> },
+}
+
+/// The baked maps projected fill layers read (see `composite::ProjectionMaps`), as bytes to upload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectionData {
+    /// RGBA16F, normalised to the model's bounding box.
+    pub position: Vec<u8>,
+    /// RGBA8, packed 0..1.
+    pub normal: Vec<u8>,
+    /// Size of the bounding box along x, y, z with the largest axis as 1.
+    pub extent: [f32; 3],
 }
 
 /// The four paintable channels of a layer (and the compositor's working buffers).
@@ -1176,9 +1187,34 @@ impl PaintGpu {
                     }
                     dirty = true;
                 }
-                PaintOp::SetBakedNormal { size, rgba8 } => {
+                PaintOp::SetBakedNormal { size, rgba8, projection } => {
                     if *size == self.size {
                         self.normal.set_baked(device, queue, rgba8.as_deref());
+                        let maps = projection.as_ref().filter(|p| p.position.len() == (*size as usize).pow(2) * 8 && p.normal.len() == (*size as usize).pow(2) * 4).map(|p| {
+                            let upload = |label: &str, format: wgpu::TextureFormat, bytes: &[u8]| {
+                                device.create_texture_with_data(
+                                    queue,
+                                    &wgpu::TextureDescriptor {
+                                        label: Some(label),
+                                        size: wgpu::Extent3d { width: *size, height: *size, depth_or_array_layers: 1 },
+                                        mip_level_count: 1,
+                                        sample_count: 1,
+                                        dimension: wgpu::TextureDimension::D2,
+                                        format,
+                                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                                        view_formats: &[],
+                                    },
+                                    wgpu::util::TextureDataOrder::LayerMajor,
+                                    bytes,
+                                )
+                            };
+                            crate::composite::ProjectionMaps {
+                                position: upload("projection_position", BASE_FORMAT, &p.position),
+                                normal: upload("projection_normal", wgpu::TextureFormat::Rgba8Unorm, &p.normal),
+                                extent: p.extent,
+                            }
+                        });
+                        self.compositor.set_projection(maps);
                         dirty = true;
                     }
                 }

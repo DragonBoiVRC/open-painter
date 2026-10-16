@@ -370,8 +370,52 @@ impl UvTransform {
     }
 }
 
+/// How a fill layer's textures are projected onto the model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Projection {
+    /// Over the UV layout (the default).
+    #[default]
+    Uv,
+    /// Straight along each of the three axes, blended where surfaces turn between them. Needs the
+    /// Position and World space normal maps to be baked.
+    Triplanar,
+    /// Straight along one axis, stretching on surfaces that run parallel to it. Needs the Position map.
+    PlanarX,
+    PlanarY,
+    PlanarZ,
+}
+
+impl Projection {
+    pub const ALL: [Projection; 5] = [Projection::Uv, Projection::Triplanar, Projection::PlanarX, Projection::PlanarY, Projection::PlanarZ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Projection::Uv => "UV",
+            Projection::Triplanar => "Triplanar",
+            Projection::PlanarX => "Planar X",
+            Projection::PlanarY => "Planar Y",
+            Projection::PlanarZ => "Planar Z",
+        }
+    }
+
+    /// The code the compositor's projection pass uses (0 is UV, which it does not handle).
+    pub fn code(self) -> u32 {
+        match self {
+            Projection::Uv => 0,
+            Projection::Triplanar => 1,
+            Projection::PlanarX => 2,
+            Projection::PlanarY => 3,
+            Projection::PlanarZ => 4,
+        }
+    }
+}
+
+fn default_sharpness() -> f32 {
+    4.0
+}
+
 /// A fill layer writes constants or textures. `None` leaves that channel untouched.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FillParams {
     /// Textures that replace the constants below, channel by channel.
     #[serde(default)]
@@ -389,6 +433,28 @@ pub struct FillParams {
     /// sRGB colour of light the surface gives off.
     #[serde(default)]
     pub emissive: Option<[f32; 3]>,
+    /// How the textures meet the model.
+    #[serde(default)]
+    pub projection: Projection,
+    /// Triplanar only: how quickly the three projections hand over to each other (higher is sharper).
+    #[serde(default = "default_sharpness")]
+    pub sharpness: f32,
+}
+
+impl Default for FillParams {
+    fn default() -> Self {
+        Self {
+            maps: FillMaps::default(),
+            uv: UvTransform::default(),
+            base: None,
+            metallic: None,
+            roughness: None,
+            height: None,
+            emissive: None,
+            projection: Projection::Uv,
+            sharpness: default_sharpness(),
+        }
+    }
 }
 
 /// A procedural source for a mask. The template's parameters live in `params` by name;
@@ -1366,5 +1432,23 @@ mod tests {
         assert_eq!(ChannelMix { opacity: f32::NAN, ..Default::default() }.factor(), 1.0);
         assert_eq!(ChannelMix { enabled: false, ..Default::default() }.factor(), 0.0);
         assert_eq!(ChannelMix { blend: None, ..Default::default() }.mode(BlendMode::Multiply), BlendMode::Multiply);
+    }
+
+    #[test]
+    fn fill_projection_defaults_to_uv_and_round_trips() {
+        let mut f = FillParams { base: Some([0.1, 0.2, 0.3]), ..Default::default() };
+        assert_eq!(f.projection, Projection::Uv);
+        f.projection = Projection::Triplanar;
+        f.sharpness = 7.0;
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<FillParams>(&json).unwrap(), f);
+        // A fill saved before projections existed has neither key.
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("projection");
+        v.as_object_mut().unwrap().remove("sharpness");
+        let old: FillParams = serde_json::from_value(v).unwrap();
+        assert_eq!((old.projection, old.sharpness), (Projection::Uv, 4.0));
+        let codes: Vec<u32> = Projection::ALL.iter().map(|p| p.code()).collect();
+        assert_eq!(codes, [0, 1, 2, 3, 4]);
     }
 }

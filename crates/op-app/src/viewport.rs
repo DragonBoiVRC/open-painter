@@ -1344,6 +1344,66 @@ mod tests {
         assert!(view[0] > 240 && view[1] > 240, "the emissive channel view: {view:?}");
     }
 
+    /// A fill layer with a planar projection reads its picture from the baked Position map instead of
+    /// the UVs; without the baked maps it falls back to the UV layout.
+    #[test]
+    fn projected_fills_use_the_baked_position_map() {
+        use op_core::{Projection, Slot, TexRef};
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        // Top row blue, bottom row red.
+        let (blue, red) = ([0u8, 0, 255, 255], [255u8, 0, 0, 255]);
+        let rgba8: Vec<u8> = [blue, blue, red, red].concat();
+        let (device, queue) = (&rig.device, &rig.queue);
+        let id = "00000000000000000000000000000abc";
+        rig.gpu.upload_image(device, queue, id, &op_image::Decoded { width: 2, height: 2, rgba8 });
+
+        let mut f = FillParams::default();
+        f.maps.set(Slot::BaseColor, Some(TexRef::new(id)));
+        f.projection = Projection::PlanarZ;
+        let mut doc = Document::default();
+        doc.add(None, None, "fill", NodeKind::Fill(f));
+        let px = |rig: &Rig, x: u32, y: u32| {
+            let b = rig.read(&rig.gpu.paint().output.base, 8);
+            let i = ((y * SIZE + x) * 8) as usize;
+            [0, 1, 2].map(|c| f16_to_f32(u16::from_le_bytes([b[i + c * 2], b[i + c * 2 + 1]])))
+        };
+        let (x, y) = (SIZE / 4, SIZE / 4);
+
+        // No baked maps: the picture follows the UV layout, so the top-left of the texture is blue.
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let uv = px(&rig, x, y);
+        assert!(uv[2] > 0.9 && uv[0] < 0.1, "UV fallback should be blue at the top, got {uv:?}");
+
+        // With the maps (position = the texel's own UV, normals up the Z axis) a Z projection turns
+        // the picture upright the other way: the top of the texture shows the bottom row.
+        let mut position = Vec::new();
+        for ty in 0..SIZE {
+            for tx in 0..SIZE {
+                for v in [(tx as f32 + 0.5) / SIZE as f32, (ty as f32 + 0.5) / SIZE as f32, 0.0, 1.0] {
+                    position.extend(half::f16::from_f32(v).to_bits().to_le_bytes());
+                }
+            }
+        }
+        let normal: Vec<u8> = [128u8, 128, 255, 255].repeat((SIZE * SIZE) as usize);
+        let projection = crate::paint::ProjectionData { position, normal, extent: [1.0, 1.0, 1.0] };
+        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: None, projection: Some(projection) }]);
+        let projected = px(&rig, x, y);
+        assert!(projected[0] > 0.9 && projected[2] < 0.1, "planar Z should read the flipped row (red), got {projected:?}");
+
+        // Triplanar with normals along Z gives the same picture.
+        if let NodeKind::Fill(f) = &mut doc.find_mut(doc.nodes[0].id).unwrap().kind {
+            f.projection = Projection::Triplanar;
+        }
+        rig.run(&doc, &[]);
+        let tri = px(&rig, x, y);
+        assert!(tri[0] > 0.9 && tri[2] < 0.1, "triplanar with a Z normal matches planar Z, got {tri:?}");
+
+        // Removing the maps goes back to the UV layout.
+        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: None, projection: None }]);
+        let back = px(&rig, x, y);
+        assert!(back[2] > 0.9 && back[0] < 0.1, "back to UV: {back:?}");
+    }
+
     #[test]
     fn projective_brush_paints_visible_side_only_and_undoes() {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
@@ -1750,11 +1810,11 @@ mod tests {
         let packed: Vec<u8> = (0..n).flat_map(|_| [178u8, 115, 230, 255]).collect();
         let base: Vec<[f32; 3]> = (0..n).map(|_| op_core::normal::unpack([178.0 / 255.0, 115.0 / 255.0, 230.0 / 255.0])).collect();
         let _ = tilt;
-        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: Some(packed) }]);
+        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: Some(packed), projection: None }]);
         check(&rig, Some(&base), "painted height over a baked normal");
 
         // Removing it restores the plain result.
-        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: None }]);
+        rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: None, projection: None }]);
         check(&rig, None, "after removing the baked normal");
     }
 

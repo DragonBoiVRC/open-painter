@@ -4,6 +4,7 @@
 //! when the user picks them.
 
 use crate::viewport::{SetBatch, ViewportGpu};
+use crate::paint::ProjectionData;
 use crate::{App, Hist, PaintOp, DEFAULT_TEXTURE_SIZE};
 use op_core::{BakedMap, Document, MeshMap, NodeId};
 use std::collections::{HashMap, HashSet};
@@ -86,8 +87,9 @@ pub fn isolate(hidden: &HashSet<usize>, i: usize, count: usize) -> HashSet<usize
     if alone { HashSet::new() } else { (0..count).filter(|s| *s != i).collect() }
 }
 
-/// The op that gives a set's paint store its baked normal map (or removes it).
-pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32) -> PaintOp {
+/// The op that gives a set's paint store its baked normal map and the maps projected fills read
+/// (or removes them). `extent` is the size of the baked mesh along x, y, z.
+pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32, extent: [f32; 3]) -> PaintOp {
     let rgba8 = baked.get(&MeshMap::NormalBase).filter(|b| b.size == size && b.channels == 3).map(|b| {
         let mut out = Vec::with_capacity(b.texels() * 4);
         for i in 0..b.texels() {
@@ -97,10 +99,44 @@ pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32) -> PaintOp
         }
         out
     });
-    PaintOp::SetBakedNormal { size, rgba8 }
+    let usable = |m: MeshMap| baked.get(&m).filter(|b| b.size == size && b.channels == 3);
+    let projection = usable(MeshMap::Position).zip(usable(MeshMap::WorldSpaceNormal)).map(|(pos, nrm)| {
+        let mut position = Vec::with_capacity(pos.texels() * 8);
+        let mut normal = Vec::with_capacity(pos.texels() * 4);
+        for i in 0..pos.texels() {
+            let p = pos.texel(i);
+            for v in [p[0], p[1], p[2], 1.0] {
+                position.extend(half::f16::from_f32(v).to_bits().to_le_bytes());
+            }
+            normal.extend(nrm.texel(i).map(|v| (v * 255.0 + 0.5) as u8));
+            normal.push(255);
+        }
+        let largest = extent.iter().cloned().fold(1e-6f32, f32::max);
+        ProjectionData { position, normal, extent: extent.map(|e| (e / largest).max(1e-3)) }
+    });
+    PaintOp::SetBakedNormal { size, rgba8, projection }
+}
+
+/// True if a set's bakes include anything the paint store wants uploaded.
+pub fn has_uploadable_bakes(baked: &HashMap<MeshMap, BakedMap>) -> bool {
+    baked.contains_key(&MeshMap::NormalBase) || (baked.contains_key(&MeshMap::Position) && baked.contains_key(&MeshMap::WorldSpaceNormal))
 }
 
 impl App {
+    /// The size of the mesh a tile of `set` is baked from along x, y, z (what a Position bake is
+    /// normalised by).
+    pub(crate) fn bake_extent(&self, set: usize, tile: usize) -> [f32; 3] {
+        let low = if self.udim {
+            self.mesh.set_tiles(set).get(tile).and_then(|t| self.mesh.extract_tile(set, *t))
+        } else {
+            self.mesh.extract_set(set)
+        };
+        low.map_or([1.0; 3], |m| {
+            let (lo, hi) = m.bounds();
+            (hi - lo).to_array()
+        })
+    }
+
     /// Per-set "hidden" flags for the 3D view.
     pub(crate) fn hidden_flags(&self) -> Vec<bool> {
         (0..self.parked.len()).map(|i| self.hidden_sets.contains(&i)).collect()
@@ -283,8 +319,8 @@ impl App {
                 // Each tile gets its own textures and baked normal.
                 for (t, blobs) in blobs.into_iter().enumerate() {
                     let mut ops = vec![PaintOp::Load { size, blobs }];
-                    if st.bakes[t].baked.contains_key(&MeshMap::NormalBase) {
-                        ops.push(baked_normal_op(&st.bakes[t].baked, size));
+                    if has_uploadable_bakes(&st.bakes[t].baked) {
+                        ops.push(baked_normal_op(&st.bakes[t].baked, size, self.bake_extent(set, t)));
                     }
                     self.enqueue(SetBatch { tile: Some(t), set, doc: st.doc.clone(), ops });
                 }
@@ -402,9 +438,10 @@ impl App {
         }
         let (doc, size) = (st.doc.clone(), st.tex_size);
         self.gpu_rebuild(set, &doc, size);
+        let extents: Vec<[f32; 3]> = (0..self.parked[set].as_ref().map_or(0, |st| st.bakes.len())).map(|t| self.bake_extent(set, t)).collect();
         let ops: Vec<(usize, PaintOp)> = self.parked[set]
             .as_ref()
-            .map(|st| st.bakes.iter().enumerate().filter(|(_, b)| b.baked.contains_key(&MeshMap::NormalBase)).map(|(t, b)| (t, baked_normal_op(&b.baked, size))).collect())
+            .map(|st| st.bakes.iter().enumerate().filter(|(_, b)| has_uploadable_bakes(&b.baked)).map(|(t, b)| (t, baked_normal_op(&b.baked, size, extents[t]))).collect())
             .unwrap_or_default();
         for (t, op) in ops {
             self.enqueue(SetBatch { tile: Some(t), set, doc: doc.clone(), ops: vec![op] });

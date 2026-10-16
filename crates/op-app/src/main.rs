@@ -984,7 +984,7 @@ impl App {
     // ---- baking -----------------------------------------------------------------------
 
     fn clear_baked(&mut self) {
-        self.pending.push(PaintOp::SetBakedNormal { size: self.tex_size, rgba8: None });
+        self.pending.push(PaintOp::SetBakedNormal { size: self.tex_size, rgba8: None, projection: None });
         for b in &mut self.bakes {
             if !b.baked.is_empty() {
                 b.baked = Arc::new(HashMap::new());
@@ -1103,6 +1103,7 @@ impl App {
                 let n = results.first().map_or(0, |r| r.maps.len());
                 let covered: usize = results.iter().map(|r| r.covered).sum();
                 // The bake belongs to the set it was started for, which may no longer be the active one.
+                let extents: Vec<[f32; 3]> = (0..results.len()).map(|t| self.bake_extent(set, t)).collect();
                 let normals = self.with_set(set, |st| {
                     let mut ops = Vec::new();
                     for (t, result) in results.into_iter().enumerate() {
@@ -1110,7 +1111,7 @@ impl App {
                         let mut maps = (*slot.baked).clone();
                         maps.retain(|_, b| b.size == result.size); // older bakes at another resolution are stale
                         maps.extend(result.maps);
-                        ops.push((t, sets::baked_normal_op(&maps, result.size)));
+                        ops.push((t, sets::baked_normal_op(&maps, result.size, extents[t])));
                         slot.baked = Arc::new(maps);
                         slot.rev += 1;
                     }

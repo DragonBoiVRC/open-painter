@@ -9,7 +9,7 @@ use crate::images::{dummy_image, GpuImage, SharedImages};
 use crate::normal_gpu::NORMAL_FORMAT;
 use crate::paint::{Layer, NodeGpu, BASE_FORMAT, VALUE_FORMAT, V_NORMAL};
 use eframe::egui_wgpu::wgpu::{self, util::DeviceExt};
-use op_core::{srgb_to_linear, Document, Filter, FillParams, Node, NodeId, NodeKind, Slot};
+use op_core::{srgb_to_linear, Document, Filter, FillParams, Node, NodeId, NodeKind, Projection, Slot};
 use std::collections::HashMap;
 
 #[repr(C)]
@@ -36,6 +36,29 @@ struct Params {
     emissive: [f32; 4],
 }
 
+/// The baked maps a projected fill reads, and the size of the model they were baked from.
+#[derive(Clone)]
+pub struct ProjectionMaps {
+    /// Position, RGBA16F, normalised to the model's bounding box.
+    pub position: wgpu::Texture,
+    /// World space normal, RGBA8 packed 0..1.
+    pub normal: wgpu::Texture,
+    /// The bounding box's size along x, y, z with the largest axis as 1.
+    pub extent: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ProjParams {
+    color: [f32; 4],
+    vals: [f32; 4],
+    emissive: [f32; 4],
+    bits: [u32; 4],
+    xf: [f32; 4],
+    xf2: [f32; 4],
+    extent: [f32; 4],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct FilterParams {
@@ -55,6 +78,9 @@ pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
     emissive_pipeline: wgpu::RenderPipeline,
     emissive_layout: wgpu::BindGroupLayout,
+    proj_pipeline: wgpu::RenderPipeline,
+    proj_layout: wgpu::BindGroupLayout,
+    projection: Option<ProjectionMaps>,
     filter_pipeline: wgpu::RenderPipeline,
     filter_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
@@ -177,6 +203,59 @@ impl Compositor {
             multiview_mask: None,
             cache: None,
         });
+        // Projected fills are rendered into a layer of their own first (see `projected_fill`).
+        let proj_tex = |binding, filterable| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let proj_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("projfill_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                proj_tex(1, false),
+                proj_tex(2, false),
+                proj_tex(3, true),
+                proj_tex(4, true),
+                proj_tex(5, true),
+                proj_tex(6, true),
+                proj_tex(7, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let proj_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/projfill.wgsl"));
+        let proj_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("projfill_pl"), bind_group_layouts: &[Some(&proj_layout)], immediate_size: 0 });
+        let proj_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("projfill"),
+            layout: Some(&proj_pl),
+            vertex: wgpu::VertexState { module: &proj_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &proj_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(BASE_FORMAT), target(NORMAL_FORMAT)],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let filter_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -221,6 +300,9 @@ impl Compositor {
             pipeline,
             emissive_pipeline,
             emissive_layout,
+            proj_pipeline,
+            proj_layout,
+            projection: None,
             filter_pipeline,
             filter_layout,
             layout,
@@ -245,6 +327,11 @@ impl Compositor {
 
     pub fn set_images(&mut self, images: SharedImages) {
         self.images = Some(images);
+    }
+
+    /// The baked maps projected fills read; without them those fills fall back to the UV layout.
+    pub fn set_projection(&mut self, maps: Option<ProjectionMaps>) {
+        self.projection = maps;
     }
 
     pub fn set_tile(&mut self, tile: [f32; 2]) {
@@ -302,7 +389,13 @@ impl Compositor {
                         self.pool.push(f);
                     }
                 }
-                NodeKind::Fill(f) => self.pass(device, encoder, &back, &front, Src::Fill(f), node, mask),
+                NodeKind::Fill(f) => match self.projected_fill(device, encoder, f) {
+                    Some(layer) => {
+                        self.pass(device, encoder, &back, &front, Src::Tex(&layer), node, mask);
+                        self.pool.push(layer);
+                    }
+                    None => self.pass(device, encoder, &back, &front, Src::Fill(f), node, mask),
+                },
                 NodeKind::Group { children } => {
                     let result = self.composite_nodes(device, encoder, children, store);
                     let filtered = self.filtered(device, encoder, &result, &node.filters);
@@ -317,6 +410,100 @@ impl Compositor {
         }
         self.pool.push(front);
         back
+    }
+
+    /// A fill layer whose textures are projected onto the model, rendered into a layer of its own, or
+    /// `None` if it uses the UV layout or the baked maps it needs are missing.
+    fn projected_fill(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, f: &FillParams) -> Option<Layer> {
+        if f.projection == Projection::Uv || f.maps.is_empty() {
+            return None;
+        }
+        let maps = self.projection.clone()?;
+        let lib = self.images.clone()?;
+        // The images of the channels that have one, base and emissive through sRGB views.
+        let mut views: [Option<std::sync::Arc<GpuImage>>; 6] = Default::default();
+        let (mut tex_bits, mut invert_bits) = (0u32, 0u32);
+        {
+            let lib = lib.lock().expect("image library lock");
+            for (n, slot) in Slot::ALL.into_iter().enumerate() {
+                if slot == Slot::Normal {
+                    continue; // a tangent-space normal map has no meaning on a projection
+                }
+                if let Some(t) = f.maps.get(slot) {
+                    if let Some(img) = lib.get(&t.id) {
+                        views[n] = Some(img);
+                        tex_bits |= 1 << n;
+                        invert_bits |= (t.invert as u32) << n;
+                    }
+                }
+            }
+        }
+        if tex_bits == 0 {
+            return None;
+        }
+        let constant_bits = f.base.is_some() as u32 | (f.metallic.is_some() as u32) << 1 | (f.roughness.is_some() as u32) << 2 | (f.height.is_some() as u32) << 3;
+        let lin = f.base.map_or([0.0; 3], |c| c.map(srgb_to_linear));
+        let emissive = f.emissive.map_or([0.0; 4], |c| {
+            let l = c.map(srgb_to_linear);
+            [l[0], l[1], l[2], 1.0]
+        });
+        let (sin, cos) = f.uv.rotation.to_radians().sin_cos();
+        let sharpness = if f.sharpness.is_finite() { f.sharpness.clamp(0.5, 32.0) } else { 4.0 };
+        let params = ProjParams {
+            color: [lin[0], lin[1], lin[2], 0.0],
+            vals: [0.0, f.metallic.unwrap_or(0.0), f.roughness.unwrap_or(0.0), f.height.unwrap_or(0.0)],
+            emissive,
+            bits: [constant_bits, tex_bits, invert_bits, f.projection.code()],
+            xf: [f.uv.tiling[0], f.uv.tiling[1], f.uv.offset[0], f.uv.offset[1]],
+            xf2: [cos, sin, sharpness, 0.0],
+            extent: [maps.extent[0], maps.extent[1], maps.extent[2], 0.0],
+        };
+        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("projfill_params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let (pos, nrm) = (maps.position.create_view(&Default::default()), maps.normal.create_view(&Default::default()));
+        let img = |n: usize| -> &wgpu::TextureView {
+            match &views[n] {
+                Some(i) if n == 0 || n == 5 => &i.srgb,
+                Some(i) => &i.linear,
+                None => &self.dummy_image.linear,
+            }
+        };
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("projfill_bind"),
+            layout: &self.proj_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&pos) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&nrm) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(img(0)) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(img(1)) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(img(2)) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(img(3)) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(img(5)) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        let layer = self.acquire(device, encoder);
+        let dv = layer.views();
+        let ops = wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store };
+        let attachments = dv.each_ref().map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops }));
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("projfill_pass"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.proj_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        Some(layer)
     }
 
     /// `input` run through `filters` in order, or `None` if there is nothing to do.

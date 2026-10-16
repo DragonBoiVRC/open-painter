@@ -5,7 +5,7 @@ use super::shelf::Asset;
 use crate::textures::TextureAsset;
 use crate::ui::theme;
 use egui_phosphor::regular as ph;
-use op_core::{FillParams, Slot, TexRef};
+use op_core::{FillParams, Projection, Slot, TexRef};
 use std::collections::HashMap;
 
 const SLOT_SIZE: f32 = 42.0;
@@ -27,6 +27,24 @@ pub fn fill_controls(ui: &mut egui::Ui, f: &mut FillParams, assets: &[TextureAss
 
 fn placement_controls(ui: &mut egui::Ui, f: &mut FillParams) -> bool {
     let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Projection");
+        egui::ComboBox::from_id_salt("fill_projection").selected_text(f.projection.label()).show_ui(ui, |ui| {
+            for p in Projection::ALL {
+                changed |= ui.selectable_value(&mut f.projection, p, p.label()).changed();
+            }
+        });
+    });
+    if f.projection == Projection::Triplanar {
+        let mut s = f.sharpness;
+        if ui.add(egui::Slider::new(&mut s, 1.0..=16.0).text("Blend sharpness")).changed() {
+            f.sharpness = s;
+            changed = true;
+        }
+    }
+    if f.projection != Projection::Uv {
+        super::hint(ui, "Projections need the Position map (and for triplanar the World space normal map) baked for this texture set: use the Bake panel. Until then the UV layout is used. Tiling 1 spans the model's longest side; normal maps are not projected.");
+    }
     egui::Grid::new("tex_placement").num_columns(3).spacing([6.0, 3.0]).show(ui, |ui| {
         let mut pair = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 2], speed: f64, lo: f32, hi: f32| {
             ui.label(label);
