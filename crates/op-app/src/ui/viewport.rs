@@ -340,13 +340,16 @@ impl App {
                         if ui.button(ph::FRAME_CORNERS).on_hover_text("Frame model (F)").clicked() {
                             self.frame_model();
                         }
-                        egui::ComboBox::from_id_salt("camera_views").selected_text("Camera").width(70.0).show_ui(ui, |ui| {
+                        ui.menu_button(ph::VIDEO_CAMERA, |ui| {
                             for v in crate::camera::ViewPreset::ALL {
-                                if ui.selectable_label(false, v.label()).clicked() {
+                                if ui.button(v.label()).clicked() {
                                     self.camera.set_view(v);
+                                    ui.close();
                                 }
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_text("Look along an axis");
                         if ui.selectable_label(self.show_wireframe, ph::POLYGON).on_hover_text("Show the mesh edges (W)").clicked() {
                             self.show_wireframe = !self.show_wireframe;
                         }
