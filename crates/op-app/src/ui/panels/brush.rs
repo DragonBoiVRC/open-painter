@@ -10,7 +10,7 @@ const SHAPES: [&str; 6] = ["Round", "Square", "Diamond", "Chalk", "Streaks", "Im
 impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Brush", |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone"), (Tool::Project, "Project"), (Tool::Fill, "Fill"), (Tool::Hide, "Hide")] {
                     if ui.selectable_label(self.tool == tool, label).clicked() {
                         self.tool = tool;
