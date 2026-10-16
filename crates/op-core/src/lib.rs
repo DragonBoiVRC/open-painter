@@ -721,6 +721,13 @@ pub enum Filter {
     Invert,
     /// Stretch the input range `black..white` to 0..1 with `gamma`, on colours and values alike.
     Levels { black: f32, white: f32, gamma: f32 },
+    /// Blur along one direction; `angle` is in degrees (0 is left-right).
+    DirectionalBlur { radius: f32, angle: f32 },
+    /// Push the paint around with smooth noise: `amount` texels at most, `scale` noise cells across
+    /// the texture.
+    Warp { amount: f32, scale: f32 },
+    /// Turn values into black and white around `position`, with `softness` of ramp (0 is a hard edge).
+    Threshold { position: f32, softness: f32 },
 }
 
 impl Filter {
@@ -730,12 +737,23 @@ impl Filter {
             Filter::Sharpen { .. } => "Sharpen",
             Filter::Invert => "Invert",
             Filter::Levels { .. } => "Levels",
+            Filter::DirectionalBlur { .. } => "Directional blur",
+            Filter::Warp { .. } => "Warp",
+            Filter::Threshold { .. } => "Threshold",
         }
     }
 
     /// A new filter of each kind with its default settings.
-    pub fn defaults() -> [Filter; 4] {
-        [Filter::Blur { radius: 4.0 }, Filter::Sharpen { amount: 1.0, radius: 3.0 }, Filter::Invert, Filter::Levels { black: 0.0, white: 1.0, gamma: 1.0 }]
+    pub fn defaults() -> [Filter; 7] {
+        [
+            Filter::Blur { radius: 4.0 },
+            Filter::Sharpen { amount: 1.0, radius: 3.0 },
+            Filter::Invert,
+            Filter::Levels { black: 0.0, white: 1.0, gamma: 1.0 },
+            Filter::DirectionalBlur { radius: 12.0, angle: 0.0 },
+            Filter::Warp { amount: 8.0, scale: 6.0 },
+            Filter::Threshold { position: 0.5, softness: 0.05 },
+        ]
     }
 
     /// The same filter with anything non-finite replaced and every setting clamped to its range.
@@ -746,6 +764,9 @@ impl Filter {
             Filter::Sharpen { amount, radius } => Filter::Sharpen { amount: f(amount, 0.0, 0.0, 8.0), radius: f(radius, 2.0, 0.5, 64.0) },
             Filter::Invert => Filter::Invert,
             Filter::Levels { black, white, gamma } => Filter::Levels { black: f(black, 0.0, 0.0, 1.0), white: f(white, 1.0, 0.0, 1.0), gamma: f(gamma, 1.0, 0.1, 10.0) },
+            Filter::DirectionalBlur { radius, angle } => Filter::DirectionalBlur { radius: f(radius, 0.0, 0.0, 64.0), angle: f(angle, 0.0, -3600.0, 3600.0) },
+            Filter::Warp { amount, scale } => Filter::Warp { amount: f(amount, 0.0, 0.0, 128.0), scale: f(scale, 4.0, 0.5, 64.0) },
+            Filter::Threshold { position, softness } => Filter::Threshold { position: f(position, 0.5, 0.0, 1.0), softness: f(softness, 0.0, 0.0, 1.0) },
         }
     }
 }
@@ -1426,6 +1447,9 @@ mod tests {
         assert_eq!(Filter::Blur { radius: 1e9 }.sanitized(), Filter::Blur { radius: 64.0 });
         assert_eq!(Filter::Sharpen { amount: -3.0, radius: 0.0 }.sanitized(), Filter::Sharpen { amount: 0.0, radius: 0.5 });
         assert_eq!(Filter::Levels { black: f32::INFINITY, white: 2.0, gamma: 0.0 }.sanitized(), Filter::Levels { black: 0.0, white: 1.0, gamma: 0.1 });
+        assert_eq!(Filter::Warp { amount: 1e9, scale: f32::NAN }.sanitized(), Filter::Warp { amount: 128.0, scale: 4.0 });
+        assert_eq!(Filter::Threshold { position: -1.0, softness: 5.0 }.sanitized(), Filter::Threshold { position: 0.0, softness: 1.0 });
+        assert_eq!(Filter::DirectionalBlur { radius: f32::NAN, angle: 1e9 }.sanitized(), Filter::DirectionalBlur { radius: 0.0, angle: 3600.0 });
     }
 
     #[test]

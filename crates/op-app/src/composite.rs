@@ -542,6 +542,14 @@ impl Compositor {
                     }
                     vec![(3, [black, white, gamma, 0.0])]
                 }
+                Filter::DirectionalBlur { radius, .. } if radius < 0.5 => continue,
+                Filter::DirectionalBlur { radius, angle } => {
+                    let (s, c) = angle.to_radians().sin_cos();
+                    vec![(0, [radius, c, s, 0.0])]
+                }
+                Filter::Warp { amount, .. } if amount <= 0.0 => continue,
+                Filter::Warp { amount, scale } => vec![(4, [amount, scale, 0.0, 0.0])],
+                Filter::Threshold { position, softness } => vec![(5, [position, softness, 0.0, 0.0])],
             };
             let start = current.take();
             let source = start.as_ref().unwrap_or(input);

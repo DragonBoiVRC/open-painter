@@ -268,6 +268,18 @@ fn filters_ui(ui: &mut egui::Ui, filters: &mut Vec<Filter>) -> bool {
                     changed |= super::slider_row(ui, "White", white, 0.0..=1.0).changed();
                     changed |= super::slider_row(ui, "Gamma", gamma, 0.2..=5.0).changed();
                 }
+                Filter::DirectionalBlur { radius, angle } => {
+                    changed |= super::slider_row(ui, "Radius", radius, 0.0..=64.0).changed();
+                    changed |= super::slider_row(ui, "Angle", angle, -180.0..=180.0).changed();
+                }
+                Filter::Warp { amount, scale } => {
+                    changed |= super::slider_row(ui, "Amount", amount, 0.0..=64.0).changed();
+                    changed |= super::slider_row(ui, "Scale", scale, 0.5..=32.0).changed();
+                }
+                Filter::Threshold { position, softness } => {
+                    changed |= super::slider_row(ui, "Position", position, 0.0..=1.0).changed();
+                    changed |= super::slider_row(ui, "Softness", softness, 0.0..=1.0).changed();
+                }
             }
             ui.separator();
         });

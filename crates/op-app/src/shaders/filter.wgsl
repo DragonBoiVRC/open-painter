@@ -5,6 +5,8 @@
 //   kind 1: sharpen: `a` is the layer, `b` its blurred copy; out = a + amount * (a - b)
 //   kind 2: invert
 //   kind 3: levels
+//   kind 4: warp (displace by smooth noise)
+//   kind 5: threshold
 
 struct Params {
     kind: vec4<u32>,   // x: kind
@@ -92,6 +94,38 @@ fn map_color(s: vec4<f32>, kind: u32) -> vec4<f32> {
     return vec4<f32>(c * cov, cov);
 }
 
+// A smooth value noise in 0..1.
+fn hash2(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21));
+    q += dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash2(i), hash2(i + vec2<f32>(1.0, 0.0)), u.x), mix(hash2(i + vec2<f32>(0.0, 1.0)), hash2(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
+}
+
+fn threshold(v: f32) -> f32 {
+    let half = max(p.v.y * 0.5, 1e-4);
+    return smoothstep(p.v.x - half, p.v.x + half, v);
+}
+
+fn map_scalar_t(s: vec4<f32>) -> vec4<f32> {
+    let cov = s.g;
+    if (cov <= 0.0) { return s; }
+    return vec4<f32>(threshold(s.r / cov) * cov, cov, s.b, s.a);
+}
+
+fn map_color_t(s: vec4<f32>) -> vec4<f32> {
+    let cov = s.a;
+    if (cov <= 0.0) { return s; }
+    let c = s.rgb / cov;
+    return vec4<f32>(vec3<f32>(threshold(c.r), threshold(c.g), threshold(c.b)) * cov, cov);
+}
+
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
     let xy = vec2<i32>(pos.xy);
@@ -118,6 +152,25 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         o.emissive = vec4<f32>(min(se.rgb, vec3<f32>(se.a)), min(se.a, 1.0));
         let so = max(load(a_opacity, xy) + amount * (load(a_opacity, xy) - load(b_opacity, xy)), vec4<f32>(0.0));
         o.opacity = vec4<f32>(min(so.r, so.g), min(so.g, 1.0), 0.0, min(so.g, 1.0));
+    } else if (kind == 4u) {
+        // Warp: every channel is read from a smoothly shifted place.
+        let dims = vec2<f32>(textureDimensions(a_base));
+        let np = (vec2<f32>(xy) / dims) * p.v.y;
+        let off = (vec2<f32>(vnoise(np), vnoise(np + vec2<f32>(37.7, 91.3))) - vec2<f32>(0.5)) * 2.0 * p.v.x;
+        let q = xy + vec2<i32>(round(off));
+        o.base = load(a_base, q);
+        o.metal = load(a_metal, q);
+        o.rough = load(a_rough, q);
+        o.height = load(a_height, q);
+        o.emissive = load(a_emissive, q);
+        o.opacity = load(a_opacity, q);
+    } else if (kind == 5u) {
+        o.base = map_color_t(load(a_base, xy));
+        o.metal = map_scalar_t(load(a_metal, xy));
+        o.rough = map_scalar_t(load(a_rough, xy));
+        o.height = map_scalar_t(load(a_height, xy));
+        o.emissive = map_color_t(load(a_emissive, xy));
+        o.opacity = map_scalar_t(load(a_opacity, xy));
     } else {
         o.base = map_color(load(a_base, xy), kind);
         o.metal = map_scalar(load(a_metal, xy), kind);

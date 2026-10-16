@@ -1213,6 +1213,26 @@ mod tests {
         let (sharp_cover, _) = stats(&rig);
         assert!(sharp_cover > 0);
 
+        // Directional blur spreads along its direction only: a horizontal blur widens the dab sideways.
+        doc.find_mut(layer).unwrap().filters = vec![Filter::DirectionalBlur { radius: 10.0, angle: 0.0 }];
+        rig.run(&doc, &[]);
+        let (dir_cover, _) = stats(&rig);
+        assert!(dir_cover as f32 > plain_cover as f32 * 1.1, "directional blur did not spread: {plain_cover} -> {dir_cover}");
+
+        // Threshold turns 0.8 into 1 below a position of 0.5 and into 0 above 0.9.
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Threshold { position: 0.5, softness: 0.0 }];
+        rig.run(&doc, &[]);
+        assert!(stats(&rig).1 > 0.97, "0.8 over a 0.5 threshold becomes 1");
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Threshold { position: 0.9, softness: 0.0 }];
+        rig.run(&doc, &[]);
+        assert!(stats(&rig).1 < 0.03, "0.8 under a 0.9 threshold becomes 0");
+
+        // Warp keeps the amount of paint roughly the same but moves it: the covered area stays similar.
+        doc.find_mut(layer).unwrap().filters = vec![Filter::Warp { amount: 6.0, scale: 4.0 }];
+        rig.run(&doc, &[]);
+        let (warp_cover, _) = stats(&rig);
+        assert!(warp_cover > plain_cover / 2 && warp_cover < plain_cover * 2, "warp: {plain_cover} -> {warp_cover}");
+
         doc.find_mut(layer).unwrap().filters.clear();
         rig.run(&doc, &[]);
         assert_eq!(stats(&rig).0, plain_cover, "the stored paint changed");
