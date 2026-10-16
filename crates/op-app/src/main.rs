@@ -95,6 +95,8 @@ impl Default for Brush {
 }
 
 /// How the viewport is lit.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct Environment {
     /// Which procedural environment: studio, outdoor, sunset, neutral.
     preset: u32,
@@ -113,6 +115,33 @@ struct Environment {
     show_transparency: bool,
     /// Smooth jagged edges in the 3D view (FXAA).
     fxaa: bool,
+}
+
+/// The display settings that are kept between sessions: the lighting and the HDRI in use.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct DisplaySettings {
+    env: Environment,
+    /// The file name (in the environments folder) of the HDRI that was loaded.
+    hdri: Option<String>,
+}
+
+impl DisplaySettings {
+    /// Read the settings file; anything unreadable gives the defaults. Values are clamped to what the
+    /// controls allow, so a hand-edited file cannot do harm.
+    fn load(path: &std::path::Path) -> Self {
+        let text = std::fs::metadata(path).ok().filter(|m| m.len() < 64 * 1024).and_then(|_| std::fs::read_to_string(path).ok());
+        let mut me: Self = text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let e = &mut me.env;
+        let fin = |v: f32, d: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        e.preset = e.preset.min(4);
+        e.rotation = fin(e.rotation, 0.0, 0.0, 360.0);
+        e.exposure = fin(e.exposure, 0.0, -3.0, 3.0);
+        e.light = fin(e.light, 1.0, 0.0, 3.0);
+        e.background_blur = fin(e.background_blur, 0.3, 0.0, 1.0);
+        e.tonemap = e.tonemap.min(2);
+        me
+    }
 }
 
 impl Default for Environment {
@@ -500,6 +529,8 @@ struct App {
     dock: Option<DockState<Tab>>,
     /// The layout as last written to disk, to avoid rewriting an unchanged file.
     layout_json: String,
+    /// The display settings last written to disk.
+    display_saved: Option<DisplaySettings>,
     layout_check: Instant,
     show_shortcuts: bool,
 }
@@ -514,6 +545,7 @@ impl App {
         let gpu = ViewportGpu::new(&rs.device, &rs.queue, rs.target_format);
         rs.renderer.write().callback_resources.insert(gpu);
 
+        let display = DisplaySettings::load(&files::display_path());
         let (user_presets, preset_warnings) = files::load_user_presets(&files::presets_dir());
         let mut presets = op_export::builtin_presets();
         presets.extend(user_presets);
@@ -575,7 +607,8 @@ impl App {
             lazy_pos: None,
             stroke_limited: false,
             fill_scope: FillScope::Face,
-            env: Environment::default(),
+            env: display.env.clone(),
+            display_saved: Some(display.clone()),
             recent: files::load_recent(),
             symmetry: 0,
             channels: PaintChannels {
@@ -674,6 +707,10 @@ impl App {
             show_shortcuts: false,
         };
         app.load_texture_library();
+        // The HDRI that was in use last time comes back with the rest of the lighting.
+        if let (4, Some(name)) = (display.env.preset, display.hdri.clone()) {
+            app.use_hdri_from_library(&name);
+        }
         app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
         app.init_sets();
         if let Some(p) = initial {
@@ -1330,6 +1367,7 @@ impl App {
             return;
         }
         self.layout_check = Instant::now();
+        self.save_display_if_changed();
         let Some(json) = self.dock.as_ref().and_then(dock::to_json) else { return };
         if json != self.layout_json {
             let path = files::layout_path();
@@ -1337,6 +1375,24 @@ impl App {
             if written.is_ok() {
                 self.layout_json = json;
             }
+        }
+    }
+
+    /// Remember the lighting and display choices between sessions (together with the panel layout).
+    fn save_display_if_changed(&mut self) {
+        // While the remembered HDRI is still loading its name is not known yet: keep what is saved.
+        if self.hdri_rx.is_some() {
+            return;
+        }
+        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone() };
+        if self.display_saved.as_ref() == Some(&now) {
+            return;
+        }
+        let path = files::display_path();
+        let json = serde_json::to_string_pretty(&now).unwrap_or_default();
+        let written = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, json));
+        if written.is_ok() {
+            self.display_saved = Some(now);
         }
     }
 
@@ -2458,7 +2514,28 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod lazy_tests {
-    use super::{lazy_step, push_recent};
+    use super::{lazy_step, push_recent, DisplaySettings};
+
+    #[test]
+    fn display_settings_survive_a_round_trip_and_bad_files_give_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("display.json");
+        assert_eq!(DisplaySettings::load(&path), DisplaySettings::default(), "no file: defaults");
+        let mut s = DisplaySettings::default();
+        s.env.preset = 4;
+        s.env.exposure = 1.5;
+        s.env.fxaa = false;
+        s.hdri = Some("studio.hdr".into());
+        std::fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(DisplaySettings::load(&path), s);
+        // A file from an older version (missing keys) and hand-edited nonsense are both harmless.
+        std::fs::write(&path, r#"{"env":{"exposure":1e9,"preset":77,"tonemap":9,"rotation":-5}}"#).unwrap();
+        let odd = DisplaySettings::load(&path);
+        assert_eq!((odd.env.exposure, odd.env.preset, odd.env.tonemap, odd.env.rotation), (3.0, 4, 2, 0.0));
+        assert!(odd.env.show_transparency, "missing keys take their defaults");
+        std::fs::write(&path, "not json at all").unwrap();
+        assert_eq!(DisplaySettings::load(&path), DisplaySettings::default());
+    }
 
     #[test]
     fn recent_colours_are_newest_first_unique_and_capped() {

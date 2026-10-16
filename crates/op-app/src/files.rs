@@ -59,6 +59,10 @@ pub fn environments_dir() -> PathBuf {
     data_dir().join("environments")
 }
 
+pub fn display_path() -> PathBuf {
+    data_dir().join("display.json")
+}
+
 pub fn brushes_dir() -> PathBuf {
     data_dir().join("brushes")
 }

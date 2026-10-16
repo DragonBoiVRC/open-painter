@@ -372,7 +372,13 @@ impl App {
                         self.hdri_name = Some(name);
                     }
                     Err(e) if e.is_empty() => self.status.clear(),
-                    Err(e) => self.status = format!("Could not use that environment: {e}"),
+                    Err(e) => {
+                        // The remembered HDRI is gone or unreadable: go back to a built-in environment.
+                        if self.hdri_name.is_none() && self.env.preset == 4 {
+                            self.env.preset = 0;
+                        }
+                        self.status = format!("Could not use that environment: {e}");
+                    }
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(150)),
