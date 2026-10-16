@@ -19,6 +19,8 @@ struct Params {
     chan_k: vec4<f32>,  // opacity multiplier of those channels (0 when a channel is off)
     chan_n: vec4<f32>,  // x: opacity multiplier of the normal map, y: of the emissive channel, z: its blend mode
     emissive: vec4<f32>, // an emissive fill's linear colour; w is 1 if it writes the channel
+    opac: vec4<f32>,     // an opacity fill's value; y is 1 if it writes the channel
+    chan_o: vec4<f32>,   // x: opacity multiplier of the opacity channel, y: its blend mode
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -43,6 +45,9 @@ struct Params {
 @group(0) @binding(18) var bk_emissive: texture_2d<f32>;
 @group(0) @binding(19) var src_emissive: texture_2d<f32>;
 @group(0) @binding(20) var img_emissive: texture_2d<f32>;
+@group(0) @binding(21) var bk_opacity: texture_2d<f32>;
+@group(0) @binding(22) var src_opacity: texture_2d<f32>;
+@group(0) @binding(23) var img_opacity: texture_2d<f32>;
 
 struct FsIn {
     @builtin(position) pos: vec4<f32>,
@@ -313,25 +318,42 @@ fn fs_main(i: FsIn) -> Out {
 }
 
 
-// The emissive channel is composited in a second pass (with its own, smaller set of bindings) so
-// that neither pass needs more sampled textures than a GPU is guaranteed to offer.
+// The emissive and opacity channels are composited in a second pass (with their own, smaller set of
+// bindings) so that neither pass needs more sampled textures than a GPU is guaranteed to offer.
+struct EmOut {
+    @location(0) emissive: vec4<f32>,
+    @location(1) opacity: vec4<f32>,
+};
+
 @fragment
-fn fs_emissive(i: FsIn) -> @location(0) vec4<f32> {
+fn fs_emissive(i: FsIn) -> EmOut {
     let xy = vec2<i32>(i32(i.pos.x), i32(i.pos.y));
     var e_color = vec3<f32>(0.0);
     var e_cov = 0.0;
+    var o_val = 0.0;
+    var o_cov = 0.0;
     if (p.mode.x == 1u) {
         e_color = p.emissive.rgb;
         e_cov = p.emissive.w;
+        o_val = p.opac.x;
+        o_cov = p.opac.y;
         if ((p.tex.x & 32u) != 0u) {
             let s = textureSample(img_emissive, img_samp, tex_uv(i.pos_xy));
             e_color = s.rgb;
             e_cov = s.a;
         }
+        if ((p.tex.x & 64u) != 0u) {
+            let v = textureSample(img_opacity, img_samp, tex_uv(i.pos_xy)).r;
+            o_val = select(v, 1.0 - v, (p.tex.y & 64u) != 0u);
+            o_cov = 1.0;
+        }
     } else {
         let se = textureLoad(src_emissive, xy, 0);
         e_cov = se.a;
         e_color = select(vec3<f32>(0.0), se.rgb / se.a, se.a > 0.0);
+        let so = textureLoad(src_opacity, xy, 0);
+        o_cov = so.g;
+        o_val = unpremul(so.r, so.g);
     }
     var mask = 1.0;
     if (p.mode.y == 1u) {
@@ -341,5 +363,10 @@ fn fs_emissive(i: FsIn) -> @location(0) vec4<f32> {
         mask = select(lifted, 1.0 - lifted, p.lv.w > 0.5);
     }
     let k = p.vals.x * mask;
-    return over(textureLoad(bk_emissive, xy, 0), e_color, e_cov * k * p.chan_n.y, u32(p.chan_n.z + 0.5));
+    var o: EmOut;
+    o.emissive = over(textureLoad(bk_emissive, xy, 0), e_color, e_cov * k * p.chan_n.y, u32(p.chan_n.z + 0.5));
+    let bo = textureLoad(bk_opacity, xy, 0);
+    let ov = over(vec4<f32>(vec3<f32>(bo.r), bo.g), vec3<f32>(o_val), o_cov * k * p.chan_o.x, u32(p.chan_o.y + 0.5));
+    o.opacity = vec4<f32>(ov.x, ov.a, 0.0, 1.0);
+    return o;
 }

@@ -109,11 +109,13 @@ struct Environment {
     background_blur: f32,
     /// Tone mapping: 0 filmic, 1 Reinhard, 2 none.
     tonemap: u32,
+    /// Show see-through (low opacity) paint as dithered holes.
+    show_transparency: bool,
 }
 
 impl Default for Environment {
     fn default() -> Self {
-        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0 }
+        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true }
     }
 }
 
@@ -153,8 +155,11 @@ struct PaintChannels {
     height_value: f32,
     /// Paint emissive light?
     emissive: bool,
-    /// sRGB colour of the light, and a multiplier on how bright it is (1 is the colour as shown).
+    /// sRGB colour of the light.
     emissive_color: [f32; 3],
+    /// Paint opacity (0 transparent, 1 solid)?
+    opacity: bool,
+    opacity_value: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -244,7 +249,7 @@ struct ExportJob {
     /// UDIM number of the tile, when the set has UV tiles.
     udim: Option<u32>,
     size: u32,
-    planes: [Vec<u8>; 6],
+    planes: [Vec<u8>; 7],
     /// The set's height strength, for deriving its normal map.
     height_strength: f32,
     mesh: Mesh,
@@ -550,6 +555,8 @@ impl App {
                 height_value: 0.8,
                 emissive: false,
                 emissive_color: [1.0, 0.6, 0.2],
+                opacity: false,
+                opacity_value: 0.0,
             },
             stroke: Stroke::default(),
             line_anchor: None,
@@ -951,7 +958,7 @@ impl App {
             let result = (|| -> Result<ExportOutcome, String> {
                 let mut total = ExportOutcome::default();
                 for job in jobs {
-                    let [base, metal, rough, height, layer_normal, emissive] = &job.planes;
+                    let [base, metal, rough, height, layer_normal, emissive, opacity] = &job.planes;
                     let size = job.size;
                     let mut data = TextureSetData::from_composite(size, base, metal, rough).map_err(|e| e.to_string())?;
                     let mut notes = Vec::new();
@@ -969,6 +976,7 @@ impl App {
                     }
                     data.set_height(height).map_err(|e| e.to_string())?;
                     data.set_emissive(emissive).map_err(|e| e.to_string())?;
+                    data.set_opacity(opacity).map_err(|e| e.to_string())?;
                     data.set_layer_normal(layer_normal).map_err(|e| e.to_string())?;
                     data.compute_normal(job.height_strength);
                     if padding > 0 {
@@ -1495,6 +1503,7 @@ impl App {
                 enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
                 shape,
                 emissive: [0.0, 0.0, 0.0, flag(c.emissive)],
+                opacity: [0.0, flag(c.opacity), 0.0, 0.0],
             };
         }
         match target {
@@ -1507,6 +1516,7 @@ impl App {
                 enables: [0.0; 4],
                 shape,
                 emissive: [0.0; 4],
+                opacity: [0.0; 4],
             },
             Target::Content if erase => Stamp {
                 brush,
@@ -1515,6 +1525,7 @@ impl App {
                 enables: [1.0, 1.0, 1.0, 1.0],
                 shape,
                 emissive: [0.0, 0.0, 0.0, 1.0],
+                opacity: [0.0, 1.0, 0.0, 0.0],
             },
             Target::Content if self.tool == Tool::Project => Stamp {
                 brush,
@@ -1524,6 +1535,7 @@ impl App {
                 enables: [2.0, 0.0, 0.0, 0.0],
                 shape,
                 emissive: [0.0; 4],
+                opacity: [0.0; 4],
             },
             Target::Content => {
                 let lin = c.base_color.map(srgb_to_linear);
@@ -1537,6 +1549,7 @@ impl App {
                         let e = c.emissive_color.map(srgb_to_linear);
                         [e[0], e[1], e[2], flag(c.emissive)]
                     },
+                    opacity: [c.opacity_value, flag(c.opacity), 0.0, 0.0],
                 }
             }
         }
@@ -1662,7 +1675,7 @@ impl App {
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
         let lin = c.base_color.map(srgb_to_linear);
         let op = match target {
-            Target::Mask => PaintOp::Fill { layer, target, uvs, color: [0.0; 3], values: [if hide { 0.0 } else { 1.0 }, 0.0, self.brush.opacity, 0.0], enables: [0.0; 4], emissive: [0.0; 4] },
+            Target::Mask => PaintOp::Fill { layer, target, uvs, color: [0.0; 3], values: [if hide { 0.0 } else { 1.0 }, 0.0, self.brush.opacity, 0.0], enables: [0.0; 4], emissive: [0.0; 4], opacity: [0.0; 2] },
             Target::Content => PaintOp::Fill {
                 layer,
                 target,
@@ -1674,6 +1687,7 @@ impl App {
                     let e = c.emissive_color.map(srgb_to_linear);
                     [e[0], e[1], e[2], flag(c.emissive)]
                 },
+                opacity: [c.opacity_value, flag(c.opacity)],
             },
         };
         self.stroke.active = false;
@@ -1900,7 +1914,7 @@ impl App {
                         ("I / Shift+I", "pick the colour / every channel under the cursor"),
                         ("L", "toggle symmetry"),
                         ("W", "show or hide the mesh edges"),
-                        ("C", "cycle base color / roughness / metallic / emissive views"),
+                        ("C", "cycle base color / roughness / metallic / emissive / opacity views"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
                         ("Alt + left drag", "orbit"),
@@ -2219,7 +2233,7 @@ impl App {
             // C steps through the painted channels and back to the lit view.
             let next = match self.view {
                 View::Shaded => View::Channel(0),
-                View::Channel(n) if n < 3 => View::Channel(n + 1),
+                View::Channel(n) if n < 4 => View::Channel(n + 1),
                 _ => View::Shaded,
             };
             self.set_view(next);

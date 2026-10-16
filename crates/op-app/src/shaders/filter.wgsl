@@ -23,6 +23,8 @@ struct Params {
 @group(0) @binding(9) var b_height: texture_2d<f32>;
 @group(0) @binding(10) var a_emissive: texture_2d<f32>;
 @group(0) @binding(11) var b_emissive: texture_2d<f32>;
+@group(0) @binding(12) var a_opacity: texture_2d<f32>;
+@group(0) @binding(13) var b_opacity: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -36,7 +38,8 @@ struct Out {
     @location(2) rough: vec4<f32>,
     @location(3) height: vec4<f32>,
     @location(4) emissive: vec4<f32>,
-    @location(5) normal: vec4<f32>,
+    @location(5) opacity: vec4<f32>,
+    @location(6) normal: vec4<f32>,
 };
 
 fn load(t: texture_2d<f32>, xy: vec2<i32>) -> vec4<f32> {
@@ -100,6 +103,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         o.rough = blur(a_rough, xy);
         o.height = blur(a_height, xy);
         o.emissive = blur(a_emissive, xy);
+        o.opacity = blur(a_opacity, xy);
     } else if (kind == 1u) {
         let amount = p.v.x;
         o.base = max(load(a_base, xy) + amount * (load(a_base, xy) - load(b_base, xy)), vec4<f32>(0.0));
@@ -112,12 +116,15 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         o.height = vec4<f32>(min(sh.r, sh.g), min(sh.g, 1.0), 0.0, min(sh.g, 1.0));
         let se = max(load(a_emissive, xy) + amount * (load(a_emissive, xy) - load(b_emissive, xy)), vec4<f32>(0.0));
         o.emissive = vec4<f32>(min(se.rgb, vec3<f32>(se.a)), min(se.a, 1.0));
+        let so = max(load(a_opacity, xy) + amount * (load(a_opacity, xy) - load(b_opacity, xy)), vec4<f32>(0.0));
+        o.opacity = vec4<f32>(min(so.r, so.g), min(so.g, 1.0), 0.0, min(so.g, 1.0));
     } else {
         o.base = map_color(load(a_base, xy), kind);
         o.metal = map_scalar(load(a_metal, xy), kind);
         o.rough = map_scalar(load(a_rough, xy), kind);
         o.height = map_scalar(load(a_height, xy), kind);
         o.emissive = map_color(load(a_emissive, xy), kind);
+        o.opacity = map_scalar(load(a_opacity, xy), kind);
     }
     o.normal = load(a_normal, xy);
     return o;

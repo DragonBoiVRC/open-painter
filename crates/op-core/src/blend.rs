@@ -136,6 +136,8 @@ pub struct PixelSet {
     pub height: [f32; 2],
     /// Premultiplied linear colour, like `base`.
     pub emissive: [f32; 4],
+    /// (value * coverage, coverage); the surface is opaque (1) where nothing sets it.
+    pub opacity: [f32; 2],
 }
 
 fn over_scalar(mode: BlendMode, backdrop: [f32; 2], value: f32, a_s: f32) -> [f32; 2] {
@@ -145,7 +147,7 @@ fn over_scalar(mode: BlendMode, backdrop: [f32; 2], value: f32, a_s: f32) -> [f3
 
 fn apply_layer(node: &Node, bk: PixelSet, src: PixelSet) -> PixelSet {
     let (mode, k) = (node.blend, node.opacity);
-    let [mb, mm, mr, mh, me] = node.channels.blended().map(|c| (c.mode(mode), k * c.factor()));
+    let [mb, mm, mr, mh, me, mo] = node.channels.blended().map(|c| (c.mode(mode), k * c.factor()));
     // Un-premultiply the source, then composite each channel with its own coverage.
     let straight = |v: f32, a: f32| if a > 0.0 { v / a } else { 0.0 };
     let base_c = [straight(src.base[0], src.base[3]), straight(src.base[1], src.base[3]), straight(src.base[2], src.base[3])];
@@ -156,6 +158,7 @@ fn apply_layer(node: &Node, bk: PixelSet, src: PixelSet) -> PixelSet {
         rough: over_scalar(mr.0, bk.rough, straight(src.rough[0], src.rough[1]), src.rough[1] * mr.1),
         height: over_scalar(mh.0, bk.height, straight(src.height[0], src.height[1]), src.height[1] * mh.1),
         emissive: over(me.0, bk.emissive, emissive_c, src.emissive[3] * me.1),
+        opacity: over_scalar(mo.0, bk.opacity, straight(src.opacity[0], src.opacity[1]), src.opacity[1] * mo.1),
     }
 }
 
@@ -177,6 +180,9 @@ fn fill_pixel(f: &FillParams) -> PixelSet {
     if let Some(c) = f.emissive {
         let l = c.map(srgb_to_linear);
         p.emissive = [l[0], l[1], l[2], 1.0];
+    }
+    if let Some(o) = f.opacity {
+        p.opacity = [o, 1.0];
     }
     p
 }

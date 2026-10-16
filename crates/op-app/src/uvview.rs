@@ -13,10 +13,11 @@ pub enum Channel {
     Roughness,
     Normal,
     Emissive,
+    Opacity,
 }
 
 impl Channel {
-    pub const ALL: [Channel; 5] = [Channel::Base, Channel::Metallic, Channel::Roughness, Channel::Normal, Channel::Emissive];
+    pub const ALL: [Channel; 6] = [Channel::Base, Channel::Metallic, Channel::Roughness, Channel::Normal, Channel::Emissive, Channel::Opacity];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -25,6 +26,7 @@ impl Channel {
             Channel::Roughness => "Roughness",
             Channel::Normal => "Normal map",
             Channel::Emissive => "Emissive",
+            Channel::Opacity => "Opacity",
         }
     }
 
@@ -35,6 +37,7 @@ impl Channel {
             Channel::Roughness => 2.0,
             Channel::Normal => 3.0,
             Channel::Emissive => 4.0,
+            Channel::Opacity => 5.0,
         }
     }
 }

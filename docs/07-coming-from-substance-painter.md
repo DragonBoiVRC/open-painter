@@ -52,6 +52,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Fill layers can project their textures: triplanar or planar X/Y/Z (Properties - Layer, Texture placement). The projection reads the baked Position and World space normal maps, so bake those first; without them the UV layout is used. Tiling 1 spans the model's longest side, and normal maps are not projected.
 - Wireframe: W (or the polygon button in the viewport bar) draws the mesh edges over the model.
 - The loaded HDRI can be shown behind the model (Display Settings - Environment), with a blur slider, and the tone mapping can be filmic, Reinhard or off.
+- Opacity is a channel too: paint it, give fill layers an opacity value or texture, and it is exported as the alpha of the Unity preset (and as optional Opacity maps when something is see-through). The viewport shows see-through paint as dithered holes (Display Settings can switch that off).
 - Lazy mouse (Properties - Brush, "Lazy mouse") makes the brush trail the cursor on a string for smooth strokes.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.

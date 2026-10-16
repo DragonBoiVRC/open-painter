@@ -42,6 +42,8 @@ pub struct Stamp {
     pub shape: [f32; 4],
     /// Linear RGB of the emissive paint and, in `w`, 1 if the stamp writes the emissive channel.
     pub emissive: [f32; 4],
+    /// The opacity value to paint in `x` and, in `y`, 1 if the stamp writes the opacity channel.
+    pub opacity: [f32; 4],
 }
 
 #[repr(C)]
@@ -97,7 +99,7 @@ pub enum PaintOp {
     /// Fill triangles (given as UV positions, three per triangle) with one colour: a UV island, a
     /// piece of the mesh or a whole texture set. `values` is (metallic, roughness, opacity, height);
     /// for masks `values.x` is the value to paint.
-    Fill { layer: NodeId, target: Target, uvs: Vec<[f32; 2]>, color: [f32; 3], values: [f32; 4], enables: [f32; 4], emissive: [f32; 4] },
+    Fill { layer: NodeId, target: Target, uvs: Vec<[f32; 2]>, color: [f32; 3], values: [f32; 4], enables: [f32; 4], emissive: [f32; 4], opacity: [f32; 2] },
     /// The eraser: stamps take coverage away from a layer's content. With `uv` the stamps are in
     /// UV space like `Stamps2d`.
     Erase { layer: NodeId, stamps: Vec<Stamp>, uv: bool },
@@ -149,15 +151,17 @@ pub struct Layer {
     pub height: wgpu::Texture,
     /// Light the surface gives off: premultiplied linear colour, like `base`.
     pub emissive: wgpu::Texture,
+    /// (opacity * coverage, coverage): how opaque the surface is.
+    pub opacity: wgpu::Texture,
     /// Tangent-space normal (xyz packed to 0..1) with coverage in alpha; only fill layers with a
     /// normal map put anything here.
     pub normal: wgpu::Texture,
 }
 
 /// Where each texture sits in [`Layer::views`].
-pub const V_NORMAL: usize = 5;
-/// How many of a layer's textures brushes write: base, metallic, roughness, height, emissive.
-pub const PAINT_TARGETS: usize = 5;
+pub const V_NORMAL: usize = 6;
+/// How many of a layer's textures brushes write: base, metallic, roughness, height, emissive, opacity.
+pub const PAINT_TARGETS: usize = 6;
 
 fn texture(device: &wgpu::Device, label: &str, size: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
@@ -209,28 +213,29 @@ impl Layer {
             rough: texture(device, "paint_rough", size, VALUE_FORMAT),
             height: texture(device, "paint_height", size, VALUE_FORMAT),
             emissive: texture(device, "paint_emissive", size, BASE_FORMAT),
+            opacity: texture(device, "paint_opacity", size, VALUE_FORMAT),
             normal: texture(device, "paint_normal_layer", size, crate::normal_gpu::NORMAL_FORMAT),
         }
     }
 
     fn bytes(size: u32) -> u64 {
-        size as u64 * size as u64 * (8 + 2 + 2 + 2 + 8 + 4)
+        size as u64 * size as u64 * (8 + 2 + 2 + 2 + 8 + 2 + 4)
     }
 
-    /// Views of base, metal, rough, height, emissive, normal (see [`PAINT_TARGETS`], [`V_NORMAL`]).
-    pub fn views(&self) -> [wgpu::TextureView; 6] {
-        [&self.base, &self.metal, &self.rough, &self.height, &self.emissive, &self.normal].map(|t| t.create_view(&Default::default()))
+    /// Views of base, metal, rough, height, emissive, opacity, normal (see [`PAINT_TARGETS`], [`V_NORMAL`]).
+    pub fn views(&self) -> [wgpu::TextureView; 7] {
+        [&self.base, &self.metal, &self.rough, &self.height, &self.emissive, &self.opacity, &self.normal].map(|t| t.create_view(&Default::default()))
     }
 
     pub fn copy_from(&self, encoder: &mut wgpu::CommandEncoder, src: &Layer) {
-        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough), (&src.height, &self.height), (&src.emissive, &self.emissive), (&src.normal, &self.normal)] {
+        for (s, d) in [(&src.base, &self.base), (&src.metal, &self.metal), (&src.rough, &self.rough), (&src.height, &self.height), (&src.emissive, &self.emissive), (&src.opacity, &self.opacity), (&src.normal, &self.normal)] {
             copy_tex(encoder, s, d, self.size);
         }
     }
 
     pub fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
         let v = self.views();
-        clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3], &v[4], &v[5]], wgpu::Color::TRANSPARENT);
+        clear_textures(encoder, &[&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]], wgpu::Color::TRANSPARENT);
     }
 }
 
@@ -276,6 +281,7 @@ struct FillParams {
     enables: [f32; 4],
     tile: [f32; 4],
     emissive: [f32; 4],
+    opacity: [f32; 4],
 }
 
 /// The most triangles one fill draws.
@@ -406,6 +412,7 @@ impl PaintGpu {
                 tex_entry(2),
                 tex_entry(4),
                 tex_entry(6),
+                tex_entry(7),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -446,7 +453,7 @@ impl PaintGpu {
         };
         let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
         let instance_attrs =
-            wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4];
+            wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4];
         let make = |entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
@@ -482,7 +489,7 @@ impl PaintGpu {
             })
         };
         let pipeline_content =
-            make("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over)]);
+            make("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_mask = make("fs_mask", &[target(MASK_FORMAT, straight)]);
         // Erasing keeps what the stamp does not cover: dst * (1 - alpha), nothing added.
         let erase_blend = wgpu::BlendComponent {
@@ -490,7 +497,7 @@ impl PaintGpu {
             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
             operation: wgpu::BlendOperation::Add,
         };
-        let erase_targets = [target(BASE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(BASE_FORMAT, erase_blend)];
+        let erase_targets = [target(BASE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(BASE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend)];
         let pipeline_erase = make("fs_erase", &erase_targets);
         let smudge_tex = |binding, filterable| wgpu::BindGroupLayoutEntry {
             binding,
@@ -511,6 +518,7 @@ impl PaintGpu {
                 smudge_tex(3, true),
                 smudge_tex(4, true),
                 smudge_tex(6, true),
+                smudge_tex(7, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -548,7 +556,7 @@ impl PaintGpu {
                 module: &shader,
                 entry_point: Some("fs_smudge"),
                 compilation_options: Default::default(),
-                targets: &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over)],
+                targets: &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over), target(VALUE_FORMAT, over)],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -587,7 +595,7 @@ impl PaintGpu {
                 cache: None,
             })
         };
-        let pipeline_fill = make_fill("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over)]);
+        let pipeline_fill = make_fill("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_fill_mask = make_fill("fs_mask", &[target(MASK_FORMAT, straight)]);
         let plain_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -621,7 +629,7 @@ impl PaintGpu {
             })
         };
         let mut resolve_entries = vec![params_entry];
-        resolve_entries.extend((1..=10).map(plain_tex));
+        resolve_entries.extend((1..=12).map(plain_tex));
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("resolve_layout"), entries: &resolve_entries });
         let resolve_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/strokeblend.wgsl"));
         let pipeline_resolve = make_resolve(
@@ -629,7 +637,7 @@ impl PaintGpu {
             &resolve_shader,
             "fs_content",
             &resolve_layout,
-            &[replace(BASE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT), replace(BASE_FORMAT)],
+            &[replace(BASE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT), replace(BASE_FORMAT), replace(VALUE_FORMAT)],
         );
         let resolve_mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("resolve_mask_layout"),
@@ -663,7 +671,7 @@ impl PaintGpu {
             })
         };
         let pipeline_content_2d =
-            make_2d("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over)]);
+            make_2d("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(BASE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_mask_2d = make_2d("fs_mask", &[target(MASK_FORMAT, straight)]);
         let pipeline_erase_2d = make_2d("fs_erase", &erase_targets);
 
@@ -741,7 +749,7 @@ impl PaintGpu {
         normal: &NormalPass,
         tile_buf: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        let [b, m, r, _, e, _] = layer.views();
+        let [b, m, r, _, e, o, _] = layer.views();
         let n = normal.target.create_view(&Default::default());
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("paint_material_bind"),
@@ -754,6 +762,7 @@ impl PaintGpu {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&n) },
                 wgpu::BindGroupEntry { binding: 5, resource: tile_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&e) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&o) },
             ],
         })
     }
@@ -888,6 +897,7 @@ impl PaintGpu {
             BlobKind::Rough => g.content.as_ref().map(|c| &c.rough),
             BlobKind::Height => g.content.as_ref().map(|c| &c.height),
             BlobKind::Emissive => g.content.as_ref().map(|c| &c.emissive),
+            BlobKind::Opacity => g.content.as_ref().map(|c| &c.opacity),
             BlobKind::Mask => g.mask.as_ref(),
         }
     }
@@ -933,7 +943,7 @@ impl PaintGpu {
             let Some(node) = doc.find(id) else { continue };
             let mut kinds = Vec::new();
             if matches!(node.kind, NodeKind::Paint) {
-                kinds.extend([BlobKind::Base, BlobKind::Metal, BlobKind::Rough, BlobKind::Height, BlobKind::Emissive]);
+                kinds.extend([BlobKind::Base, BlobKind::Metal, BlobKind::Rough, BlobKind::Height, BlobKind::Emissive, BlobKind::Opacity]);
             }
             if node.mask.is_some() {
                 kinds.push(BlobKind::Mask);
@@ -950,7 +960,7 @@ impl PaintGpu {
 
     /// Read back the composited result: (base RGBA16F, metal RG8, rough RG8, height RG8, layer normal
     /// RGBA8, emissive RGBA16F).
-    pub fn capture_output(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> [Vec<u8>; 6] {
+    pub fn capture_output(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> [Vec<u8>; 7] {
         let s = self.size;
         [
             crate::gpu_io::read_texture(device, queue, &self.output.base, s, 8),
@@ -959,6 +969,7 @@ impl PaintGpu {
             crate::gpu_io::read_texture(device, queue, &self.output.height, s, 2),
             crate::gpu_io::read_texture(device, queue, &self.output.normal, s, 4),
             crate::gpu_io::read_texture(device, queue, &self.output.emissive, s, 8),
+            crate::gpu_io::read_texture(device, queue, &self.output.opacity, s, 2),
         ]
     }
 
@@ -1275,7 +1286,7 @@ impl PaintGpu {
                     self.cursor += n;
                     dirty = true;
                 }
-                PaintOp::Fill { layer, target, uvs, color, values, enables, emissive } => {
+                PaintOp::Fill { layer, target, uvs, color, values, enables, emissive, opacity } => {
                     let Some(g) = self.store.get(layer) else { continue };
                     let (views, pipeline): (Vec<wgpu::TextureView>, _) = match target {
                         Target::Content => match &g.content {
@@ -1316,6 +1327,7 @@ impl PaintGpu {
                             enables: *enables,
                             tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
                             emissive: *emissive,
+                            opacity: [opacity[0], opacity[1], 0.0, 0.0],
                         }),
                         usage: wgpu::BufferUsages::UNIFORM,
                     });
@@ -1438,6 +1450,7 @@ impl PaintGpu {
                             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&sv[3]) },
                             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sv[4]) },
+                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&sv[5]) },
                         ],
                     });
                     let views = c.views()[..PAINT_TARGETS].to_vec();

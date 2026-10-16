@@ -129,10 +129,7 @@ fn classify(ch: &SpexpChannel, version0: bool, w: &mut Warnings) -> Source {
                     w.add("Diffuse color is derived as base color x (1 - metallic) (this project has no painted diffuse channel).".into());
                     Source::Color(ColorMap::Diffuse)
                 }
-                3 => {
-                    w.add("Opacity: this project has no opacity channel, so it is written as fully opaque (1).".into());
-                    Source::Gray(ChannelSrc::Constant(1.0))
-                }
+                3 => Source::Gray(ChannelSrc::Opacity),
                 6 => Source::Gray(ChannelSrc::Smoothness),
                 7 => Source::Gray(ChannelSrc::Roughness),
                 13 => Source::Gray(ChannelSrc::Metallic),
@@ -300,9 +297,9 @@ mod tests {
         assert_eq!(a.preset.maps, b.preset.maps, "same preset in either container");
         let m = &a.preset.maps[0];
         assert_eq!(m.channels[..3], [ChannelSrc::base(Comp::R), ChannelSrc::base(Comp::G), ChannelSrc::base(Comp::B)]);
-        assert_eq!(m.channels[3], ChannelSrc::Constant(1.0), "opacity -> opaque");
+        assert_eq!(m.channels[3], ChannelSrc::Opacity, "alpha reads the opacity channel");
         assert!(m.srgb && m.format == FileFormat::Png && m.bit_depth == BitDepth::U16);
-        assert!(a.warnings.iter().any(|w| w.contains("opacity channel")), "{:?}", a.warnings);
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
     }
 
     #[test]
@@ -434,6 +431,7 @@ mod tests {
             baked: Default::default(),
             height: Vec::new(),
             emissive: Vec::new(),
+            opacity: Vec::new(),
             layer_normal: Vec::new(),
             normal: None,
         };

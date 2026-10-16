@@ -5,7 +5,7 @@
 // the wireframe.
 
 struct Params {
-    view: vec4<f32>,    // centre u, centre v, pixels per UV unit, channel (0 base, 1 metal, 2 rough, 3 normal, 4 emissive)
+    view: vec4<f32>,    // centre u, centre v, pixels per UV unit, channel (0 base, 1 metal, 2 rough, 3 normal, 4 emissive, 5 opacity)
     rect: vec4<f32>,    // view width px, height px, show wireframe, _
     wire: vec4<f32>,    // wireframe colour
 };
@@ -18,6 +18,7 @@ struct Params {
 @group(1) @binding(4) var paint_normal: texture_2d<f32>;
 @group(1) @binding(5) var<uniform> tile: vec4<f32>;
 @group(1) @binding(6) var paint_emissive: texture_2d<f32>;
+@group(1) @binding(7) var paint_opacity: texture_2d<f32>;
 
 fn uv_to_clip(uv: vec2<f32>) -> vec4<f32> {
     let px = (uv - p.view.xy) * p.view.z + p.rect.xy * 0.5;
@@ -86,6 +87,9 @@ fn fs_tile(i: FsIn) -> @location(0) vec4<f32> {
         let e = textureSampleLevel(paint_emissive, paint_samp, uv, 0.0);
         let straight = clamp(e.rgb / max(e.a, 1e-4), vec3<f32>(0.0), vec3<f32>(1.0));
         color = mix(color, to_srgb(straight), e.a);
+    } else if (ch == 5) {
+        let o = textureSampleLevel(paint_opacity, paint_samp, uv, 0.0).rg;
+        color = vec3<f32>(o.r + (1.0 - o.g));
     } else {
         color = textureSampleLevel(paint_normal, paint_samp, uv, 0.0).rgb;
     }

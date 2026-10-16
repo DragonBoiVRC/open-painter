@@ -82,6 +82,7 @@ fn constant_controls(ui: &mut egui::Ui, f: &mut FillParams, slot: Slot) -> bool 
         Slot::Roughness => changed |= scalar(ui, &mut f.roughness, 0.5, "Value"),
         Slot::Height => changed |= scalar(ui, &mut f.height, 0.5, "Value"),
         Slot::Normal => {}
+        Slot::Opacity => changed |= scalar(ui, &mut f.opacity, 1.0, "Value"),
         Slot::Emissive => {
             let mut on = f.emissive.is_some();
             if ui.checkbox(&mut on, "Emissive").changed() {

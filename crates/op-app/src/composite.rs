@@ -34,6 +34,10 @@ struct Params {
     chan_n: [f32; 4],
     /// Colour of an emissive fill (linear) and, in `w`, 1 if the fill writes it.
     emissive: [f32; 4],
+    /// An opacity fill's value and, in `y`, 1 if the fill writes it.
+    opac: [f32; 4],
+    /// x: the opacity multiplier of the opacity channel; y: its blend mode.
+    chan_o: [f32; 4],
 }
 
 /// The baked maps a projected fill reads, and the size of the model they were baked from.
@@ -53,6 +57,7 @@ struct ProjParams {
     color: [f32; 4],
     vals: [f32; 4],
     emissive: [f32; 4],
+    opac: [f32; 4],
     bits: [u32; 4],
     xf: [f32; 4],
     xf2: [f32; 4],
@@ -181,6 +186,9 @@ impl Compositor {
         emissive_entries.push(tex(18));
         emissive_entries.push(tex(19));
         emissive_entries.push(image_tex(20));
+        emissive_entries.push(tex(21));
+        emissive_entries.push(tex(22));
+        emissive_entries.push(image_tex(23));
         let emissive_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("composite_emissive_layout"), entries: &emissive_entries });
         let emissive_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("composite_emissive_pl"),
@@ -195,7 +203,7 @@ impl Compositor {
                 module: &shader,
                 entry_point: Some("fs_emissive"),
                 compilation_options: Default::default(),
-                targets: &[target(BASE_FORMAT)],
+                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT)],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -230,6 +238,7 @@ impl Compositor {
                 proj_tex(5, true),
                 proj_tex(6, true),
                 proj_tex(7, true),
+                proj_tex(9, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -248,7 +257,7 @@ impl Compositor {
                 module: &proj_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(BASE_FORMAT), target(NORMAL_FORMAT)],
+                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(BASE_FORMAT), target(VALUE_FORMAT), target(NORMAL_FORMAT)],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -272,7 +281,7 @@ impl Compositor {
             ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
             count: None,
         }];
-        filter_entries.extend((1..=11).map(filter_tex));
+        filter_entries.extend((1..=13).map(filter_tex));
         let filter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("filter_layout"), entries: &filter_entries });
         let filter_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/filter.wgsl"));
         let filter_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -288,7 +297,7 @@ impl Compositor {
                 module: &filter_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(BASE_FORMAT), target(NORMAL_FORMAT)],
+                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(BASE_FORMAT), target(VALUE_FORMAT), target(NORMAL_FORMAT)],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -421,7 +430,7 @@ impl Compositor {
         let maps = self.projection.clone()?;
         let lib = self.images.clone()?;
         // The images of the channels that have one, base and emissive through sRGB views.
-        let mut views: [Option<std::sync::Arc<GpuImage>>; 6] = Default::default();
+        let mut views: [Option<std::sync::Arc<GpuImage>>; 7] = Default::default();
         let (mut tex_bits, mut invert_bits) = (0u32, 0u32);
         {
             let lib = lib.lock().expect("image library lock");
@@ -453,6 +462,7 @@ impl Compositor {
             color: [lin[0], lin[1], lin[2], 0.0],
             vals: [0.0, f.metallic.unwrap_or(0.0), f.roughness.unwrap_or(0.0), f.height.unwrap_or(0.0)],
             emissive,
+            opac: f.opacity.map_or([0.0; 4], |o| [o, 1.0, 0.0, 0.0]),
             bits: [constant_bits, tex_bits, invert_bits, f.projection.code()],
             xf: [f.uv.tiling[0], f.uv.tiling[1], f.uv.offset[0], f.uv.offset[1]],
             xf2: [cos, sin, sharpness, 0.0],
@@ -484,6 +494,7 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(img(3)) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(img(5)) },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(img(6)) },
             ],
         });
         let layer = self.acquire(device, encoder);
@@ -575,6 +586,8 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&bv[3]) },
                 wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&av[4]) },
                 wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&bv[4]) },
+                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&av[5]) },
+                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&bv[5]) },
             ],
         });
         let dv = dst.views();
@@ -617,7 +630,7 @@ impl Compositor {
         };
         // Images for the fill's textured channels. A channel whose image is not in the library is
         // simply not textured, so a missing file never breaks the stack.
-        let mut slots: [Option<std::sync::Arc<GpuImage>>; 6] = Default::default();
+        let mut slots: [Option<std::sync::Arc<GpuImage>>; 7] = Default::default();
         let (mut tex_bits, mut invert_bits, mut flip) = (0u32, 0u32, 0u32);
         let mut xf = ([1.0f32, 1.0, 0.0, 0.0], [1.0f32, 0.0]);
         if let (Src::Fill(f), Some(lib)) = (&src, &self.images) {
@@ -653,6 +666,11 @@ impl Compositor {
                 }),
                 Src::Tex(_) => [0.0; 4],
             },
+            opac: match &src {
+                Src::Fill(f) => f.opacity.map_or([0.0; 4], |o| [o, 1.0, 0.0, 0.0]),
+                Src::Tex(_) => [0.0; 4],
+            },
+            chan_o: [node.channels.opacity.factor(), node.channels.opacity.mode(node.blend).index() as f32, 0.0, 0.0],
             tex: [tex_bits, invert_bits, flip, (!node.adjust.is_identity()) as u32],
             xf: xf.0,
             xf2: [xf.1[0], xf.1[1], self.tile[0], self.tile[1]],
@@ -712,7 +730,7 @@ impl Compositor {
         });
         let dv = dst.views();
         let ops = wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store };
-        // base, metallic, roughness, height and the fill normal; the emissive channel follows.
+        // base, metallic, roughness, height and the fill normal; emissive and opacity follow.
         let main = [&dv[0], &dv[1], &dv[2], &dv[3], &dv[V_NORMAL]];
         let attachments = main.map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops }));
         {
@@ -738,11 +756,17 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&bk[4]) },
                 wgpu::BindGroupEntry { binding: 19, resource: wgpu::BindingResource::TextureView(&sv[4]) },
                 wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::TextureView(img_view(5)) },
+                wgpu::BindGroupEntry { binding: 21, resource: wgpu::BindingResource::TextureView(&bk[5]) },
+                wgpu::BindGroupEntry { binding: 22, resource: wgpu::BindingResource::TextureView(&sv[5]) },
+                wgpu::BindGroupEntry { binding: 23, resource: wgpu::BindingResource::TextureView(img_view(6)) },
             ],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite_emissive_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &dv[4], depth_slice: None, resolve_target: None, ops })],
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment { view: &dv[4], depth_slice: None, resolve_target: None, ops }),
+                Some(wgpu::RenderPassColorAttachment { view: &dv[5], depth_slice: None, resolve_target: None, ops }),
+            ],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,

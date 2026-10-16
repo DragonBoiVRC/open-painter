@@ -562,6 +562,7 @@ fn slot_badge(slot: op_core::Slot) -> &'static str {
         op_core::Slot::Height => "H",
         op_core::Slot::Normal => "N",
         op_core::Slot::Emissive => "E",
+        op_core::Slot::Opacity => "O",
     }
 }
 

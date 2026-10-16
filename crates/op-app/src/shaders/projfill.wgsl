@@ -8,8 +8,9 @@ struct Params {
     color: vec4<f32>,      // constant base colour, linear
     vals: vec4<f32>,       // _, metallic, roughness, height constants
     emissive: vec4<f32>,   // constant emissive colour, linear; w is 1 if it is written
+    opac: vec4<f32>,       // constant opacity; y is 1 if it is written
     bits: vec4<u32>,       // x: constant channels written (1 base, 2 metal, 4 rough, 8 height),
-                           // y: channels read from an image (bit per slot: 1 base, 2 metal, 4 rough, 8 height, 32 emissive),
+                           // y: channels read from an image (bit per slot: 1 base, 2 metal, 4 rough, 8 height, 32 emissive, 64 opacity),
                            // z: inverted scalar channels (same bits), w: projection (1 triplanar, 2 X, 3 Y, 4 Z)
     xf: vec4<f32>,         // tiling x, y, offset x, y
     xf2: vec4<f32>,        // cos and sin of the rotation, triplanar sharpness, _
@@ -25,6 +26,7 @@ struct Params {
 @group(0) @binding(6) var img_height: texture_2d<f32>;
 @group(0) @binding(7) var img_emissive: texture_2d<f32>;
 @group(0) @binding(8) var img_samp: sampler;
+@group(0) @binding(9) var img_opacity: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -38,7 +40,8 @@ struct Out {
     @location(2) rough: vec4<f32>,
     @location(3) height: vec4<f32>,
     @location(4) emissive: vec4<f32>,
-    @location(5) normal: vec4<f32>,
+    @location(5) opacity: vec4<f32>,
+    @location(6) normal: vec4<f32>,
 };
 
 // The picture's coordinate for a point on the plane: turned about the middle, tiled and shifted
@@ -85,6 +88,8 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
     var height = p.vals.w;
     var e_color = p.emissive.rgb;
     var e_cov = p.emissive.w;
+    var o_val = p.opac.x;
+    var o_cov = p.opac.y;
     if ((p.bits.y & 1u) != 0u) {
         let s = project(img_base, q, w);
         color = s.rgb;
@@ -110,12 +115,18 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         e_color = s.rgb;
         e_cov = s.a;
     }
+    if ((p.bits.y & 64u) != 0u) {
+        let v = project(img_opacity, q, w).r;
+        o_val = select(v, 1.0 - v, (p.bits.z & 64u) != 0u);
+        o_cov = 1.0;
+    }
     var o: Out;
     o.base = vec4<f32>(color * cov.x, cov.x);
     o.metal = vec4<f32>(metal * cov.y, cov.y, 0.0, cov.y);
     o.rough = vec4<f32>(rough * cov.z, cov.z, 0.0, cov.z);
     o.height = vec4<f32>(height * cov.w, cov.w, 0.0, cov.w);
     o.emissive = vec4<f32>(e_color * e_cov, e_cov);
+    o.opacity = vec4<f32>(o_val * o_cov, o_cov, 0.0, o_cov);
     // No normal map comes out of a projection; flat, with no coverage.
     o.normal = vec4<f32>(0.5, 0.5, 1.0, 0.0);
     return o;

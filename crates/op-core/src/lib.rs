@@ -274,6 +274,8 @@ pub struct FillMaps {
     pub normal: Option<TexRef>,
     #[serde(default)]
     pub emissive: Option<TexRef>,
+    #[serde(default)]
+    pub opacity: Option<TexRef>,
 }
 
 /// The channels a texture can feed.
@@ -285,10 +287,11 @@ pub enum Slot {
     Height,
     Normal,
     Emissive,
+    Opacity,
 }
 
 impl Slot {
-    pub const ALL: [Slot; 6] = [Slot::BaseColor, Slot::Metallic, Slot::Roughness, Slot::Height, Slot::Normal, Slot::Emissive];
+    pub const ALL: [Slot; 7] = [Slot::BaseColor, Slot::Metallic, Slot::Roughness, Slot::Height, Slot::Normal, Slot::Emissive, Slot::Opacity];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -298,6 +301,7 @@ impl Slot {
             Slot::Height => "Height",
             Slot::Normal => "Normal",
             Slot::Emissive => "Emissive",
+            Slot::Opacity => "Opacity",
         }
     }
 }
@@ -311,6 +315,7 @@ impl FillMaps {
             Slot::Height => self.height.as_ref(),
             Slot::Normal => self.normal.as_ref(),
             Slot::Emissive => self.emissive.as_ref(),
+            Slot::Opacity => self.opacity.as_ref(),
         }
     }
 
@@ -322,6 +327,7 @@ impl FillMaps {
             Slot::Height => self.height = tex,
             Slot::Normal => self.normal = tex,
             Slot::Emissive => self.emissive = tex,
+            Slot::Opacity => self.opacity = tex,
         }
     }
 
@@ -433,6 +439,9 @@ pub struct FillParams {
     /// sRGB colour of light the surface gives off.
     #[serde(default)]
     pub emissive: Option<[f32; 3]>,
+    /// How opaque the surface is, 0..1 (1 where nothing sets it).
+    #[serde(default)]
+    pub opacity: Option<f32>,
     /// How the textures meet the model.
     #[serde(default)]
     pub projection: Projection,
@@ -451,6 +460,7 @@ impl Default for FillParams {
             roughness: None,
             height: None,
             emissive: None,
+            opacity: None,
             projection: Projection::Uv,
             sharpness: default_sharpness(),
         }
@@ -682,6 +692,7 @@ pub struct ChannelMixes {
     pub roughness: ChannelMix,
     pub height: ChannelMix,
     pub emissive: ChannelMix,
+    pub opacity: ChannelMix,
     /// The normal map a fill layer brings along; its blend mode does not matter (normals replace).
     pub normal: ChannelMix,
 }
@@ -691,9 +702,10 @@ impl ChannelMixes {
         *self == Self::default()
     }
 
-    /// The blended channels in the order the compositor uses: base, metallic, roughness, height, emissive.
-    pub fn blended(&self) -> [&ChannelMix; 5] {
-        [&self.base, &self.metallic, &self.roughness, &self.height, &self.emissive]
+    /// The blended channels in the order the compositor uses: base, metallic, roughness, height,
+    /// emissive, opacity.
+    pub fn blended(&self) -> [&ChannelMix; 6] {
+        [&self.base, &self.metallic, &self.roughness, &self.height, &self.emissive, &self.opacity]
     }
 }
 
@@ -1376,10 +1388,10 @@ mod tests {
             assert!(m.get(slot).is_none());
             m.set(slot, Some(TexRef::new(format!("{i:032x}"))));
         }
-        assert_eq!(m.iter().count(), 6);
+        assert_eq!(m.iter().count(), 7);
         assert_eq!(m.get(Slot::Height).unwrap().id, format!("{:032x}", 3));
         m.set(Slot::Height, None);
-        assert_eq!(m.iter().count(), 5);
+        assert_eq!(m.iter().count(), 6);
         assert!(!m.is_empty());
     }
 

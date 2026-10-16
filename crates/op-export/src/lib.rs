@@ -43,6 +43,8 @@ pub struct TextureSetData {
     pub height: Vec<f32>,
     /// Painted emissive colour, linear 0..1. Empty when the document gives off no light.
     pub emissive: Vec<[f32; 3]>,
+    /// Painted opacity, 0..1. Empty when the document is fully opaque.
+    pub opacity: Vec<f32>,
     /// Normal maps of fill layers, composited: unit xyz and coverage per texel. Empty when no layer has one.
     pub layer_normal: Vec<[f32; 4]>,
     /// Tangent-space normal derived from the height and the baked normal. `None` until
@@ -85,6 +87,7 @@ impl TextureSetData {
             baked: HashMap::new(),
             height: Vec::new(),
             emissive: Vec::new(),
+            opacity: Vec::new(),
             layer_normal: Vec::new(),
             normal: None,
         })
@@ -107,6 +110,18 @@ impl TextureSetData {
             .collect();
         // Keep nothing for a document that glows nowhere, so exporters can skip the map.
         self.emissive = if all.iter().any(|c| c.iter().any(|v| *v > 0.0)) { all } else { Vec::new() };
+        Ok(())
+    }
+
+    /// Attach the composited opacity channel: `(opacity * coverage, coverage)` bytes. Uncovered texels
+    /// are opaque (1). A document that is opaque everywhere keeps nothing, so exporters can skip the map.
+    pub fn set_opacity(&mut self, rg8: &[u8]) -> Result<(), ExportError> {
+        let n = (self.size as usize).pow(2);
+        if rg8.len() != n * 2 {
+            return Err(ExportError::Data(format!("opacity has {} bytes, expected {}", rg8.len(), n * 2)));
+        }
+        let all: Vec<f32> = rg8.chunks_exact(2).map(|p| (p[0] as f32 / 255.0 + (1.0 - p[1] as f32 / 255.0)).clamp(0.0, 1.0)).collect();
+        self.opacity = if all.iter().any(|v| *v < 0.999) { all } else { Vec::new() };
         Ok(())
     }
 
@@ -233,6 +248,9 @@ impl TextureSetData {
                         if self.emissive.len() == self.base.len() {
                             self.emissive[i] = avg3(&self.emissive);
                         }
+                        if self.opacity.len() == self.base.len() {
+                            self.opacity[i] = avg1(&self.opacity);
+                        }
                         if let Some(nm) = &mut self.normal {
                             let a = avg3(nm);
                             let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-6);
@@ -323,6 +341,7 @@ fn sample(src: ChannelSrc, i: usize, data: &TextureSetData, encode: bool, missin
         ChannelSrc::Smoothness => 1.0 - data.roughness[i],
         ChannelSrc::Mesh { map, comp } => comp_of(baked(map), if map.is_scalar() { Comp::R } else { comp }),
         ChannelSrc::Height => if data.height.len() == data.base.len() { data.height[i] } else { 0.5 },
+        ChannelSrc::Opacity => data.opacity.get(i).copied().unwrap_or(1.0),
         ChannelSrc::Normal { directx, comp } => {
             let mut n = match &data.normal {
                 Some(nm) => op_core::normal::pack(nm[i]),
@@ -431,8 +450,9 @@ pub fn export(preset: &ExportPreset, data: &TextureSetData, ctx: &ExportContext)
     let mut outcome = ExportOutcome::default();
     let mut missing = BTreeSet::new();
     for (spec, name) in preset.maps.iter().zip(&names) {
-        // A map made only of emissive light is pointless when nothing glows: leave it out.
-        if data.emissive.is_empty() && spec.channels.iter().all(|c| c.is_emissive()) {
+        // A map made only of emissive light or opacity is pointless when nothing glows or is
+        // see-through: leave it out.
+        if (data.emissive.is_empty() && spec.channels.iter().all(|c| c.is_emissive())) || (data.opacity.is_empty() && spec.channels.iter().all(|c| c.is_opacity())) {
             continue;
         }
         let path = ctx.out_dir.join(name);
@@ -460,6 +480,7 @@ mod tests {
             baked: HashMap::new(),
             height: Vec::new(),
             emissive: Vec::new(),
+            opacity: Vec::new(),
             layer_normal: Vec::new(),
             normal: None,
         }
@@ -533,6 +554,26 @@ mod tests {
         assert_eq!(e.get_pixel(1, 1).0, [0.8f32, 0.4, 0.0].map(|v| (srgb_encode(v) * 255.0).round() as u8), "emissive is colour: sRGB encoded");
         assert_eq!(e.get_pixel(0, 0).0, [0, 0, 0]);
         assert!(d.set_emissive(&[0; 7]).is_err());
+    }
+
+    #[test]
+    fn unity_alpha_carries_the_painted_opacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = data(2, [0.5; 3], 0.0, 0.5);
+        export(&preset("Unity Standard (Metallic Smoothness)"), &d, &ctx(dir.path())).unwrap();
+        let opaque = image::open(dir.path().join("proj_set_AlbedoTransparency.png")).unwrap().to_rgba8();
+        assert_eq!(opaque.get_pixel(0, 0).0[3], 255, "nothing painted: fully opaque");
+
+        // One texel half see-through (value * coverage, coverage) as the compositor stores it.
+        let half = (0.5f32 * 255.0).round() as u8;
+        d.set_opacity(&[255, 255, 255, 255, 255, 255, half, 255]).unwrap();
+        export(&preset("Unity Standard (Metallic Smoothness)"), &d, &ctx(dir.path())).unwrap();
+        let img = image::open(dir.path().join("proj_set_AlbedoTransparency.png")).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(0, 0).0[3], 255);
+        assert_eq!(img.get_pixel(1, 1).0[3], half, "alpha is the opacity, linear");
+        // Opacity-only maps are skipped while the document is solid.
+        assert!(d.set_opacity(&[255; 8]).is_ok() && d.opacity.is_empty());
+        assert!(d.set_opacity(&[0; 3]).is_err());
     }
 
     #[test]

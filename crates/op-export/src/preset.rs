@@ -52,6 +52,8 @@ pub enum ChannelSrc {
     Normal { directx: bool, comp: Comp },
     /// The painted height channel (0.5 where nothing is painted).
     Height,
+    /// The painted opacity (1, fully opaque, where nothing is painted).
+    Opacity,
     /// Ambient occlusion. There is no painted AO channel yet, so this is the baked AO.
     AoMixed,
     /// A fixed value, e.g. a white placeholder or an unsupported source replaced by black.
@@ -62,6 +64,11 @@ impl ChannelSrc {
     /// True if this source reads the emissive channel.
     pub fn is_emissive(self) -> bool {
         matches!(self, ChannelSrc::Color { map: ColorMap::Emissive, .. })
+    }
+
+    /// True if this source reads the opacity channel.
+    pub fn is_opacity(self) -> bool {
+        matches!(self, ChannelSrc::Opacity)
     }
 
     pub fn base(comp: Comp) -> Self {
@@ -187,6 +194,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
                 png8("$project_$textureSet_Roughness(.$udim)", &[Roughness], false),
                 png8("$project_$textureSet_Metallic(.$udim)", &[Metallic], false),
                 png8("$project_$textureSet_Emissive(.$udim)", &emissive, true),
+                png8("$project_$textureSet_Opacity(.$udim)", &[Opacity], false),
             ],
         },
         ExportPreset {
@@ -208,6 +216,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
                     false,
                 ),
                 png8("$project_$textureSet_Emissive(.$udim)", &emissive, true),
+                png8("$project_$textureSet_Opacity(.$udim)", &[Opacity], false),
             ],
         },
         ExportPreset {
@@ -215,7 +224,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
             maps: vec![
                 png8(
                     "$project_$textureSet_AlbedoTransparency(.$udim)",
-                    &[ChannelSrc::base(Comp::R), ChannelSrc::base(Comp::G), ChannelSrc::base(Comp::B), Constant(1.0)],
+                    &[ChannelSrc::base(Comp::R), ChannelSrc::base(Comp::G), ChannelSrc::base(Comp::B), Opacity],
                     true,
                 ),
                 png8("$project_$textureSet_MetallicSmoothness(.$udim)", &[Metallic, Constant(0.0), Constant(0.0), Smoothness], false),

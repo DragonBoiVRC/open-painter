@@ -7,6 +7,7 @@ struct FillParams {
     enables: vec4<f32>,   // base, metallic, roughness, height (0 or 1)
     tile: vec4<f32>,      // UV offset of the tile being painted
     emissive: vec4<f32>,  // linear rgb of the emissive paint, 1 in w if it is written
+    opacity: vec4<f32>,   // the opacity value, and 1 in y if it is written
 };
 
 @group(0) @binding(0) var<uniform> fp: FillParams;
@@ -23,6 +24,7 @@ struct FsOut {
     @location(2) rough: vec4<f32>,
     @location(3) height: vec4<f32>,
     @location(4) emissive: vec4<f32>,
+    @location(5) opacity: vec4<f32>,
 };
 
 @fragment
@@ -39,6 +41,8 @@ fn fs_main() -> FsOut {
     o.height = vec4<f32>(fp.values.w * ah, ah, 0.0, ah);
     let ae = a * fp.emissive.w;
     o.emissive = vec4<f32>(fp.emissive.rgb * ae, ae);
+    let ao = a * fp.opacity.y;
+    o.opacity = vec4<f32>(fp.opacity.x * ao, ao, 0.0, ao);
     return o;
 }
 

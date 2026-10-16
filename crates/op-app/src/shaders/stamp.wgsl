@@ -62,6 +62,7 @@ struct VsIn {
     @location(6) enables: vec4<f32>,  // base, metallic, roughness, height (0 or 1)
     @location(7) shape: vec4<f32>,    // angle, kind, seed
     @location(8) emissive: vec4<f32>, // linear rgb of the emissive paint, 1 in w if it is written
+    @location(9) opacity: vec4<f32>,  // the opacity value, and 1 in y if it is written
 };
 
 struct VsOut {
@@ -74,6 +75,7 @@ struct VsOut {
     @location(5) @interpolate(flat) enables: vec4<f32>,
     @location(6) @interpolate(flat) shape: vec4<f32>,
     @location(7) @interpolate(flat) emissive: vec4<f32>,
+    @location(8) @interpolate(flat) opacity: vec4<f32>,
 };
 
 @vertex
@@ -89,6 +91,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.values = v.values;
     o.enables = v.enables;
     o.emissive = v.emissive;
+    o.opacity = v.opacity;
     o.shape = v.shape;
     return o;
 }
@@ -130,6 +133,7 @@ struct FsOut {
     @location(2) rough: vec4<f32>,
     @location(3) height: vec4<f32>,
     @location(4) emissive: vec4<f32>,
+    @location(5) opacity: vec4<f32>,
 };
 
 fn linear_depth(z: f32) -> f32 {
@@ -236,6 +240,8 @@ fn fs_main(i: VsOut) -> FsOut {
     o.height = vec4<f32>(i.values.w * ah, ah, 0.0, ah);
     let ae = a * i.emissive.w;
     o.emissive = vec4<f32>(i.emissive.rgb * ae, ae);
+    let ao = a * i.opacity.y;
+    o.opacity = vec4<f32>(i.opacity.x * ao, ao, 0.0, ao);
     return o;
 }
 
@@ -258,6 +264,7 @@ fn fs_mask(i: VsOut) -> @location(0) vec4<f32> {
 @group(1) @binding(4) var src_height: texture_2d<f32>;
 @group(1) @binding(5) var src_samp: sampler;
 @group(1) @binding(6) var src_emissive: texture_2d<f32>;
+@group(1) @binding(7) var src_opacity: texture_2d<f32>;
 
 @fragment
 fn fs_smudge(i: VsOut) -> FsOut {
@@ -279,12 +286,14 @@ fn fs_smudge(i: VsOut) -> FsOut {
     let r = textureSampleLevel(src_rough, src_samp, t, 0.0).rg;
     let h = textureSampleLevel(src_height, src_samp, t, 0.0).rg;
     let e = textureSampleLevel(src_emissive, src_samp, t, 0.0);
+    let op = textureSampleLevel(src_opacity, src_samp, t, 0.0).rg;
     var o: FsOut;
     o.base = b * (a * i.enables.x);
     o.metal = vec4<f32>(m * (a * i.enables.y), 0.0, m.y * (a * i.enables.y));
     o.rough = vec4<f32>(r * (a * i.enables.z), 0.0, r.y * (a * i.enables.z));
     o.height = vec4<f32>(h * (a * i.enables.w), 0.0, h.y * (a * i.enables.w));
     o.emissive = e * (a * i.emissive.w);
+    o.opacity = vec4<f32>(op * (a * i.opacity.y), 0.0, op.y * (a * i.opacity.y));
     return o;
 }
 
@@ -300,5 +309,6 @@ fn fs_erase(i: VsOut) -> FsOut {
     o.rough = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.z);
     o.height = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.w);
     o.emissive = vec4<f32>(0.0, 0.0, 0.0, a * i.emissive.w);
+    o.opacity = vec4<f32>(0.0, 0.0, 0.0, a * i.opacity.y);
     return o;
 }

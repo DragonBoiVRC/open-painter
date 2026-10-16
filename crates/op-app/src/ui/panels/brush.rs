@@ -145,6 +145,8 @@ impl App {
                 ui.checkbox(&mut self.channels.emissive, "Emissive");
                 ui.color_edit_button_rgb(&mut self.channels.emissive_color);
             });
+            ui.checkbox(&mut self.channels.opacity, "Opacity");
+            ui.add_enabled_ui(self.channels.opacity, |ui| slider_row(ui, "Opacity value", &mut self.channels.opacity_value, 0.0..=1.0).on_hover_text("0 is see-through, 1 is solid"));
             ui.checkbox(&mut self.channels.height, "Height (normal map)");
             ui.add_enabled_ui(self.channels.height, |ui| slider_row(ui, "Height", &mut self.channels.height_value, 0.0..=1.0).on_hover_text("0 digs in, 0.5 is flat, 1 raises"));
         });

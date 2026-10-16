@@ -18,7 +18,8 @@ pub(crate) fn view_label(v: View) -> String {
         View::Channel(0) => "Base color".to_string(),
         View::Channel(1) => "Roughness".to_string(),
         View::Channel(2) => "Metallic".to_string(),
-        View::Channel(_) => "Emissive".to_string(),
+        View::Channel(3) => "Emissive".to_string(),
+        View::Channel(_) => "Opacity".to_string(),
         View::Map(m) => m.label().to_string(),
     }
 }
@@ -37,7 +38,7 @@ impl App {
         egui::ComboBox::from_id_salt("viewport_shading").selected_text(label(self.view)).width(150.0).show_ui(ui, |ui| {
             ui.selectable_value(&mut view, View::Shaded, "Shaded");
             ui.selectable_value(&mut view, View::PaintedNormal, "Normal map");
-            for c in 0..4 {
+            for c in 0..5 {
                 ui.selectable_value(&mut view, View::Channel(c), view_label(View::Channel(c)));
             }
             if self.baked0().contains_key(&MeshMap::AmbientOcclusion) {
@@ -246,7 +247,7 @@ impl App {
             params: [FALLBACK_METALLIC, FALLBACK_ROUGHNESS, near, far],
             env: [self.env.rotation.to_radians(), 2f32.powf(self.env.exposure), self.env.light, self.env.preset as f32],
             inv_view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).inverse().to_cols_array_2d(),
-            bg: [if self.env.show_background { 1.0 } else { 0.0 }, self.env.background_blur, self.env.tonemap as f32, 0.0],
+            bg: [if self.env.show_background { 1.0 } else { 0.0 }, self.env.background_blur, self.env.tonemap as f32, if self.env.show_transparency { 1.0 } else { 0.0 }],
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
