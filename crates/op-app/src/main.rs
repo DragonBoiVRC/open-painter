@@ -442,6 +442,9 @@ struct App {
     uv_wire: bool,
     /// Draw the mesh edges over the 3D model.
     show_wireframe: bool,
+    /// Paint reaches surfaces hidden behind others, and surfaces turned away from the camera.
+    paint_through: bool,
+    paint_backfaces: bool,
     /// The set last scrolled into view in the Texture Sets list.
     sets_scrolled: usize,
     confirm: Option<Pending>,
@@ -594,6 +597,8 @@ impl App {
             uv_channel: uvview::Channel::Base,
             uv_wire: true,
             show_wireframe: false,
+            paint_through: false,
+            paint_backfaces: false,
             sets_scrolled: usize::MAX,
             confirm: None,
             after_save: None,

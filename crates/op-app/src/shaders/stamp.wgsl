@@ -13,6 +13,7 @@ struct StampGlobals {
     tile: vec4<f32>,       // UV offset of the tile being painted
     stencil: vec4<f32>,    // centre px, half-size px
     stencil_xf: vec4<f32>, // cos, sin of the rotation, 1 if a stencil is on, 1 if mirrored
+    through: vec4<f32>,    // x: ignore occlusion, y: paint back faces
 };
 
 @group(0) @binding(0) var<uniform> sg: StampGlobals;
@@ -190,13 +191,13 @@ fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
 
     // Back-facing surfaces never take paint.
     let to_cam = normalize(sg.camera_pos.xyz - world_pos);
-    if (dot(normalize(normal), to_cam) <= 0.0) { return -1.0; }
+    if (sg.through.y < 0.5 && dot(normalize(normal), to_cam) <= 0.0) { return -1.0; }
 
     // Occlusion against what the camera actually sees (previous viewport depth).
     let seen = textureLoad(depth_tex, vec2<i32>(px), 0);
     let ours = linear_depth(ndc.z);
     let theirs = linear_depth(seen);
-    if (ours > theirs + theirs * 0.004) { return -1.0; }
+    if (sg.through.x < 0.5 && ours > theirs + theirs * 0.004) { return -1.0; }
 
     var t = tip;
     if (!is_tip) {

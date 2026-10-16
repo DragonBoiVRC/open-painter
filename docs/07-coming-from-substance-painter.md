@@ -57,6 +57,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Opacity is a channel too: paint it, give fill layers an opacity value or texture, and it is exported as the alpha of the Unity preset (and as optional Opacity maps when something is see-through). The viewport shows see-through paint as dithered holes (Display Settings can switch that off).
 - Edges in the 3D view are smoothed with FXAA (Display Settings can switch it off).
 - Brush presets: "Save the current brush" in the Shelf (Brushes) keeps the whole brush, including flow, stroke opacity, lazy mouse and pressure settings, in the data folder; right-click a saved brush to delete it.
+- Reach: "Paint through the model" and "Paint back faces" (Properties - Brush) let strokes land on hidden or turned-away surfaces.
 - Lazy mouse (Properties - Brush, "Lazy mouse") makes the brush trail the cursor on a string for smooth strokes.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.

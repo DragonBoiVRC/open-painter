@@ -71,6 +71,10 @@ impl App {
             slider_row(ui, "Scatter", &mut self.brush.position_jitter, 0.0..=4.0);
             slider_row(ui, "Opacity jitter", &mut self.brush.opacity_jitter, 0.0..=1.0);
         });
+        section(ui, "Reach", |ui| {
+            ui.checkbox(&mut self.paint_through, "Paint through the model").on_hover_text("Strokes also land on surfaces hidden behind the first one");
+            ui.checkbox(&mut self.paint_backfaces, "Paint back faces").on_hover_text("Strokes also land on surfaces turned away from the camera (thin cloth, open shells)");
+        });
         section(ui, "Image and stencil", |ui| {
             let names: Vec<(String, String)> = self.assets.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
             if names.is_empty() {

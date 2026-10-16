@@ -160,6 +160,8 @@ pub struct ViewportGpu {
     wire_edges: Option<(wgpu::Buffer, u32)>,
     /// Draw the edges over the model.
     pub show_wire: bool,
+    /// Paint reaches hidden surfaces / back faces.
+    pub paint_through: [bool; 2],
     /// The HDR environment the shader reflects when the lighting preset asks for it.
     env: crate::envmap::EnvGpu,
     uv_pipeline: wgpu::RenderPipeline,
@@ -523,6 +525,7 @@ impl ViewportGpu {
             env_loaded: false,
             wire_edges: None,
             show_wire: false,
+            paint_through: [false; 2],
             env,
             uv_pipeline,
             dummy_uv,
@@ -821,6 +824,7 @@ impl ViewportGpu {
             near_far: [globals.params[2], globals.params[3]],
             depth: &depth,
             uv: &off.uv_view,
+            through: self.paint_through,
         };
         let bufs = match (&self.vbuf, &self.ibuf) {
             (Some(v), Some(i)) => Some((v, i)),
@@ -953,6 +957,8 @@ pub struct ViewportCallback {
     pub wireframe: bool,
     /// Smooth the edges of the picture.
     pub fxaa: bool,
+    /// Paint reaches hidden surfaces / back faces.
+    pub paint_through: [bool; 2],
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -969,6 +975,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             gpu.hidden = self.hidden.clone();
             gpu.show_wire = self.wireframe;
             gpu.fxaa = self.fxaa;
+            gpu.paint_through = self.paint_through;
             gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
         }
         Vec::new()
@@ -1644,6 +1651,27 @@ mod tests {
         rig.globals.light_dir[3] = 8.0;
         rig.run(&glass, &[]);
         assert!(frame_center(&rig)[0] < 10, "opacity 0 reads black in the channel view");
+    }
+
+    /// Paint reaches the far side of the model only when both "through" options are on.
+    #[test]
+    fn paint_through_options_reach_hidden_and_back_faces() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        let back_painted = |rig: &mut Rig, through: [bool; 2]| {
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            rig.gpu.paint_through = through;
+            rig.run(&doc, &[]); // a frame so the stamp pass sees the setting
+            let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+            rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+            let m = rig.metal();
+            (texel_rg(&m, sphere_uv(rig.front)).1 > 200, texel_rg(&m, sphere_uv(-rig.front)).1 > 200)
+        };
+        assert_eq!(back_painted(&mut rig, [false, false]), (true, false), "normally only the visible side");
+        assert_eq!(back_painted(&mut rig, [true, false]), (true, false), "hidden but back-facing: still skipped");
+        assert_eq!(back_painted(&mut rig, [false, true]), (true, false), "back-facing but hidden: still skipped");
+        assert_eq!(back_painted(&mut rig, [true, true]), (true, true), "both options reach the far side");
     }
 
     #[test]

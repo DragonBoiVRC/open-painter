@@ -59,6 +59,8 @@ struct StampGlobals {
     stencil: [f32; 4],
     /// Stencil: cos, sin of its rotation, 1 if a stencil is on, 1 if mirrored.
     stencil_xf: [f32; 4],
+    /// 1 where paint ignores occlusion (x) or back faces (y).
+    through: [f32; 4],
 }
 
 /// Camera state the stamp pass needs; supplied each frame.
@@ -70,6 +72,8 @@ pub struct StampView<'a> {
     pub depth: &'a wgpu::TextureView,
     /// The UV the camera saw at each pixel (Rg32Float, -1 where nothing was drawn).
     pub uv: &'a wgpu::TextureView,
+    /// Paint reaches surfaces hidden behind others (`[0]`) and surfaces facing away (`[1]`).
+    pub through: [bool; 2],
 }
 
 pub struct MeshBuffers<'a> {
@@ -1095,6 +1099,7 @@ impl PaintGpu {
             tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
             stencil: [place[0] * w, place[1] * h, half_h, half_h],
             stencil_xf: [place[3].cos(), place[3].sin(), if stencil_on { 1.0 } else { 0.0 }, if flip { 1.0 } else { 0.0 }],
+            through: [view.through[0] as u32 as f32, view.through[1] as u32 as f32, 0.0, 0.0],
         }
     }
 
