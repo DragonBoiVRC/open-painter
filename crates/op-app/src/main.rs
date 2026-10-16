@@ -47,6 +47,45 @@ struct Brush {
     opacity: f32,
     /// Stamp spacing as a fraction of the brush radius.
     spacing: f32,
+    /// The stamp shape: 0 round, 1 square, 2 diamond, 3 chalk, 4 streaks.
+    shape: u32,
+    /// Rotation of the stamp in degrees.
+    angle: f32,
+    /// The stamp turns to follow the direction of the stroke.
+    follow_path: bool,
+    /// Random variation per stamp, 0..1: rotation (1 = a full turn), size, position (in radii), opacity.
+    angle_jitter: f32,
+    size_jitter: f32,
+    position_jitter: f32,
+    opacity_jitter: f32,
+}
+
+impl Default for Brush {
+    fn default() -> Self {
+        Self {
+            radius_pts: 24.0,
+            hardness: 0.6,
+            opacity: 1.0,
+            spacing: 0.15,
+            shape: 0,
+            angle: 0.0,
+            follow_path: false,
+            angle_jitter: 0.0,
+            size_jitter: 0.0,
+            position_jitter: 0.0,
+            opacity_jitter: 0.0,
+        }
+    }
+}
+
+/// A cheap deterministic generator for brush jitter: the same stroke jitters the same way.
+fn next_random(state: &std::cell::Cell<u32>) -> f32 {
+    let mut x = state.get();
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    state.set(x);
+    (x >> 8) as f32 / (1u32 << 24) as f32
 }
 
 /// What the brush writes into a paint layer. Each channel can be toggled independently.
@@ -248,6 +287,9 @@ struct App {
     target: Target,
     tool: Tool,
     brush: Brush,
+    rng: std::cell::Cell<u32>,
+    /// Mirror painting across a plane through the model's centre: 0 off, 1 x, 2 y, 3 z.
+    symmetry: u32,
     channels: PaintChannels,
     stroke: Stroke,
     /// Where the last viewport stroke ended, so Shift+click can continue it in a straight line.
@@ -370,7 +412,9 @@ impl App {
             renaming: None,
             target: Target::Content,
             tool: Tool::Paint,
-            brush: Brush { radius_pts: 24.0, hardness: 0.6, opacity: 1.0, spacing: 0.15 },
+            brush: Brush::default(),
+            rng: std::cell::Cell::new(0x9e37_79b9),
+            symmetry: 0,
             channels: PaintChannels {
                 base: true,
                 metal: false,
@@ -1249,12 +1293,43 @@ impl App {
         }
     }
 
-    fn make_stamp(&self, px: [f32; 2], ppp: f32, target: Target) -> Stamp {
-        self.make_stamp_raw([px[0], px[1], self.brush.radius_pts * ppp, self.brush.hardness], target)
+    fn make_stamp(&self, px: [f32; 2], ppp: f32, target: Target, dir: [f32; 2]) -> Stamp {
+        self.make_stamp_raw([px[0], px[1], self.brush.radius_pts * ppp, self.brush.hardness], target, dir)
     }
 
-    /// A stamp with the current tool and channels at an explicit `brush` (position, radius, hardness).
-    fn make_stamp_raw(&self, brush: [f32; 4], target: Target) -> Stamp {
+    /// A stamp with the current tool and channels at an explicit `brush` (position, radius, hardness),
+    /// with the brush's shape, rotation and jitter applied. `dir` is the stroke direction.
+    fn make_stamp_raw(&self, mut brush: [f32; 4], target: Target, dir: [f32; 2]) -> Stamp {
+        let b = &self.brush;
+        let rnd = || next_random(&self.rng) * 2.0 - 1.0;
+        let mut angle = b.angle.to_radians();
+        if b.follow_path && (dir[0] != 0.0 || dir[1] != 0.0) {
+            angle += dir[1].atan2(dir[0]);
+        }
+        let mut opacity_scale = 1.0;
+        if b.angle_jitter > 0.0 {
+            angle += rnd() * b.angle_jitter * std::f32::consts::PI;
+        }
+        if b.size_jitter > 0.0 {
+            brush[2] *= (1.0 - b.size_jitter * (rnd() * 0.5 + 0.5)).max(0.05);
+        }
+        if b.position_jitter > 0.0 {
+            brush[0] += rnd() * b.position_jitter * brush[2];
+            brush[1] += rnd() * b.position_jitter * brush[2];
+        }
+        if b.opacity_jitter > 0.0 {
+            opacity_scale = 1.0 - b.opacity_jitter * (rnd() * 0.5 + 0.5);
+        }
+        let shape = [angle, b.shape as f32, next_random(&self.rng) * 100.0, self.symmetry as f32];
+        // Where the symmetry plane sits on its axis: the middle of the model.
+        let plane = match self.symmetry {
+            0 => 0.0,
+            axis => {
+                let (lo, hi) = self.mesh.bounds();
+                (lo[axis as usize - 1] + hi[axis as usize - 1]) * 0.5
+            }
+        };
+        let opacity = b.opacity * opacity_scale;
         let c = &self.channels;
         let erase = self.tool == Tool::Erase;
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
@@ -1262,23 +1337,26 @@ impl App {
             // Masks: paint white to reveal, erase to black to hide.
             Target::Mask => Stamp {
                 brush,
-                color: [0.0; 4],
-                values: [if erase { 0.0 } else { 1.0 }, 0.0, self.brush.opacity, 0.0],
+                color: [0.0, 0.0, 0.0, plane],
+                values: [if erase { 0.0 } else { 1.0 }, 0.0, opacity, 0.0],
                 enables: [0.0; 4],
+                shape,
             },
             Target::Content if erase => Stamp {
                 brush,
-                color: [0.0; 4],
-                values: [0.0, 0.0, self.brush.opacity, 0.0],
+                color: [0.0, 0.0, 0.0, plane],
+                values: [0.0, 0.0, opacity, 0.0],
                 enables: [1.0, 1.0, 1.0, 1.0],
+                shape,
             },
             Target::Content => {
                 let lin = c.base_color.map(srgb_to_linear);
                 Stamp {
                     brush,
-                    color: [lin[0], lin[1], lin[2], 0.0],
-                    values: [c.metallic, c.roughness, self.brush.opacity, c.height_value],
+                    color: [lin[0], lin[1], lin[2], plane],
+                    values: [c.metallic, c.roughness, opacity, c.height_value],
                     enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
+                    shape,
                 }
             }
         }
@@ -1299,7 +1377,7 @@ impl App {
             self.stroke = Stroke { active: true, last_px: to, next_in: spacing };
             self.pending.push(PaintOp::BeginStroke { layer, target });
             self.push_hist(Hist::Stroke);
-            out.push(self.make_stamp(to, ppp, target));
+            out.push(self.make_stamp(to, ppp, target, [0.0; 2]));
             return;
         }
         let from = self.stroke.last_px;
@@ -1311,7 +1389,7 @@ impl App {
         let dir = [delta[0] / dist, delta[1] / dist];
         let mut t = self.stroke.next_in;
         while t <= dist && out.len() < MAX_STAMPS {
-            out.push(self.make_stamp([from[0] + dir[0] * t, from[1] + dir[1] * t], ppp, target));
+            out.push(self.make_stamp([from[0] + dir[0] * t, from[1] + dir[1] * t], ppp, target, dir));
             t += spacing;
         }
         self.stroke.next_in = t - dist;
@@ -1327,7 +1405,7 @@ impl App {
             self.stroke = Stroke { active: true, last_px: to, next_in: spacing };
             self.pending.push(PaintOp::BeginStroke { layer, target });
             self.push_hist(Hist::Stroke);
-            out.push(self.make_stamp_raw(at(to), target));
+            out.push(self.make_stamp_raw(at(to), target, [0.0; 2]));
             return;
         }
         let from = self.stroke.last_px;
@@ -1339,7 +1417,7 @@ impl App {
         let dir = [delta[0] / dist, delta[1] / dist];
         let mut t = self.stroke.next_in;
         while t <= dist && out.len() < MAX_STAMPS {
-            out.push(self.make_stamp_raw(at([from[0] + dir[0] * t, from[1] + dir[1] * t]), target));
+            out.push(self.make_stamp_raw(at([from[0] + dir[0] * t, from[1] + dir[1] * t]), target, dir));
             t += spacing;
         }
         self.stroke.next_in = t - dist;
@@ -1557,6 +1635,7 @@ impl App {
                         ("Ctrl + click", "pick the texture set under the cursor"),
                         ("H / Shift+H", "hide or show the active material / show all"),
                         ("P / E", "paint / erase"),
+                        ("L", "toggle symmetry"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
                         ("Alt + left drag", "orbit"),
@@ -1870,6 +1949,10 @@ impl App {
         }
         if rename {
             self.layer_command(layers::LayerCmd::Rename);
+        }
+        if ui.input(|i| i.key_pressed(Key::L) && !i.modifiers.any()) {
+            self.symmetry = if self.symmetry == 0 { 1 } else { 0 };
+            self.status = if self.symmetry == 0 { "Symmetry off".into() } else { "Symmetry on: strokes are mirrored across X".into() };
         }
         let (smaller, larger, paint, erase, frame) = ui.input(|i| {
             (

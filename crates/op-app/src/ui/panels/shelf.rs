@@ -44,6 +44,30 @@ pub struct BrushPreset {
     pub hardness: f32,
     pub opacity: f32,
     pub spacing: f32,
+    pub shape: u32,
+    pub angle: f32,
+    pub follow_path: bool,
+    pub angle_jitter: f32,
+    pub size_jitter: f32,
+    pub position_jitter: f32,
+    pub opacity_jitter: f32,
+}
+
+impl BrushPreset {
+    /// A plain round brush; presets override what makes them different.
+    const BASE: BrushPreset = BrushPreset {
+        radius_pts: 24.0,
+        hardness: 0.6,
+        opacity: 1.0,
+        spacing: 0.15,
+        shape: 0,
+        angle: 0.0,
+        follow_path: false,
+        angle_jitter: 0.0,
+        size_jitter: 0.0,
+        position_jitter: 0.0,
+        opacity_jitter: 0.0,
+    };
 }
 
 /// What a tile stands for.
@@ -86,7 +110,7 @@ impl Default for ShelfState {
     }
 }
 
-const BRUSHES: [(&str, BrushPreset); 5] = [
+const BRUSHES: [(&str, BrushPreset); 11] = [
     (
         "Soft round",
         BrushPreset {
@@ -94,6 +118,7 @@ const BRUSHES: [(&str, BrushPreset); 5] = [
             hardness: 0.1,
             opacity: 1.0,
             spacing: 0.15,
+            ..BrushPreset::BASE
         },
     ),
     (
@@ -103,6 +128,7 @@ const BRUSHES: [(&str, BrushPreset); 5] = [
             hardness: 1.0,
             opacity: 1.0,
             spacing: 0.1,
+            ..BrushPreset::BASE
         },
     ),
     (
@@ -112,6 +138,7 @@ const BRUSHES: [(&str, BrushPreset); 5] = [
             hardness: 0.0,
             opacity: 0.25,
             spacing: 0.08,
+            ..BrushPreset::BASE
         },
     ),
     (
@@ -121,6 +148,7 @@ const BRUSHES: [(&str, BrushPreset); 5] = [
             hardness: 0.9,
             opacity: 1.0,
             spacing: 0.1,
+            ..BrushPreset::BASE
         },
     ),
     (
@@ -130,7 +158,32 @@ const BRUSHES: [(&str, BrushPreset); 5] = [
             hardness: 0.3,
             opacity: 0.4,
             spacing: 0.2,
+            ..BrushPreset::BASE
         },
+    ),
+    (
+        "Chalk",
+        BrushPreset { radius_pts: 36.0, hardness: 0.7, opacity: 0.9, spacing: 0.12, shape: 3, angle_jitter: 1.0, ..BrushPreset::BASE },
+    ),
+    (
+        "Charcoal",
+        BrushPreset { radius_pts: 30.0, hardness: 0.8, opacity: 0.8, spacing: 0.1, shape: 4, follow_path: true, angle_jitter: 0.05, ..BrushPreset::BASE },
+    ),
+    (
+        "Square",
+        BrushPreset { radius_pts: 24.0, hardness: 1.0, shape: 1, follow_path: true, spacing: 0.1, ..BrushPreset::BASE },
+    ),
+    (
+        "Scatter",
+        BrushPreset { radius_pts: 14.0, hardness: 0.9, opacity: 0.9, spacing: 0.9, size_jitter: 0.6, position_jitter: 4.0, angle_jitter: 1.0, ..BrushPreset::BASE },
+    ),
+    (
+        "Dry brush",
+        BrushPreset { radius_pts: 44.0, hardness: 0.5, opacity: 0.7, spacing: 0.08, shape: 4, follow_path: true, opacity_jitter: 0.5, ..BrushPreset::BASE },
+    ),
+    (
+        "Diamond",
+        BrushPreset { radius_pts: 20.0, hardness: 1.0, shape: 2, spacing: 0.1, ..BrushPreset::BASE },
     ),
 ];
 
@@ -488,6 +541,13 @@ impl App {
                 self.brush.hardness = b.hardness;
                 self.brush.opacity = b.opacity;
                 self.brush.spacing = b.spacing;
+                self.brush.shape = b.shape;
+                self.brush.angle = b.angle;
+                self.brush.follow_path = b.follow_path;
+                self.brush.angle_jitter = b.angle_jitter;
+                self.brush.size_jitter = b.size_jitter;
+                self.brush.position_jitter = b.position_jitter;
+                self.brush.opacity_jitter = b.opacity_jitter;
             }
         }
     }

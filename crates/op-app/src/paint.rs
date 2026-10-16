@@ -38,6 +38,8 @@ pub struct Stamp {
     pub values: [f32; 4],
     /// 0/1 per channel: base color, metallic, roughness.
     pub enables: [f32; 4],
+    /// Brush shape: rotation in radians, shape kind (see `shape_dist` in the stamp shaders), noise seed.
+    pub shape: [f32; 4],
 }
 
 #[repr(C)]
@@ -329,7 +331,7 @@ impl PaintGpu {
         };
         let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
         let instance_attrs =
-            wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4];
+            wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4];
         let make = |entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),

@@ -24,6 +24,7 @@ struct VsIn {
     @location(4) color: vec4<f32>,    // linear rgb
     @location(5) values: vec4<f32>,   // metallic, roughness, opacity, height
     @location(6) enables: vec4<f32>,  // base, metallic, roughness, height (0 or 1)
+    @location(7) shape: vec4<f32>,    // angle, kind, seed
 };
 
 struct VsOut {
@@ -34,6 +35,7 @@ struct VsOut {
     @location(3) @interpolate(flat) color: vec4<f32>,
     @location(4) @interpolate(flat) values: vec4<f32>,
     @location(5) @interpolate(flat) enables: vec4<f32>,
+    @location(6) @interpolate(flat) shape: vec4<f32>,
 };
 
 @vertex
@@ -48,7 +50,39 @@ fn vs_main(v: VsIn) -> VsOut {
     o.color = v.color;
     o.values = v.values;
     o.enables = v.enables;
+    o.shape = v.shape;
     return o;
+}
+
+
+fn hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21));
+    q += dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i), hash21(i + vec2<f32>(1.0, 0.0)), u.x),
+               mix(hash21(i + vec2<f32>(0.0, 1.0)), hash21(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
+}
+
+// Distance from the brush centre, in brush radii, for the stamp's shape. `off` is the offset
+// from the centre in radii (screen or UV axes); `shape` is (angle, kind, seed, _).
+//   0 round, 1 square, 2 diamond, 3 chalk (noisy edge), 4 streaks (stretched noise)
+fn shape_dist(off: vec2<f32>, shape: vec4<f32>) -> f32 {
+    let c = cos(shape.x);
+    let s = sin(shape.x);
+    let l = vec2<f32>(c * off.x + s * off.y, -s * off.x + c * off.y);
+    let kind = i32(shape.y + 0.5);
+    if (kind == 1) { return max(abs(l.x), abs(l.y)); }
+    if (kind == 2) { return abs(l.x) + abs(l.y); }
+    let r = length(l);
+    if (kind == 3) { return r + (vnoise(l * 5.0 + shape.z) - 0.5) * 0.7; }
+    if (kind == 4) { return r + (vnoise(vec2<f32>(l.x * 1.5, l.y * 14.0) + shape.z) - 0.5) * 0.9; }
+    return r;
 }
 
 struct FsOut {
@@ -64,10 +98,24 @@ fn linear_depth(z: f32) -> f32 {
     return n * f / (f - z * (f - n));
 }
 
-// Returns the stamp's alpha at this texel, or -1.0 if the texel is rejected
-// (outside the brush, back-facing, or hidden behind nearer geometry).
-fn stamp_alpha(i: VsOut) -> f32 {
-    let clip = sg.view_proj * vec4<f32>(i.world_pos, 1.0);
+// The mirror image of a model-space point (or direction) across the stamp's symmetry plane:
+// `shape.w` is the axis (1 x, 2 y, 3 z; 0 for none) and `color.w` the plane's position on it.
+fn mirror_point(p: vec3<f32>, axis: i32, c: f32) -> vec3<f32> {
+    if (axis == 1) { return vec3<f32>(2.0 * c - p.x, p.y, p.z); }
+    if (axis == 2) { return vec3<f32>(p.x, 2.0 * c - p.y, p.z); }
+    return vec3<f32>(p.x, p.y, 2.0 * c - p.z);
+}
+
+fn mirror_dir(n: vec3<f32>, axis: i32) -> vec3<f32> {
+    if (axis == 1) { return vec3<f32>(-n.x, n.y, n.z); }
+    if (axis == 2) { return vec3<f32>(n.x, -n.y, n.z); }
+    return vec3<f32>(n.x, n.y, -n.z);
+}
+
+// The stamp's alpha for a surface point, or -1.0 if it is rejected (outside the brush,
+// back-facing, or hidden behind nearer geometry).
+fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let clip = sg.view_proj * vec4<f32>(world_pos, 1.0);
     if (clip.w <= 0.0) { return -1.0; }
     let ndc = clip.xyz / clip.w;
     if (ndc.z < 0.0 || ndc.z > 1.0) { return -1.0; }
@@ -76,12 +124,12 @@ fn stamp_alpha(i: VsOut) -> f32 {
     let px = vec2<f32>((ndc.x * 0.5 + 0.5) * size.x, (0.5 - ndc.y * 0.5) * size.y);
     if (px.x < 0.0 || px.y < 0.0 || px.x >= size.x || px.y >= size.y) { return -1.0; }
 
-    let d = distance(px, i.brush.xy) / max(i.brush.z, 1e-3);
+    let d = shape_dist((px - i.brush.xy) / max(i.brush.z, 1e-3), i.shape);
     if (d >= 1.0) { return -1.0; }
 
     // Back-facing surfaces never take paint.
-    let to_cam = normalize(sg.camera_pos.xyz - i.world_pos);
-    if (dot(normalize(i.normal), to_cam) <= 0.0) { return -1.0; }
+    let to_cam = normalize(sg.camera_pos.xyz - world_pos);
+    if (dot(normalize(normal), to_cam) <= 0.0) { return -1.0; }
 
     // Occlusion against what the camera actually sees (previous viewport depth).
     let seen = textureLoad(depth_tex, vec2<i32>(px), 0);
@@ -91,6 +139,16 @@ fn stamp_alpha(i: VsOut) -> f32 {
 
     let t = clamp((1.0 - d) / max(1.0 - i.brush.w, 1e-3), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t) * i.values.z;
+}
+
+// With symmetry on, a texel is painted when either it or its mirror image is under the brush
+// and visible, which paints the mirrored stroke on a symmetric model.
+fn stamp_alpha(i: VsOut) -> f32 {
+    let a = alpha_at(i, i.world_pos, i.normal);
+    let axis = i32(i.shape.w + 0.5);
+    if (axis == 0) { return a; }
+    let b = alpha_at(i, mirror_point(i.world_pos, axis, i.color.w), mirror_dir(i.normal, axis));
+    return max(a, b);
 }
 
 // Content stamp: writes premultiplied base/metal/rough with "over" blending.

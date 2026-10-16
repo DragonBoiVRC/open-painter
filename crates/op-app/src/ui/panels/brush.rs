@@ -4,6 +4,9 @@ use super::{hint, section, slider_row};
 use crate::ui::theme;
 use crate::{App, Tool};
 
+/// Names of the stamp shapes, in the order the shaders number them.
+const SHAPES: [&str; 5] = ["Round", "Square", "Diamond", "Chalk", "Streaks"];
+
 impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Brush", |ui| {
@@ -18,6 +21,32 @@ impl App {
             slider_row(ui, "Hardness", &mut self.brush.hardness, 0.0..=1.0);
             slider_row(ui, "Opacity", &mut self.brush.opacity, 0.0..=1.0);
             slider_row(ui, "Spacing", &mut self.brush.spacing, 0.02..=1.0);
+        });
+        section(ui, "Symmetry", |ui| {
+            ui.horizontal(|ui| {
+                for (axis, label) in [(0, "Off"), (1, "X"), (2, "Y"), (3, "Z")] {
+                    if ui.selectable_label(self.symmetry == axis, label).clicked() {
+                        self.symmetry = axis;
+                    }
+                }
+            });
+            hint(ui, "Mirrors strokes across a plane through the middle of the model (L toggles X).");
+        });
+        section(ui, "Shape", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Stamp");
+                egui::ComboBox::from_id_salt("brush_shape").selected_text(SHAPES[self.brush.shape as usize % SHAPES.len()]).show_ui(ui, |ui| {
+                    for (i, name) in SHAPES.iter().enumerate() {
+                        ui.selectable_value(&mut self.brush.shape, i as u32, *name);
+                    }
+                });
+            });
+            slider_row(ui, "Angle", &mut self.brush.angle, 0.0..=360.0);
+            ui.checkbox(&mut self.brush.follow_path, "Follow stroke direction");
+            slider_row(ui, "Angle jitter", &mut self.brush.angle_jitter, 0.0..=1.0);
+            slider_row(ui, "Size jitter", &mut self.brush.size_jitter, 0.0..=1.0);
+            slider_row(ui, "Scatter", &mut self.brush.position_jitter, 0.0..=4.0);
+            slider_row(ui, "Opacity jitter", &mut self.brush.opacity_jitter, 0.0..=1.0);
         });
         section(ui, "Paint channels", |ui| {
             hint(ui, "Used when painting layer content. Masks paint white (reveal) and erase to black (hide).");
@@ -43,6 +72,7 @@ impl App {
                     ("Ctrl + right drag", "brush size / hardness"),
                     ("[  ]", "brush size"),
                     ("P  E", "paint / erase"),
+                    ("L", "mirror strokes (symmetry)"),
                     ("F", "frame the model"),
                 ] {
                     ui.label(egui::RichText::new(keys).color(theme::TEXT));

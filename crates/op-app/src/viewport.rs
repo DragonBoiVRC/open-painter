@@ -778,6 +778,7 @@ mod tests {
             color: [1.0, 0.0, 0.0, 0.0],
             values: [metal_value, 0.5, 1.0, 0.0],
             enables,
+            shape: [0.0; 4],
         }
     }
 
@@ -816,6 +817,28 @@ mod tests {
         assert_eq!(rig.gpu.paint().undo_depth(), (0, 1));
         rig.run(&doc, &[PaintOp::RedoStroke]);
         assert!(texel_rg(&rig.metal(), sphere_uv(front)).1 > 240, "redo did not restore the stroke");
+    }
+
+    /// With symmetry on, the stroke also paints the mirror image of the visible surface, even on
+    /// the side the camera cannot see; with it off, only the visible side is painted.
+    #[test]
+    fn symmetry_paints_the_mirrored_texels() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let front = rig.front;
+        let mirrored = Vec3::new(-front.x, front.y, front.z);
+        let mut painted = |symmetry: f32| {
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            let mut stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+            stamp.shape[3] = symmetry; // axis 1 = x, plane through the origin
+            rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+            let metal = rig.metal();
+            (texel_rg(&metal, sphere_uv(front)).1 > 240, texel_rg(&metal, sphere_uv(mirrored)).1 > 240)
+        };
+        assert_eq!(painted(0.0), (true, false), "without symmetry only the visible side is painted");
+        assert_eq!(painted(1.0), (true, true), "with symmetry the mirror image is painted too");
     }
 
     /// A sphere cut into a northern set (first half of the indices) and a southern one.
@@ -969,6 +992,7 @@ mod tests {
             color: [0.0; 4],
             values: [1.0, 0.0, 1.0, 0.0],
             enables: [0.0; 4],
+            shape: [0.0; 4],
         };
         rig.run(
             &doc,
@@ -1032,8 +1056,9 @@ mod tests {
             color: [0.2, 0.5, 0.9, 0.0],
             values: [0.7, 0.3, 0.9, 0.0],
             enables: [1.0, 1.0, 1.0, 0.0],
+            shape: [0.0; 4],
         };
-        let reveal = Stamp { brush: [SIZE as f32 / 2.0 + 10.0, SIZE as f32 / 2.0, 30.0, 0.3], color: [0.0; 4], values: [1.0, 0.0, 0.8, 0.0], enables: [0.0; 4] };
+        let reveal = Stamp { brush: [SIZE as f32 / 2.0 + 10.0, SIZE as f32 / 2.0, 30.0, 0.3], color: [0.0; 4], values: [1.0, 0.0, 0.8, 0.0], enables: [0.0; 4], shape: [0.0; 4] };
         rig.run(&doc, &[PaintOp::Stamps { layer: paint, target: Target::Content, stamps: vec![content] }]);
         rig.run(&doc, &[PaintOp::Stamps { layer: paint, target: Target::Mask, stamps: vec![reveal] }]);
         let before = output_bytes(&rig);
@@ -1113,6 +1138,7 @@ mod tests {
             color: [0.0; 4],
             values: [0.0, 0.0, 1.0, 0.9],
             enables: [0.0, 0.0, 0.0, 1.0],
+            shape: [0.0; 4],
         };
         rig.run(&doc, &[PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
         let uv = sphere_uv(rig.front);
@@ -1171,6 +1197,39 @@ mod tests {
         check(&rig, None, "after removing the baked normal");
     }
 
+    /// Stamp shapes cover what their outline says: a square reaches its corners, a round dab does
+    /// not, and rotating the square by 45 degrees pulls the corners in and pushes the points out.
+    #[test]
+    fn stamp_shapes_and_rotation_cover_the_right_texels() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        let covered = |rig: &mut Rig, shape: [f32; 4], at: (f32, f32)| {
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            let stamp = Stamp {
+                brush: [0.5, 0.5, 0.2, 1.0],
+                color: [1.0, 0.0, 0.0, 0.0],
+                values: [0.0, 0.0, 1.0, 0.0],
+                enables: [1.0, 0.0, 0.0, 0.0],
+                shape,
+            };
+            rig.run(&doc, &[PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![stamp] }]);
+            let base = rig.read(&rig.gpu.paint().output.base, 8);
+            let (x, y) = ((at.0 * SIZE as f32) as usize, (at.1 * SIZE as f32) as usize);
+            let i = (y * SIZE as usize + x) * 8 + 6;
+            f16_to_f32(u16::from_le_bytes([base[i], base[i + 1]])) > 0.5
+        };
+        let corner = (0.5 + 0.17, 0.5 + 0.17); // inside the square's corner, outside the circle
+        let tip = (0.5 + 0.19, 0.5);
+        assert!(!covered(&mut rig, [0.0, 0.0, 0.0, 0.0], corner), "a round dab does not reach the corner");
+        assert!(covered(&mut rig, [0.0, 1.0, 0.0, 0.0], corner), "a square dab does");
+        let turned = std::f32::consts::FRAC_PI_4;
+        assert!(covered(&mut rig, [turned, 1.0, 0.0, 0.0], tip), "a square turned 45 degrees points along the axis");
+        assert!(!covered(&mut rig, [turned, 1.0, 0.0, 0.0], corner), "and its corners moved off the diagonal");
+        assert!(!covered(&mut rig, [0.0, 2.0, 0.0, 0.0], corner), "a diamond is smaller than the circle on the diagonal");
+        assert!(covered(&mut rig, [0.0, 2.0, 0.0, 0.0], (0.5 + 0.1, 0.5)), "a diamond covers its middle");
+    }
+
     /// 2D stamps land exactly where their UV position says, with the radius in UV units.
     #[test]
     fn uv_space_stamps_land_at_their_uv_position() {
@@ -1183,6 +1242,7 @@ mod tests {
             color: [1.0, 0.0, 0.0, 0.0],
             values: [0.0, 0.0, 1.0, 0.0],
             enables: [1.0, 0.0, 0.0, 0.0],
+            shape: [0.0; 4],
         };
         rig.run(&doc, &[PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![stamp] }]);
         let base = rig.read(&rig.gpu.paint().output.base, 8);
@@ -1203,7 +1263,7 @@ mod tests {
         let m = doc2.add(None, None, "m", NodeKind::Paint);
         doc2.find_mut(m).unwrap().mask = Some(Mask::new(false));
         rig.run(&doc2, &[PaintOp::Reset(SIZE)]);
-        let reveal = Stamp { brush: [0.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4] };
+        let reveal = Stamp { brush: [0.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4], shape: [0.0; 4] };
         rig.run(&doc2, &[PaintOp::Stamps2d { layer: m, target: Target::Mask, stamps: vec![reveal] }]);
         let mask = rig.read(rig.gpu.paint().store[&m].mask.as_ref().unwrap(), 1);
         assert_eq!(mask[(SIZE / 2 * SIZE + SIZE / 2) as usize], 255);
@@ -1269,7 +1329,7 @@ mod tests {
         assert!(tile_metal(&rig, 1).chunks_exact(2).all(|p| p[0] == 255), "tile 1002 must be untouched");
 
         // A 2D stamp at global UV (1.5, 0.5) lands in tile 1002 at local (0.5, 0.5), and not in 1001.
-        let dab2d = Stamp { brush: [1.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [0.0, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0] };
+        let dab2d = Stamp { brush: [1.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [0.0, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0], shape: [0.0; 4] };
         let paint2d = SetBatch { tile: None, set: 0, doc: doc.clone(), ops: vec![PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![dab2d] }] };
         rig.run_sets(&[paint2d]);
         let centre = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;

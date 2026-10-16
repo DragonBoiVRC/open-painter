@@ -9,6 +9,7 @@ struct VsIn {
     @location(4) color: vec4<f32>,
     @location(5) values: vec4<f32>,
     @location(6) enables: vec4<f32>,
+    @location(7) shape: vec4<f32>,
 };
 
 struct VsOut {
@@ -18,6 +19,7 @@ struct VsOut {
     @location(2) @interpolate(flat) color: vec4<f32>,
     @location(3) @interpolate(flat) values: vec4<f32>,
     @location(4) @interpolate(flat) enables: vec4<f32>,
+    @location(5) @interpolate(flat) shape: vec4<f32>,
 };
 
 @vertex
@@ -26,7 +28,8 @@ fn vs_main(v: VsIn) -> VsOut {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
-    let p = v.brush.xy + corners[v.vi] * v.brush.z;
+    // 1.5 radii: a rotated square reaches 1.42 radii from the centre.
+    let p = v.brush.xy + corners[v.vi] * v.brush.z * 1.5;
     var o: VsOut;
     // Texture space has v pointing down; clip space has y pointing up.
     o.clip = vec4<f32>(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
@@ -35,7 +38,39 @@ fn vs_main(v: VsIn) -> VsOut {
     o.color = v.color;
     o.values = v.values;
     o.enables = v.enables;
+    o.shape = v.shape;
     return o;
+}
+
+
+fn hash21(p: vec2<f32>) -> f32 {
+    var q = fract(p * vec2<f32>(123.34, 456.21));
+    q += dot(q, q + 45.32);
+    return fract(q.x * q.y);
+}
+
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i), hash21(i + vec2<f32>(1.0, 0.0)), u.x),
+               mix(hash21(i + vec2<f32>(0.0, 1.0)), hash21(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
+}
+
+// Distance from the brush centre, in brush radii, for the stamp's shape. `off` is the offset
+// from the centre in radii (screen or UV axes); `shape` is (angle, kind, seed, _).
+//   0 round, 1 square, 2 diamond, 3 chalk (noisy edge), 4 streaks (stretched noise)
+fn shape_dist(off: vec2<f32>, shape: vec4<f32>) -> f32 {
+    let c = cos(shape.x);
+    let s = sin(shape.x);
+    let l = vec2<f32>(c * off.x + s * off.y, -s * off.x + c * off.y);
+    let kind = i32(shape.y + 0.5);
+    if (kind == 1) { return max(abs(l.x), abs(l.y)); }
+    if (kind == 2) { return abs(l.x) + abs(l.y); }
+    let r = length(l);
+    if (kind == 3) { return r + (vnoise(l * 5.0 + shape.z) - 0.5) * 0.7; }
+    if (kind == 4) { return r + (vnoise(vec2<f32>(l.x * 1.5, l.y * 14.0) + shape.z) - 0.5) * 0.9; }
+    return r;
 }
 
 struct FsOut {
@@ -46,7 +81,7 @@ struct FsOut {
 };
 
 fn stamp_alpha(i: VsOut) -> f32 {
-    let d = distance(i.uv, i.brush.xy) / max(i.brush.z, 1e-6);
+    let d = shape_dist((i.uv - i.brush.xy) / max(i.brush.z, 1e-6), i.shape);
     if (d >= 1.0) { return -1.0; }
     let t = clamp((1.0 - d) / max(1.0 - i.brush.w, 1e-3), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t) * i.values.z;

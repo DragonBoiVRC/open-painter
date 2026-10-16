@@ -170,6 +170,11 @@ impl App {
                         if ui.button(ph::FRAME_CORNERS).on_hover_text("Frame model (F)").clicked() {
                             self.frame_model();
                         }
+                        let on = self.symmetry != 0;
+                        let label = format!("{}  {}", ph::BUTTERFLY, ["Symmetry", "X", "Y", "Z"][self.symmetry as usize]);
+                        if ui.selectable_label(on, label).on_hover_text("Mirror strokes (L). Choose the axis in Properties - Paint.").clicked() {
+                            self.symmetry = if on { 0 } else { 1 };
+                        }
                     });
                 });
         });
