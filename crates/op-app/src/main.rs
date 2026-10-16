@@ -121,6 +121,16 @@ impl Default for Environment {
     }
 }
 
+/// Put `c` first in the list of recent colours (once, at most twelve).
+fn push_recent(list: &mut Vec<[f32; 3]>, c: [f32; 3]) {
+    if list.first() == Some(&c) {
+        return;
+    }
+    list.retain(|r| *r != c);
+    list.insert(0, c);
+    list.truncate(12);
+}
+
 /// One step of the lazy mouse: the brush at `pos` is pulled toward `cursor` by a string of length
 /// `string`, and only moves once the string is taut.
 fn lazy_step(pos: [f32; 2], cursor: [f32; 2], string: f32) -> [f32; 2] {
@@ -440,6 +450,8 @@ struct App {
     uv_cam: Option<uvview::UvCamera>,
     uv_channel: uvview::Channel,
     uv_wire: bool,
+    /// Colours painted with lately, newest first (sRGB), for the swatch strip.
+    recent_colors: Vec<[f32; 3]>,
     /// A colour-selection mask waiting for the user to click the piece of the model it should select.
     pick_id_for: Option<NodeId>,
     /// Section plane: axis (0 off, 1 x, 2 y, 3 z), position as a fraction of the model's size, flipped.
@@ -603,6 +615,7 @@ impl App {
             show_wireframe: false,
             section: (0, 0.5, false),
             pick_id_for: None,
+            recent_colors: Vec::new(),
             paint_through: false,
             paint_backfaces: false,
             sets_scrolled: usize::MAX,
@@ -1591,6 +1604,13 @@ impl App {
         }
     }
 
+    /// Remember the colour being painted with, for the swatch strip.
+    fn note_color(&mut self) {
+        if self.channels.base {
+            push_recent(&mut self.recent_colors, self.channels.base_color);
+        }
+    }
+
     fn begin_line(&mut self, from: [f32; 2], ppp: f32, layer: NodeId, target: Target) {
         let spacing = (self.brush.radius_pts * ppp * self.brush.spacing).max(1.0);
         self.stroke = Stroke { active: true, last_px: from, next_in: spacing };
@@ -1619,6 +1639,9 @@ impl App {
             self.pending.push(PaintOp::BeginStroke { layer, target });
             self.push_hist(Hist::Stroke);
             self.push_stroke_limit(layer, target);
+            if self.tool == Tool::Paint && target == Target::Content {
+                self.note_color();
+            }
             out.push(self.make_stamp(to, ppp, target, [0.0; 2]));
             return;
         }
@@ -2373,7 +2396,24 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod lazy_tests {
-    use super::lazy_step;
+    use super::{lazy_step, push_recent};
+
+    #[test]
+    fn recent_colours_are_newest_first_unique_and_capped() {
+        let mut list = Vec::new();
+        for i in 0..20 {
+            push_recent(&mut list, [i as f32 / 20.0, 0.0, 0.0]);
+        }
+        assert_eq!(list.len(), 12);
+        assert_eq!(list[0], [19.0 / 20.0, 0.0, 0.0]);
+        // Using an older colour again moves it to the front instead of duplicating it.
+        let old = list[5];
+        push_recent(&mut list, old);
+        assert_eq!(list[0], old);
+        assert_eq!(list.iter().filter(|c| **c == old).count(), 1);
+        push_recent(&mut list, old);
+        assert_eq!(list.len(), 12);
+    }
 
     #[test]
     fn the_brush_stays_put_while_the_string_is_slack() {

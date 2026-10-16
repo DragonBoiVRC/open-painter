@@ -141,6 +141,21 @@ impl App {
                 ui.checkbox(&mut self.channels.base, "Base color");
                 ui.color_edit_button_rgb(&mut self.channels.base_color);
             });
+            if !self.recent_colors.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                    for c in self.recent_colors.clone() {
+                        let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                        ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(to8(c[0]), to8(c[1]), to8(c[2])));
+                        let on = self.channels.base_color == c;
+                        ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(if on { 1.5 } else { 1.0 }, if on { egui::Color32::WHITE } else { egui::Color32::from_gray(0x55) }), egui::StrokeKind::Inside);
+                        if resp.on_hover_text("A colour you painted with").clicked() {
+                            self.channels.base_color = c;
+                        }
+                    }
+                });
+            }
             ui.checkbox(&mut self.channels.metal, "Metallic");
             ui.add_enabled_ui(self.channels.metal, |ui| slider_row(ui, "Metallic", &mut self.channels.metallic, 0.0..=1.0));
             ui.checkbox(&mut self.channels.rough, "Roughness");
