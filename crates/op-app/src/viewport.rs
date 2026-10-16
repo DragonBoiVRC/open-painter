@@ -17,6 +17,8 @@ pub struct Globals {
     pub light_dir: [f32; 4],
     pub base_color: [f32; 4],
     pub params: [f32; 4],
+    /// Environment: rotation (radians), exposure scale, direct light intensity, preset.
+    pub env: [f32; 4],
 }
 
 struct Offscreen {
@@ -728,6 +730,7 @@ mod tests {
                 light_dir: [0.0, 1.0, 0.0, 0.0],
                 base_color: [0.18; 4],
                 params: [0.0, 0.5, near, far],
+                env: [0.0, 1.0, 1.0, 0.0],
             };
             Some(Self { device, queue, gpu, globals, front: cp.normalize() })
         }

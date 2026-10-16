@@ -7,6 +7,7 @@ struct Globals {
     light_dir: vec4<f32>,      // direction *towards* the light, xyz
     base_color: vec4<f32>,     // linear rgb
     params: vec4<f32>,         // x = metallic, y = roughness
+    env: vec4<f32>,            // rotation (rad), exposure scale, direct light intensity, preset
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -81,6 +82,44 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
+
+// A lobe of light around `dir`: sharp for mirrors, broad (and dimmer at the centre) when blurred.
+fn lobe(d: vec3<f32>, dir: vec3<f32>, color: vec3<f32>, sharp: f32, blur: f32) -> vec3<f32> {
+    let k = mix(sharp, 2.0, blur);
+    // A broader lobe carries the same energy over more of the sphere, so its peak is lower.
+    return color * exp((dot(d, normalize(dir)) - 1.0) * k) * (k / sharp);
+}
+
+// The procedural studio environments. `blur` runs from 0 (mirror) to 1 (diffuse).
+//   0 studio softboxes, 1 outdoor, 2 sunset, 3 neutral grey
+fn environment(dir: vec3<f32>, blur: f32) -> vec3<f32> {
+    let c = cos(g.env.x);
+    let s = sin(g.env.x);
+    let d = vec3<f32>(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);
+    let preset = i32(g.env.w + 0.5);
+    let up = d.y * 0.5 + 0.5;
+    if (preset == 1) {
+        let sky = mix(vec3<f32>(0.55, 0.60, 0.65), vec3<f32>(0.25, 0.45, 0.85), pow(up, 0.7));
+        let ground = vec3<f32>(0.20, 0.17, 0.13);
+        let base = mix(ground, sky, smoothstep(0.42, 0.58, up));
+        return base * 1.2 + lobe(d, vec3<f32>(0.5, 0.8, 0.3), vec3<f32>(9.0, 8.5, 7.5), 60.0, blur);
+    }
+    if (preset == 2) {
+        let sky = mix(vec3<f32>(1.0, 0.45, 0.18), vec3<f32>(0.18, 0.22, 0.45), pow(up, 0.8));
+        let ground = vec3<f32>(0.10, 0.07, 0.06);
+        let base = mix(ground, sky, smoothstep(0.40, 0.56, up)) * 0.9;
+        return base + lobe(d, vec3<f32>(-0.7, 0.18, 0.5), vec3<f32>(12.0, 5.0, 1.6), 50.0, blur);
+    }
+    if (preset == 3) {
+        return vec3<f32>(0.55);
+    }
+    let base = mix(vec3<f32>(0.10, 0.10, 0.11), vec3<f32>(0.30, 0.31, 0.33), up);
+    return base
+        + lobe(d, vec3<f32>(-0.8, 0.7, 0.6), vec3<f32>(5.0, 4.9, 4.6), 14.0, blur)
+        + lobe(d, vec3<f32>(0.9, 0.3, -0.4), vec3<f32>(2.2, 2.4, 3.0), 10.0, blur)
+        + lobe(d, vec3<f32>(0.0, 0.2, -1.0), vec3<f32>(2.6, 2.4, 2.2), 12.0, blur);
+}
+
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let uv_t = i.uv - tile.xy;
@@ -129,17 +168,16 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let f = fresnel_schlick(max(dot(h, v), 0.0), f0);
     let spec = d_ggx(n_dot_h, a) * g_smith(n_dot_v, n_dot_l, roughness) * f / (4.0 * n_dot_v * max(n_dot_l, 1e-4));
     let kd = (1.0 - f) * (1.0 - metallic);
-    let radiance = vec3<f32>(3.0);
+    let radiance = vec3<f32>(3.0 * g.env.z);
     var color = (kd * albedo / PI + spec) * radiance * n_dot_l;
 
-    // Hemisphere ambient with a crude Fresnel-weighted specular term.
-    let sky = vec3<f32>(0.45, 0.55, 0.70);
-    let ground = vec3<f32>(0.12, 0.10, 0.09);
-    let hemi = mix(ground, sky, n.y * 0.5 + 0.5);
+    // Image-based light from the procedural environment: broad lobes for diffuse, sharper ones
+    // for the mirror direction as roughness drops.
     let r = reflect(-v, n);
-    let env_spec = mix(ground, sky, r.y * 0.5 + 0.5);
+    let diffuse_env = environment(n, 1.0);
+    let spec_env = environment(r, roughness);
     let f_amb = fresnel_schlick(n_dot_v, f0) * (1.0 - roughness * 0.7);
-    color += (kd * albedo * hemi + env_spec * f_amb) * ao;
+    color += (kd * albedo * diffuse_env + spec_env * f_amb) * ao;
 
-    return vec4<f32>(to_srgb(tonemap(color)), 1.0);
+    return vec4<f32>(to_srgb(tonemap(color * g.env.y)), 1.0);
 }

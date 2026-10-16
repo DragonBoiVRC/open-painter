@@ -78,6 +78,24 @@ impl Default for Brush {
     }
 }
 
+/// How the viewport is lit.
+struct Environment {
+    /// Which procedural environment: studio, outdoor, sunset, neutral.
+    preset: u32,
+    /// Turns the environment and the key light around the model, in degrees.
+    rotation: f32,
+    /// Exposure in stops.
+    exposure: f32,
+    /// Strength of the key light.
+    light: f32,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0 }
+    }
+}
+
 /// A cheap deterministic generator for brush jitter: the same stroke jitters the same way.
 fn next_random(state: &std::cell::Cell<u32>) -> f32 {
     let mut x = state.get();
@@ -288,6 +306,7 @@ struct App {
     tool: Tool,
     brush: Brush,
     rng: std::cell::Cell<u32>,
+    env: Environment,
     /// Mirror painting across a plane through the model's centre: 0 off, 1 x, 2 y, 3 z.
     symmetry: u32,
     channels: PaintChannels,
@@ -414,6 +433,7 @@ impl App {
             tool: Tool::Paint,
             brush: Brush::default(),
             rng: std::cell::Cell::new(0x9e37_79b9),
+            env: Environment::default(),
             symmetry: 0,
             channels: PaintChannels {
                 base: true,

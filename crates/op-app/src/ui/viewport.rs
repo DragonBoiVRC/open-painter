@@ -57,7 +57,10 @@ impl App {
             self.camera.pan(d.x, d.y, rect.height());
         }
         if resp.dragged_by(egui::PointerButton::Secondary) {
-            if mods.ctrl {
+            if mods.shift {
+                // Shift+right drag: turn the environment (and its light).
+                self.env.rotation = (self.env.rotation - d.x * 0.5).rem_euclid(360.0);
+            } else if mods.ctrl {
                 // Ctrl+right drag: brush size (left/right) and hardness (up/down).
                 self.brush.radius_pts = (self.brush.radius_pts + d.x * 0.5).clamp(2.0, 300.0);
                 self.brush.hardness = (self.brush.hardness - d.y * 0.005).clamp(0.0, 1.0);
@@ -114,7 +117,12 @@ impl App {
 
         let size_px = [(rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32];
         let cam = self.camera.position();
-        let light = Vec3::new(0.5, 0.8, 0.6).normalize();
+        // The key light turns with the environment, so highlights and reflections stay consistent.
+        let light = {
+            let (s, c) = self.env.rotation.to_radians().sin_cos();
+            let l = Vec3::new(0.5, 0.8, 0.6);
+            Vec3::new(c * l.x - s * l.z, l.y, s * l.x + c * l.z).normalize()
+        };
         let (near, far) = self.camera.near_far();
         let globals = Globals {
             view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).to_cols_array_2d(),
@@ -133,6 +141,7 @@ impl App {
             // Shown only where the layer stack leaves a pixel uncovered.
             base_color: srgb_for_display(FALLBACK_BASE),
             params: [FALLBACK_METALLIC, FALLBACK_ROUGHNESS, near, far],
+            env: [self.env.rotation.to_radians(), 2f32.powf(self.env.exposure), self.env.light, self.env.preset as f32],
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
