@@ -232,6 +232,25 @@ mod tests {
     }
 
     #[test]
+    fn a_radiance_file_decodes_to_linear_radiance() {
+        // A 2x2 uncompressed Radiance picture: RGBE (128, 128, 128, 129) is 1.0 on every channel,
+        // (128, 64, 0, 130) is (2, 1, 0).
+        let mut bytes = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 2\n".to_vec();
+        bytes.extend([128, 128, 128, 129, 128, 64, 0, 130, 128, 128, 128, 129, 128, 128, 128, 129]);
+        let img = decode_hdr(&bytes).unwrap();
+        assert_eq!((img.width, img.height), (2, 2));
+        let px = |i: usize| [img.rgb[i * 3], img.rgb[i * 3 + 1], img.rgb[i * 3 + 2]];
+        for (got, want) in px(0).into_iter().zip([1.0, 1.0, 1.0]) {
+            assert!((got - want).abs() < 0.02, "{got} vs {want}");
+        }
+        for (got, want) in px(1).into_iter().zip([2.0, 1.0, 0.0]) {
+            assert!((got - want).abs() < 0.03, "{got} vs {want}");
+        }
+        // Absurd radiance is clamped rather than passed on.
+        assert!(img.rgb.iter().all(|v| *v <= MAX_RADIANCE));
+    }
+
+    #[test]
     fn junk_is_an_error_not_a_panic() {
         assert!(decode_hdr(&[]).is_err());
         assert!(decode_hdr(b"definitely not an image").is_err());
