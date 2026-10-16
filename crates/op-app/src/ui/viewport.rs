@@ -186,6 +186,8 @@ impl App {
         if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
             if matches!(self.tool, Tool::Smudge | Tool::Clone) {
                 ops.push(PaintOp::Smudge { layer, stamps });
+            } else if self.tool == Tool::Erase && target == crate::Target::Content {
+                ops.push(PaintOp::Erase { layer, stamps, uv: false });
             } else {
                 ops.push(PaintOp::Stamps { layer, target, stamps });
             }

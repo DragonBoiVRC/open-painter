@@ -88,6 +88,9 @@ pub enum PaintOp {
     /// Snapshot the target so the stroke that follows can be undone.
     BeginStroke { layer: NodeId, target: Target },
     Stamps { layer: NodeId, target: Target, stamps: Vec<Stamp> },
+    /// The eraser: stamps take coverage away from a layer's content. With `uv` the stamps are in
+    /// UV space like `Stamps2d`.
+    Erase { layer: NodeId, stamps: Vec<Stamp>, uv: bool },
     /// Stamps that copy paint from elsewhere on the surface (smudge and clone); content only.
     Smudge { layer: NodeId, stamps: Vec<Stamp> },
     /// Stamps drawn directly in UV space: `brush` is (u, v, radius in UV units, hardness).
@@ -230,6 +233,8 @@ impl StrokeSnap {
 pub struct PaintGpu {
     pipeline_content: wgpu::RenderPipeline,
     pipeline_mask: wgpu::RenderPipeline,
+    pipeline_erase: wgpu::RenderPipeline,
+    pipeline_erase_2d: wgpu::RenderPipeline,
     pipeline_smudge: wgpu::RenderPipeline,
     smudge_layout: wgpu::BindGroupLayout,
     /// A copy of the layer being smudged, so stamps read what was there before them.
@@ -411,6 +416,14 @@ impl PaintGpu {
         let pipeline_content =
             make("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_mask = make("fs_mask", &[target(MASK_FORMAT, straight)]);
+        // Erasing keeps what the stamp does not cover: dst * (1 - alpha), nothing added.
+        let erase_blend = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let erase_targets = [target(BASE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend), target(VALUE_FORMAT, erase_blend)];
+        let pipeline_erase = make("fs_erase", &erase_targets);
         let smudge_tex = |binding, filterable| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -502,6 +515,7 @@ impl PaintGpu {
         let pipeline_content_2d =
             make_2d("fs_main", &[target(BASE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over), target(VALUE_FORMAT, over)]);
         let pipeline_mask_2d = make_2d("fs_mask", &[target(MASK_FORMAT, straight)]);
+        let pipeline_erase_2d = make_2d("fs_erase", &erase_targets);
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamp_globals"),
@@ -530,6 +544,8 @@ impl PaintGpu {
         Self {
             pipeline_content,
             pipeline_mask,
+            pipeline_erase,
+            pipeline_erase_2d,
             pipeline_smudge,
             smudge_layout,
             scratch: None,
@@ -979,6 +995,53 @@ impl PaintGpu {
                     pass.set_pipeline(pipeline);
                     pass.set_vertex_buffer(0, self.instance_buf.slice(offset..offset + n as u64 * stride));
                     pass.draw(0..6, 0..n as u32);
+                    self.cursor += n;
+                    dirty = true;
+                }
+                PaintOp::Erase { layer, stamps, uv } => {
+                    let Some(c) = self.store.get(layer).and_then(|g| g.content.as_ref()) else { continue };
+                    let n = stamps.len().min(MAX_STAMPS - self.cursor);
+                    if n == 0 || (!*uv && mesh.is_none()) {
+                        continue;
+                    }
+                    let views = c.views()[..4].to_vec();
+                    let stride = std::mem::size_of::<Stamp>() as u64;
+                    let offset = self.cursor as u64 * stride;
+                    queue.write_buffer(&self.instance_buf, offset, bytemuck::cast_slice(&stamps[..n]));
+                    let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+                    let attachments: Vec<_> = views
+                        .iter()
+                        .map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: load }))
+                        .collect();
+                    if *uv {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("erase2d_pass"),
+                            color_attachments: &attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        pass.set_pipeline(&self.pipeline_erase_2d);
+                        pass.set_vertex_buffer(0, self.instance_buf.slice(offset..offset + n as u64 * stride));
+                        pass.draw(0..6, 0..n as u32);
+                    } else if let Some(mesh) = &mesh {
+                        let bind = self.stamp_bind(device, queue, view);
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("erase_pass"),
+                            color_attachments: &attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        pass.set_pipeline(&self.pipeline_erase);
+                        pass.set_bind_group(0, &bind, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                        pass.set_vertex_buffer(1, self.instance_buf.slice(offset..offset + n as u64 * stride));
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(mesh.first_index..mesh.first_index + mesh.index_count, 0, 0..n as u32);
+                    }
                     self.cursor += n;
                     dirty = true;
                 }

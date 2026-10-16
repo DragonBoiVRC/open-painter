@@ -59,7 +59,11 @@ impl App {
         }
         let mut ops = Vec::new();
         if let (false, Some((layer, target))) = (stamps.is_empty(), stamp_target) {
-            ops.push(PaintOp::Stamps2d { layer, target, stamps });
+            if self.tool == crate::Tool::Erase && target == crate::Target::Content {
+                ops.push(PaintOp::Erase { layer, stamps, uv: true });
+            } else {
+                ops.push(PaintOp::Stamps2d { layer, target, stamps });
+            }
         }
         let batches = self.take_batches(ops);
         if batches.iter().any(|b| !b.ops.is_empty()) {

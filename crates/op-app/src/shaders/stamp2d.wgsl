@@ -109,3 +109,17 @@ fn fs_mask(i: VsOut) -> @location(0) vec4<f32> {
     if (a < 0.0) { discard; }
     return vec4<f32>(i.values.x, 0.0, 0.0, a);
 }
+
+// Eraser: the pipeline multiplies what is there by (1 - alpha), so only the alpha matters.
+// `enables` picks the channels that lose paint.
+@fragment
+fn fs_erase(i: VsOut) -> FsOut {
+    let a = stamp_alpha(i);
+    if (a < 0.0) { discard; }
+    var o: FsOut;
+    o.base = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.x);
+    o.metal = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.y);
+    o.rough = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.z);
+    o.height = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.w);
+    return o;
+}

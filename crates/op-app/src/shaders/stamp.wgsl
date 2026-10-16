@@ -278,3 +278,17 @@ fn fs_smudge(i: VsOut) -> FsOut {
     o.height = vec4<f32>(h * (a * i.enables.w), 0.0, h.y * (a * i.enables.w));
     return o;
 }
+
+// Eraser: the pipeline multiplies what is there by (1 - alpha), so only the alpha matters.
+// `enables` picks the channels that lose paint.
+@fragment
+fn fs_erase(i: VsOut) -> FsOut {
+    let a = stamp_alpha(i);
+    if (a < 0.0) { discard; }
+    var o: FsOut;
+    o.base = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.x);
+    o.metal = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.y);
+    o.rough = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.z);
+    o.height = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.w);
+    return o;
+}

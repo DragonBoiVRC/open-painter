@@ -85,7 +85,7 @@ impl std::ops::DerefMut for SetGpu {
 
 /// 2D stamps are given in global UV space; a tile's store works in tile-local UVs.
 fn ops_for_tile(ops: &[PaintOp], tile: op_mesh::Tile) -> std::borrow::Cow<'_, [PaintOp]> {
-    if (tile.u == 0 && tile.v == 0) || !ops.iter().any(|o| matches!(o, PaintOp::Stamps2d { .. })) {
+    if (tile.u == 0 && tile.v == 0) || !ops.iter().any(|o| matches!(o, PaintOp::Stamps2d { .. } | PaintOp::Erase { uv: true, .. })) {
         return std::borrow::Cow::Borrowed(ops);
     }
     let shifted = ops
@@ -102,6 +102,18 @@ fn ops_for_tile(ops: &[PaintOp], tile: op_mesh::Tile) -> std::borrow::Cow<'_, [P
                     })
                     .collect();
                 PaintOp::Stamps2d { layer: *layer, target: *target, stamps: moved }
+            }
+            PaintOp::Erase { layer, stamps, uv: true } => {
+                let moved = stamps
+                    .iter()
+                    .map(|s| {
+                        let mut s = *s;
+                        s.brush[0] -= tile.u as f32;
+                        s.brush[1] -= tile.v as f32;
+                        s
+                    })
+                    .collect();
+                PaintOp::Erase { layer: *layer, stamps: moved, uv: true }
             }
             other => other.clone(),
         })
@@ -1075,6 +1087,27 @@ mod tests {
         doc.find_mut(layer).unwrap().filters.clear();
         rig.run(&doc, &[]);
         assert_eq!(stats(&rig).0, plain_cover, "the stored paint changed");
+    }
+
+    /// The eraser removes paint (coverage), it does not paint black.
+    #[test]
+    fn erasing_removes_coverage_from_the_layer() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let c = SIZE as f32 / 2.0;
+        let paint = dab(c, 40.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![paint] }]);
+        let covered = |rig: &Rig| rig.metal().chunks_exact(2).filter(|t| t[1] > 128).count();
+        let before = covered(&rig);
+        assert!(before > 0);
+        let mut erase = dab(c, 20.0, 0.0, [1.0, 1.0, 1.0, 1.0]);
+        erase.color = [0.0; 4];
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Erase { layer, stamps: vec![erase], uv: false }]);
+        let after = covered(&rig);
+        assert!((after as f32) < before as f32 * 0.8, "erasing left {after} of {before} covered texels");
+        assert!(after > 0, "the eraser took more than its footprint");
     }
 
     #[test]
