@@ -403,7 +403,7 @@ impl ViewportGpu {
         let uv_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/uvbuf.wgsl"));
         let uv_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("uvbuf_pl"),
-            bind_group_layouts: &[Some(&globals_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&paint.material_layout)],
             immediate_size: 0,
         });
         let uv_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -926,8 +926,10 @@ impl ViewportGpu {
                 if self.hidden.get(set).copied().unwrap_or(false) {
                     continue;
                 }
-                for &(first, count) in &unit.tile_ranges {
+                for (ti, paint) in unit.tiles.iter().enumerate() {
+                    let Some(&(first, count)) = unit.tile_ranges.get(ti) else { continue };
                     if count > 0 {
+                        uv_pass.set_bind_group(1, paint.material_bind(), &[]);
                         uv_pass.draw_indexed(first..first + count, 0, 0..1);
                     }
                 }
@@ -1759,6 +1761,51 @@ mod tests {
             rig.run(&doc, &[PaintOp::Resize(SIZE)]);
             assert_eq!(rig.gpu.paint().size(), SIZE);
         }
+    }
+
+    /// Hidden parts of the model are not drawn and cannot be painted; showing all restores them.
+    #[test]
+    fn hidden_parts_are_neither_drawn_nor_paintable() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        let lit = Document::with_default_material();
+        rig.globals.light_dir[3] = 0.0;
+        rig.run(&lit, &[PaintOp::Reset(SIZE)]);
+        let shown = center_pixel(&rig);
+
+        // One big triangle covering all of UV space hides everything.
+        let everything = vec![[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
+        rig.run(&lit, &[PaintOp::Hide { uvs: everything.clone(), hidden: true }]);
+        rig.run(&lit, &[]);
+        let hidden = center_pixel(&rig);
+        assert_ne!(hidden, shown, "the hidden model should not be drawn");
+        assert!(hidden[0] < 40 && hidden[1] < 40, "the clear colour shows: {hidden:?}");
+
+        // Nothing lands on hidden parts.
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        rig.run(&doc, &[PaintOp::Hide { uvs: everything.clone(), hidden: true }]);
+        rig.run(&doc, &[]);
+        let stamp = dab(SIZE as f32 / 2.0, 30.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        assert!(rig.metal().chunks_exact(2).all(|t| t[1] == 0), "paint reached a hidden part");
+
+        // Showing part of it again: only the revealed half of UV space (u < 0.5) is drawn and paintable.
+        rig.run(&doc, &[PaintOp::Hide { uvs: vec![[-1.0, -1.0], [0.5, -1.0], [-1.0, 3.0], [0.5, -1.0], [0.5, 3.0], [-1.0, 3.0]], hidden: false }]);
+        rig.run(&doc, &[]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let m = rig.metal();
+        let painted = m.chunks_exact(2).filter(|t| t[1] > 128).count();
+        assert!(painted > 0, "the shown half takes paint");
+        for (i, t) in m.chunks_exact(2).enumerate() {
+            let x = (i as u32 % SIZE) as f32 / SIZE as f32;
+            assert!(t[1] == 0 || x < 0.52, "paint on a still-hidden texel at u={x}");
+        }
+
+        // Show all.
+        rig.run(&lit, &[PaintOp::ShowAll]);
+        rig.run(&lit, &[]);
+        assert_eq!(center_pixel(&rig), shown, "everything is back");
     }
 
     /// Paint reaches the far side of the model only when both "through" options are on.

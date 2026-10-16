@@ -2,7 +2,7 @@
 
 use super::{hint, section, slider_row};
 use crate::ui::theme;
-use crate::{App, Tool};
+use crate::{App, PaintOp, Tool};
 
 /// Names of the stamp shapes, in the order the shaders number them.
 const SHAPES: [&str; 6] = ["Round", "Square", "Diamond", "Chalk", "Streaks", "Image"];
@@ -11,7 +11,7 @@ impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Brush", |ui| {
             ui.horizontal(|ui| {
-                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone"), (Tool::Project, "Project"), (Tool::Fill, "Fill")] {
+                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone"), (Tool::Project, "Project"), (Tool::Fill, "Fill"), (Tool::Hide, "Hide")] {
                     if ui.selectable_label(self.tool == tool, label).clicked() {
                         self.tool = tool;
                     }
@@ -20,6 +20,20 @@ impl App {
             if self.tool == Tool::Smudge {
                 slider_row(ui, "Smear distance", &mut self.brush.smudge_distance, 0.05..=1.5);
                 hint(ui, "Drags the paint under the brush along the stroke. Works on the layer's content in the 3D view.");
+            }
+            if self.tool == Tool::Hide {
+                ui.horizontal(|ui| {
+                    ui.label("Hide");
+                    for scope in crate::FillScope::ALL {
+                        if ui.selectable_label(self.fill_scope == scope, scope.label()).clicked() {
+                            self.fill_scope = scope;
+                        }
+                    }
+                });
+                if ui.button("Show all parts").clicked() {
+                    self.pending.push(PaintOp::ShowAll);
+                }
+                hint(ui, "Click the model to hide that part so you can paint what is behind it. Shift+click shows it again. Hidden parts are not saved with the project.");
             }
             if self.tool == Tool::Fill {
                 ui.horizontal(|ui| {

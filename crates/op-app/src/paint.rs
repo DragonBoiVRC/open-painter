@@ -125,6 +125,11 @@ pub enum PaintOp {
     Gc(Vec<NodeId>),
     /// Drop all paint and stroke history and (re)allocate at this resolution.
     Reset(u32),
+    /// Hide the given triangles (UV positions, three per triangle) of the 3D view: they are not drawn
+    /// and paint does not land on them. `hidden: false` shows them again.
+    Hide { uvs: Vec<[f32; 2]>, hidden: bool },
+    /// Show every part of the model again.
+    ShowAll,
     /// Change the resolution, resampling every layer and mask so the paint is kept. Stroke history is
     /// dropped (its snapshots are the old size).
     Resize(u32),
@@ -365,6 +370,8 @@ pub struct PaintGpu {
     pub store: HashMap<NodeId, NodeGpu>,
     /// Composited result of the whole layer stack; what the viewport samples.
     pub output: Layer,
+    /// Where the model is hidden (1) in UV space; zero (everything shown) to begin with.
+    hidden: wgpu::Texture,
     material_bind: wgpu::BindGroup,
     pub(crate) normal: NormalPass,
     /// Which UV tile this store holds (the first tile unless UV tiles are in use).
@@ -428,6 +435,17 @@ impl PaintGpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Where the model is hidden: paint does not land there.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
@@ -449,6 +467,7 @@ impl PaintGpu {
                 tex_entry(4),
                 tex_entry(6),
                 tex_entry(7),
+                tex_entry(8),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -788,9 +807,10 @@ impl PaintGpu {
         });
 
         let output = Layer::new(device, size);
+        let hidden = texture(device, "hidden_parts", size, MASK_FORMAT);
         let normal = NormalPass::new(device, size);
         let tile_buf = Self::tile_buffer(device, Tile::FIRST);
-        let material_bind = Self::make_material_bind(device, &material_layout, &sampler, &output, &normal, &tile_buf);
+        let material_bind = Self::make_material_bind(device, &material_layout, &sampler, &output, &normal, &tile_buf, &hidden);
         Self {
             pipeline_content,
             pipeline_mask,
@@ -825,6 +845,7 @@ impl PaintGpu {
             size,
             store: HashMap::new(),
             output,
+            hidden,
             material_bind,
             normal,
             tile: Tile::FIRST,
@@ -843,8 +864,10 @@ impl PaintGpu {
         layer: &Layer,
         normal: &NormalPass,
         tile_buf: &wgpu::Buffer,
+        hidden: &wgpu::Texture,
     ) -> wgpu::BindGroup {
         let [b, m, r, _, e, o, _] = layer.views();
+        let hv = hidden.create_view(&Default::default());
         let n = normal.target.create_view(&Default::default());
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("paint_material_bind"),
@@ -858,6 +881,7 @@ impl PaintGpu {
                 wgpu::BindGroupEntry { binding: 5, resource: tile_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&e) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&o) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&hv) },
             ],
         })
     }
@@ -878,7 +902,7 @@ impl PaintGpu {
         self.tile = tile;
         self.compositor.set_tile([tile.u as f32, tile.v as f32]);
         self.tile_buf = Self::tile_buffer(device, tile);
-        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf, &self.hidden);
     }
 
     pub fn material_bind(&self) -> &wgpu::BindGroup {
@@ -1035,8 +1059,9 @@ impl PaintGpu {
         self.stroke_mask_buf = None;
         self.output = Layer::new(device, size);
         self.output.clear(encoder);
+        self.hidden = self.resampled(device, encoder, &self.hidden, size, 2);
         self.normal.resize(device, size);
-        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf, &self.hidden);
         self.compositor.set_size(size);
         self.last_doc = None;
         self.ensure_store(device, encoder, doc);
@@ -1050,12 +1075,13 @@ impl PaintGpu {
         self.redo.clear();
         self.output = Layer::new(device, size);
         self.output.clear(encoder);
+        self.hidden = texture(device, "hidden_parts", size, MASK_FORMAT);
         self.scratch = None;
         self.stroke_limit = None;
         self.stroke_buf = None;
         self.stroke_mask_buf = None;
         self.normal.resize(device, size);
-        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf, &self.hidden);
         self.compositor.set_size(size);
         self.last_doc = None;
         self.ensure_store(device, encoder, doc);
@@ -1267,6 +1293,7 @@ impl PaintGpu {
             globals.stencil[2] = globals.stencil[3] * size.width as f32 / size.height.max(1) as f32;
         }
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        let hidden_view = self.hidden.create_view(&Default::default());
         let alpha_view = alpha.as_ref().map(|i| &i.linear).unwrap_or(&self.white.linear);
         let stencil_view = stencil.as_ref().map(|i| &i.linear).unwrap_or(&self.white.linear);
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1278,6 +1305,7 @@ impl PaintGpu {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(alpha_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(stencil_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&hidden_view) },
             ],
         })
     }
@@ -1533,6 +1561,69 @@ impl PaintGpu {
                     pass.set_bind_group(0, &bind, &[]);
                     pass.set_vertex_buffer(0, vbuf.slice(..));
                     pass.draw(0..verts.len() as u32, 0..1);
+                    dirty = true;
+                }
+                PaintOp::ShowAll => {
+                    clear_textures(encoder, &[&self.hidden.create_view(&Default::default())], wgpu::Color::TRANSPARENT);
+                    dirty = true;
+                }
+                PaintOp::Hide { uvs, hidden } => {
+                    let count = uvs.len().min(MAX_FILL_TRIANGLES * 3) / 3 * 3;
+                    if count == 0 {
+                        continue;
+                    }
+                    let pad = 1.5 / self.size as f32;
+                    let mut verts: Vec<[f32; 2]> = Vec::with_capacity(count);
+                    for tri in uvs[..count].chunks_exact(3) {
+                        let c = [(tri[0][0] + tri[1][0] + tri[2][0]) / 3.0, (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0];
+                        for p in tri {
+                            let d = [p[0] - c[0], p[1] - c[1]];
+                            let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-9);
+                            verts.push([p[0] + d[0] / len * pad, p[1] + d[1] / len * pad]);
+                        }
+                    }
+                    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("hide_vertices"),
+                        contents: bytemuck::cast_slice(&verts),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                    let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("hide_params"),
+                        contents: bytemuck::bytes_of(&FillParams {
+                            color: [0.0; 4],
+                            values: [if *hidden { 1.0 } else { 0.0 }, 0.0, 1.0, 0.0],
+                            enables: [0.0; 4],
+                            tile: [self.tile.u as f32, self.tile.v as f32, 0.0, 0.0],
+                            emissive: [0.0; 4],
+                            opacity: [0.0; 4],
+                        }),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("hide_bind"),
+                        layout: &self.fill_layout,
+                        entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
+                    });
+                    let view = self.hidden.create_view(&Default::default());
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("hide_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        pass.set_pipeline(&self.pipeline_fill_mask);
+                        pass.set_bind_group(0, &bind, &[]);
+                        pass.set_vertex_buffer(0, vbuf.slice(..));
+                        pass.draw(0..verts.len() as u32, 0..1);
+                    }
                     dirty = true;
                 }
                 PaintOp::StrokeOpacity { layer, target, opacity, mask_value } => {

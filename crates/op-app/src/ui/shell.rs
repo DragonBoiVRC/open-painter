@@ -250,6 +250,9 @@ impl App {
                     if tool_button(ui, ph::PAINT_BUCKET, "Fill (G): click a face, UV island, mesh part or texture set. Shift+click hides on a mask", self.tool == Tool::Fill).clicked() {
                         self.tool = Tool::Fill;
                     }
+                    if tool_button(ui, ph::EYE_SLASH, "Hide parts (7): click a face, island or part to hide it; Shift+click shows it", self.tool == Tool::Hide).clicked() {
+                        self.tool = Tool::Hide;
+                    }
                     if tool_button(ui, ph::PROJECTOR_SCREEN, "Projection (J): paint the stencil picture onto the model", self.tool == Tool::Project).clicked() {
                         self.tool = Tool::Project;
                     }

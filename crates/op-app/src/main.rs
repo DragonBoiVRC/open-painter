@@ -186,6 +186,8 @@ enum Tool {
     Project,
     /// Click to fill a UV island, a piece of the mesh or the whole texture set.
     Fill,
+    /// Click to hide a face, island or part of the model (Shift+click shows it again).
+    Hide,
 }
 
 /// What a click with the fill tool covers.
@@ -1690,20 +1692,13 @@ impl App {
         self.stroke.last_px = to;
     }
 
-    /// Fill what the click at `ray` (origin, direction) lands on with the paint colour and channels
-    /// (or, on a mask, with white; `hide` makes it black).
-    fn fill_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, hide: bool) {
-        let (layer, target) = match self.paint_target() {
-            Ok(t) => t,
-            Err(msg) => {
-                self.status = msg.to_string();
-                return;
-            }
-        };
+    /// The UV positions of the triangles (three per triangle) the click along a ray selects, by the
+    /// fill scope, in the active texture set.
+    fn picked_triangles(&mut self, origin: glam::Vec3, dir: glam::Vec3) -> Option<Vec<[f32; 2]>> {
         let active = self.active;
         let Some((set, first)) = self.mesh.raycast_triangle_where(origin, dir, |s| s == active) else {
-            self.status = "No model under the cursor to fill.".into();
-            return;
+            self.status = "No model under the cursor.".into();
+            return None;
         };
         let firsts: Vec<usize> = match self.fill_scope {
             FillScope::Face => self.mesh.connected_triangles(first, op_mesh::Connect::FlatFace(8.0)),
@@ -1715,9 +1710,30 @@ impl App {
             }
         };
         if firsts.is_empty() {
-            return;
+            return None;
         }
-        let uvs: Vec<[f32; 2]> = firsts.iter().flat_map(|&t| (0..3).map(move |c| t + c)).map(|i| self.mesh.vertices[self.mesh.indices[i] as usize].uv).collect();
+        Some(firsts.iter().flat_map(|&t| (0..3).map(move |c| t + c)).map(|i| self.mesh.vertices[self.mesh.indices[i] as usize].uv).collect())
+    }
+
+    /// Hide (or, with `show`, reveal again) the part of the model a click along a ray lands on.
+    fn hide_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, show: bool) {
+        let Some(uvs) = self.picked_triangles(origin, dir) else { return };
+        self.status = format!("{} {} triangle(s). Show all parts in Properties - Brush.", if show { "Showed" } else { "Hid" }, uvs.len() / 3);
+        self.pending.push(PaintOp::Hide { uvs, hidden: !show });
+    }
+
+    /// Fill what the click at `ray` (origin, direction) lands on with the paint colour and channels
+    /// (or, on a mask, with white; `hide` makes it black).
+    fn fill_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, hide: bool) {
+        let (layer, target) = match self.paint_target() {
+            Ok(t) => t,
+            Err(msg) => {
+                self.status = msg.to_string();
+                return;
+            }
+        };
+        let Some(uvs) = self.picked_triangles(origin, dir) else { return };
+        let triangles = uvs.len() / 3;
         let c = &self.channels;
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
         let lin = c.base_color.map(srgb_to_linear);
@@ -1742,7 +1758,7 @@ impl App {
         self.pending.push(op);
         self.push_hist(Hist::Stroke);
         self.thumbs_dirty();
-        self.status = format!("Filled {} triangle(s).", firsts.len());
+        self.status = format!("Filled {triangles} triangle(s).");
     }
 
     /// The section plane for the shaders: the model is cut away where `dot(position, xyz) > w`.
@@ -2005,6 +2021,7 @@ impl App {
                         ("H / Shift+H", "hide or show the active material / show all"),
                         ("P / E  or  1 / 2", "paint / erase"),
                         ("S / K / J / G  or  3 / 4 / 5 / 6", "smudge / clone / projection / fill"),
+                        ("7", "hide parts of the model"),
                         ("Ctrl + click (clone)", "set the clone source"),
                         ("I / Shift+I", "pick the colour / every channel under the cursor"),
                         ("L", "toggle symmetry"),
@@ -2381,6 +2398,9 @@ impl App {
         }
         if fill {
             self.tool = Tool::Fill;
+        }
+        if ui.input(|i| i.key_pressed(Key::Num7)) {
+            self.tool = Tool::Hide;
         }
         if frame {
             self.frame_model();

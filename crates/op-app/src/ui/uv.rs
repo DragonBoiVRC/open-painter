@@ -36,7 +36,7 @@ impl App {
         let mut stamps = Vec::new();
         let mut stamp_target = None;
         let modal_open = self.dialog.is_some() || self.confirm.is_some();
-        let copies = matches!(self.tool, crate::Tool::Smudge | crate::Tool::Clone | crate::Tool::Project | crate::Tool::Fill);
+        let copies = matches!(self.tool, crate::Tool::Smudge | crate::Tool::Clone | crate::Tool::Project | crate::Tool::Fill | crate::Tool::Hide);
         if copies && resp.is_pointer_button_down_on() && primary_down {
             self.status = "Smudge, clone, projection and fill work in the 3D view".into();
         }

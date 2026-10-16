@@ -28,6 +28,8 @@ struct Globals {
 @group(1) @binding(6) var paint_emissive: texture_2d<f32>;
 // (opacity * coverage, coverage); the surface is opaque where nothing is painted.
 @group(1) @binding(7) var paint_opacity: texture_2d<f32>;
+// 1 where the user hid that part of the model.
+@group(1) @binding(8) var paint_hidden: texture_2d<f32>;
 
 // Baked map preview. light_dir.w selects the mode: 0 shaded, 1 show the map as-is,
 // 2 shaded with the map (ambient occlusion) multiplied into the ambient light, 3 the painted
@@ -238,7 +240,8 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
 
     // See-through paint is shown dithered: the surface is dropped from the picture (and its depth) in
     // proportion to how transparent it is. Switched off with bg.w = 0.
-    if ((!front && !section_on) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
+    let hidden = textureSample(paint_hidden, paint_samp, uv_t).r > 0.5;
+    if (hidden || (!front && !section_on) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
         discard;
     }
     if (g.bg.w > 0.5 && opacity < 0.999) {

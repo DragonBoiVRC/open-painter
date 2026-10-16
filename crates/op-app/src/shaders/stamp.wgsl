@@ -22,6 +22,7 @@ struct StampGlobals {
 @group(0) @binding(2) var tip_tex: texture_2d<f32>;
 @group(0) @binding(3) var stencil_tex: texture_2d<f32>;
 @group(0) @binding(4) var pic_samp: sampler;
+@group(0) @binding(5) var hidden_tex: texture_2d<f32>;
 
 // How much a picture lets through: its brightness, scaled by its own alpha.
 fn pic_value(c: vec4<f32>) -> f32 {
@@ -78,6 +79,7 @@ struct VsOut {
     @location(6) @interpolate(flat) shape: vec4<f32>,
     @location(7) @interpolate(flat) emissive: vec4<f32>,
     @location(8) @interpolate(flat) opacity: vec4<f32>,
+    @location(9) uv: vec2<f32>,
 };
 
 @vertex
@@ -88,6 +90,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
     o.world_pos = v.position;
     o.normal = v.normal;
+    o.uv = uv;
     o.brush = v.brush;
     o.color = v.color;
     o.values = v.values;
@@ -161,6 +164,10 @@ fn mirror_dir(n: vec3<f32>, axis: i32) -> vec3<f32> {
 // The stamp's alpha for a surface point, or -1.0 if it is rejected (outside the brush,
 // back-facing, or hidden behind nearer geometry).
 fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    // Hidden parts of the model cannot be painted.
+    let hdims = vec2<f32>(textureDimensions(hidden_tex));
+    let hxy = vec2<i32>(min(i.uv * hdims, hdims - vec2<f32>(1.0)));
+    if (textureLoad(hidden_tex, hxy, 0).r > 0.5) { return -1.0; }
     // Parts of the model cut away by the section plane cannot be painted.
     if (dot(sg.clip.xyz, sg.clip.xyz) > 0.5 && dot(world_pos, sg.clip.xyz) > sg.clip.w) { return -1.0; }
     let clip = sg.view_proj * vec4<f32>(world_pos, 1.0);

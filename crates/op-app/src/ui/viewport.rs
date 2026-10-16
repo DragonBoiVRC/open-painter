@@ -156,14 +156,18 @@ impl App {
         }
         let picking_id = self.pick_id_for.is_some();
         // Fill: one click fills the island, mesh part or texture set under the cursor.
-        let fill = self.tool == Tool::Fill && !alt && !modal_open;
+        let fill = matches!(self.tool, Tool::Fill | Tool::Hide) && !alt && !modal_open;
         if let (true, true, Some(pos)) = (fill, resp.clicked() && !mods.command, resp.interact_pointer_pos()) {
             let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
             let ndc = glam::Vec2::new((pos.x - rect.min.x) / w * 2.0 - 1.0, 1.0 - (pos.y - rect.min.y) / h * 2.0);
             let inv = self.camera.view_proj(w / h).inverse();
             let near = inv.project_point3(ndc.extend(0.0));
             let far = inv.project_point3(ndc.extend(1.0));
-            self.fill_at(near, (far - near).normalize_or_zero(), mods.shift);
+            if self.tool == Tool::Hide {
+                self.hide_at(near, (far - near).normalize_or_zero(), mods.shift);
+            } else {
+                self.fill_at(near, (far - near).normalize_or_zero(), mods.shift);
+            }
         }
         let placing = self.place_stencil && self.brush_pics.stencil.is_some();
         if placing {
@@ -177,7 +181,7 @@ impl App {
                 place[2] = (place[2] * (1.0 + scroll * 0.002)).clamp(0.05, 2.0);
             }
         }
-        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && self.tool != Tool::Fill && !picking_id;
+        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && !matches!(self.tool, Tool::Fill | Tool::Hide) && !picking_id;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {
