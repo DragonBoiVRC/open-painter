@@ -1711,6 +1711,38 @@ mod tests {
         assert_eq!(back_painted(&mut rig, [true, true]), (true, true), "both options reach the far side");
     }
 
+    /// Not a correctness test: a rough timing of a heavy stack at 4096, run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn timing_of_a_heavy_stack_at_4k() {
+        let Some(mut rig) = Rig::new() else { return };
+        let mut doc = Document::default();
+        doc.add(None, None, "base", fill(Some([0.5; 3]), Some(0.2), Some(0.6)));
+        let mut layers = Vec::new();
+        for i in 0..6 {
+            layers.push(doc.add(None, None, &format!("paint {i}"), NodeKind::Paint));
+            doc.add(None, None, &format!("fill {i}"), fill(Some([0.1 * i as f32, 0.4, 0.5]), None, Some(0.5)));
+        }
+        let size = 4096;
+        let t = std::time::Instant::now();
+        rig.run(&doc, &[PaintOp::Reset(size)]);
+        rig.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        println!("reset at {size}: {:?}", t.elapsed());
+        let layer = layers[3];
+        let t = std::time::Instant::now();
+        for k in 0..30 {
+            let stamp = dab(SIZE as f32 / 2.0 + k as f32, 20.0, 1.0, [1.0, 1.0, 1.0, 0.0]);
+            let mut ops = Vec::new();
+            if k == 0 {
+                ops.push(PaintOp::BeginStroke { layer, target: Target::Content });
+            }
+            ops.push(PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] });
+            rig.run(&doc, &ops);
+        }
+        rig.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        println!("30 stamped frames: {:?} ({:?} per frame)", t.elapsed(), t.elapsed() / 30);
+    }
+
     #[test]
     fn projective_brush_paints_visible_side_only_and_undoes() {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
