@@ -166,6 +166,9 @@ pub struct ViewportGpu {
     /// A 1x1 "nothing drawn" UV buffer for when the 3D view is not drawn.
     pub(crate) dummy_uv: wgpu::Texture,
     blit: wgpu::RenderPipeline,
+    blit_fxaa: wgpu::RenderPipeline,
+    /// Smooth the edges of the finished picture (FXAA).
+    pub fxaa: bool,
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     globals_buf: wgpu::Buffer,
@@ -491,6 +494,22 @@ impl ViewportGpu {
             multiview_mask: None,
             cache: None,
         });
+        let blit_fxaa = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blit_fxaa"),
+            layout: Some(&blit_pl),
+            vertex: wgpu::VertexState { module: &blit_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs_fxaa"),
+                compilation_options: Default::default(),
+                targets: &[Some(target_format.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -508,6 +527,8 @@ impl ViewportGpu {
             uv_pipeline,
             dummy_uv,
             blit,
+            blit_fxaa,
+            fxaa: false,
             blit_layout,
             sampler,
             globals_buf,
@@ -930,6 +951,8 @@ pub struct ViewportCallback {
     pub hidden: Vec<bool>,
     /// Draw the mesh edges over the model.
     pub wireframe: bool,
+    /// Smooth the edges of the picture.
+    pub fxaa: bool,
 }
 
 impl egui_wgpu::CallbackTrait for ViewportCallback {
@@ -945,6 +968,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             gpu.active = self.active.min(gpu.sets.len().saturating_sub(1));
             gpu.hidden = self.hidden.clone();
             gpu.show_wire = self.wireframe;
+            gpu.fxaa = self.fxaa;
             gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
         }
         Vec::new()
@@ -957,8 +981,15 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         resources: &egui_wgpu::CallbackResources,
     ) {
         let Some(gpu) = resources.get::<ViewportGpu>() else { return };
-        let Some(off) = &gpu.offscreen else { return };
-        pass.set_pipeline(&gpu.blit);
+        gpu.blit_into(pass);
+    }
+}
+
+impl ViewportGpu {
+    /// Copy the finished frame into `pass`, smoothed if FXAA is on.
+    fn blit_into(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(off) = &self.offscreen else { return };
+        pass.set_pipeline(if self.fxaa { &self.blit_fxaa } else { &self.blit });
         pass.set_bind_group(0, &off.blit_bind, &[]);
         pass.draw(0..3, 0..1);
     }
@@ -2646,6 +2677,56 @@ mod tests {
         rig.globals.env = [0.0, 1.0, 0.0, 0.0];
         rig.run(&doc, &[]);
         assert_eq!(corner(&rig), plain);
+    }
+
+    /// FXAA smooths the silhouette of the model and leaves flat areas as they were.
+    #[test]
+    fn fxaa_smooths_edges_only() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let doc = Document::with_default_material();
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let shown = |rig: &mut Rig| {
+            let tex = rig.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("blit_target"),
+                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: COLOR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            let mut enc = rig.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("blit_test"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                rig.gpu.blit_into(&mut pass);
+            }
+            rig.queue.submit([enc.finish()]);
+            crate::gpu_io::read_texture(&rig.device, &rig.queue, &tex, SIZE, 4)
+        };
+        rig.gpu.fxaa = false;
+        let plain = shown(&mut rig);
+        rig.gpu.fxaa = true;
+        let smooth = shown(&mut rig);
+        let changed = plain.chunks_exact(4).zip(smooth.chunks_exact(4)).filter(|(a, b)| a != b).count();
+        assert!(changed > 100, "FXAA should soften the edge of the sphere, only {changed} pixels changed");
+        assert!(changed < (SIZE * SIZE) as usize / 6, "FXAA touched too much of the frame: {changed}");
+        let i = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        assert_eq!(plain[i..i + 4], smooth[i..i + 4], "flat areas stay as they were");
+        assert_eq!(plain[..4], smooth[..4], "so does the empty corner");
     }
 
     /// Preview modes: 0 shaded, 1 the map as-is, 2 shaded with the map darkening the ambient light.

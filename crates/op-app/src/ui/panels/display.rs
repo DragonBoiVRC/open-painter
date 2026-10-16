@@ -50,6 +50,7 @@ impl App {
                 });
             });
             ui.checkbox(&mut self.env.show_transparency, "Show opacity (see-through paint)").on_hover_text("See-through paint is drawn as dithered holes; switch off to see the model solid");
+            ui.checkbox(&mut self.env.fxaa, "Smooth edges (anti-aliasing)");
             super::slider_row(ui, "Rotation", &mut self.env.rotation, 0.0..=360.0);
             super::slider_row(ui, "Exposure", &mut self.env.exposure, -3.0..=3.0);
             super::slider_row(ui, "Key light", &mut self.env.light, 0.0..=3.0);

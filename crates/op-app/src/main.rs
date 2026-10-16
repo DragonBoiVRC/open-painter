@@ -111,11 +111,13 @@ struct Environment {
     tonemap: u32,
     /// Show see-through (low opacity) paint as dithered holes.
     show_transparency: bool,
+    /// Smooth jagged edges in the 3D view (FXAA).
+    fxaa: bool,
 }
 
 impl Default for Environment {
     fn default() -> Self {
-        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true }
+        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true, fxaa: true }
     }
 }
 
