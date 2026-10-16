@@ -108,7 +108,9 @@ impl App {
                             self.channels.metallic = s.metallic;
                             self.channels.roughness = s.roughness;
                             self.channels.height_value = s.height;
-                            self.status = "Picked the colour, metallic, roughness and height under the cursor.".into();
+                            self.channels.emissive_color = s.emissive;
+                            self.channels.opacity_value = s.opacity;
+                            self.status = "Picked the colour, metallic, roughness, height, emissive colour and opacity under the cursor.".into();
                         } else {
                             self.status = "Picked the colour under the cursor.".into();
                         }

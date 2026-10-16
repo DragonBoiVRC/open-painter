@@ -49,7 +49,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Fill (G) fills one flat face, a UV island, a piece of the mesh or a whole texture set with a click, using the paint colour and channels (or white on a mask; Shift+click for black).
 - Camera: view presets (front, back, left, right, top, bottom) and a field-of-view slider are in the viewport bar and Display Settings.
 - Per-channel blending: under Properties - Layer, Channels, each of base colour, metallic, roughness, height, emissive, opacity and (for fill layers) normal can be switched off, blended differently from the layer, or made more transparent.
-- Material picker: I picks the colour under the cursor, Shift+I picks colour, metallic, roughness and height.
+- Material picker: I picks the colour under the cursor, Shift+I picks colour, metallic, roughness, height, emissive colour and opacity.
 - Emissive is a real channel: paint it with the brush (Properties - Brush, Paint channels), give fill layers an emissive colour or texture, view it with C, and it glows in the viewport. It is exported as its own map (Emissive/Emission) in the built-in presets when something glows, and Substance export presets that ask for Emissive now read it.
 - Fill layers can project their textures: triplanar or planar X/Y/Z (Properties - Layer, Texture placement). The projection reads the baked Position and World space normal maps, so bake those first; without them the UV layout is used. Tiling 1 spans the model's longest side, and normal maps are not projected.
 - Wireframe: W (or the polygon button in the viewport bar) draws the mesh edges over the model.

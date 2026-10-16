@@ -386,11 +386,15 @@ impl App {
             let cover = t[1] as f32 / 255.0;
             if cover <= 0.0 { fallback } else { (t[0] as f32 / 255.0 / cover).clamp(0.0, 1.0) }
         };
+        let glow = read(&paint.output.emissive, 8);
+        let g = |k: usize| crate::gpu_io::f16_to_f32(u16::from_le_bytes([glow[k * 2], glow[k * 2 + 1]]));
         Some(SurfaceSample {
             color: lin.map(|v| linear_to_srgb(v.clamp(0.0, 1.0))),
             metallic: scalar(&paint.output.metal, op_core::FALLBACK_METALLIC),
             roughness: scalar(&paint.output.rough, op_core::FALLBACK_ROUGHNESS),
             height: scalar(&paint.output.height, 0.5),
+            emissive: [g(0), g(1), g(2)].map(|v| linear_to_srgb(v.clamp(0.0, 1.0))),
+            opacity: scalar(&paint.output.opacity, 1.0),
         })
     }
 
@@ -535,4 +539,7 @@ pub(crate) struct SurfaceSample {
     pub metallic: f32,
     pub roughness: f32,
     pub height: f32,
+    /// sRGB.
+    pub emissive: [f32; 3],
+    pub opacity: f32,
 }
