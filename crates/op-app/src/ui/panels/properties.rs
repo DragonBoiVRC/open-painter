@@ -39,15 +39,17 @@ impl App {
             let is_fill = matches!(node.kind, NodeKind::Fill(_));
             egui::CollapsingHeader::new("Channels").id_salt("layer_channels").default_open(!node.channels.is_default()).show(ui, |ui| {
                 let layer_blend = node.blend;
-                let rows: [(&str, &mut op_core::ChannelMix, bool); 5] = [
+                let rows: [(&str, &mut op_core::ChannelMix, bool); 7] = [
                     ("Base color", &mut node.channels.base, true),
                     ("Metallic", &mut node.channels.metallic, true),
                     ("Roughness", &mut node.channels.roughness, true),
                     ("Height", &mut node.channels.height, true),
+                    ("Emissive", &mut node.channels.emissive, true),
+                    ("Opacity", &mut node.channels.opacity, true),
                     ("Normal", &mut node.channels.normal, false),
                 ];
                 for (i, (label, mix, has_blend)) in rows.into_iter().enumerate() {
-                    if i == 4 && !is_fill {
+                    if i == 6 && !is_fill {
                         break;
                     }
                     ui.push_id(i, |ui| {
