@@ -184,6 +184,8 @@ pub struct ViewportGpu {
     pub(crate) dummy_uv: wgpu::Texture,
     blit: wgpu::RenderPipeline,
     blit_fxaa: wgpu::RenderPipeline,
+    /// The format the final picture is drawn in (the window's).
+    target_format: wgpu::TextureFormat,
     /// Smooth the edges of the finished picture (FXAA).
     pub fxaa: bool,
     blit_layout: wgpu::BindGroupLayout,
@@ -590,6 +592,7 @@ impl ViewportGpu {
             dummy_uv,
             blit,
             blit_fxaa,
+            target_format,
             fxaa: false,
             blit_layout,
             sampler,
@@ -1140,6 +1143,46 @@ impl ViewportGpu {
     pub fn screenshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(u32, u32, Vec<u8>)> {
         let off = self.offscreen.as_ref()?;
         let [w, h] = off.size;
+        // With anti-aliasing on, run the same final pass the screen gets, so the file matches what is seen.
+        let plain_rgba = matches!(self.target_format, wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm);
+        if self.fxaa && plain_rgba {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("screenshot"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            let mut enc = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("screenshot_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                self.blit_into(&mut pass);
+            }
+            queue.submit([enc.finish()]);
+            let mut px = crate::gpu_io::read_texture_rect(device, queue, &tex, w, h, 4);
+            if self.target_format == wgpu::TextureFormat::Bgra8Unorm {
+                for p in px.chunks_exact_mut(4) {
+                    p.swap(0, 2);
+                }
+            }
+            return Some((w, h, px));
+        }
         Some((w, h, crate::gpu_io::read_texture_rect(device, queue, &off.color, w, h, 4)))
     }
 
@@ -3167,6 +3210,33 @@ mod tests {
         let back = op_image::decode(&op_image::encode_png(w, h, &rgba).unwrap()).unwrap();
         assert_eq!((back.width, back.height), (w, h));
         assert_eq!(back.rgba8[i..i + 3], rgba[i..i + 3]);
+        // With anti-aliasing on the saved picture has the smoothed edges the screen shows.
+        rig.gpu.fxaa = true;
+        let (_, _, smooth) = rig.gpu.screenshot(&rig.device, &rig.queue).expect("a frame");
+        let changed = rgba.chunks_exact(4).zip(smooth.chunks_exact(4)).filter(|(a, b)| a != b).count();
+        assert!(changed > 100, "the screenshot should include FXAA: {changed} pixels differ");
+        assert_eq!(smooth[i..i + 4], rgba[i..i + 4], "flat areas are untouched");
+    }
+
+    /// Reading one texel gives the same bytes as reading the whole texture.
+    #[test]
+    fn a_single_texel_read_matches_the_full_read() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let stamp = dab(SIZE as f32 / 2.0, 30.0, 0.7, [1.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let tex = &rig.gpu.paint().output.base;
+        let full = crate::gpu_io::read_texture(&rig.device, &rig.queue, tex, SIZE, 8);
+        let (u, v) = sphere_uv(rig.front);
+        let (x, y) = (((u * SIZE as f32) as u32).min(SIZE - 1), ((v * SIZE as f32) as u32).min(SIZE - 1));
+        let one = crate::gpu_io::read_texel(&rig.device, &rig.queue, tex, x, y, 8);
+        let i = ((y * SIZE + x) * 8) as usize;
+        assert_eq!(one, full[i..i + 8]);
+        assert!(one.iter().any(|b| *b != 0), "the texel holds paint");
+        let corner = crate::gpu_io::read_texel(&rig.device, &rig.queue, tex, SIZE - 1, SIZE - 1, 8);
+        assert_eq!(corner, full[full.len() - 8..]);
     }
 
     /// FXAA smooths the silhouette of the model and leaves flat areas as they were.

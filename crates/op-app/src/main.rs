@@ -450,6 +450,8 @@ struct App {
     /// An HDRI being read in the background, and the one in use.
     hdri_rx: Option<Receiver<Result<(String, op_image::hdr::HdrImage), String>>>,
     hdri_name: Option<String>,
+    /// The environments folder as last listed, and when.
+    hdri_files: Option<(Instant, Vec<String>)>,
     /// Groups folded shut in the layers panel.
     collapsed: std::collections::HashSet<NodeId>,
     /// Layer being renamed in place, with its draft name.
@@ -593,7 +595,14 @@ impl App {
         let (mut user_brushes, brush_warnings) = files::load_user_brushes(&files::brushes_dir());
         definition_warnings.extend(brush_warnings);
         // A saved brush never hides a built-in one of the same name.
-        user_brushes.retain(|(n, _)| !ui::panels::builtin_brush_names().contains(&n.as_str()));
+        let builtin = ui::panels::builtin_brush_names();
+        user_brushes.retain(|(n, _)| {
+            let clash = builtin.contains(&n.as_str());
+            if clash {
+                definition_warnings.push(format!("brush '{n}' has the name of a built-in brush; rename its file's \"name\" to use it"));
+            }
+            !clash
+        });
         let mut smart_materials = builtin_smart_materials();
         for mut m in user_smart {
             // A user file never replaces a built-in one silently.
@@ -623,6 +632,7 @@ impl App {
             import_rx: None,
             hdri_rx: None,
             hdri_name: None,
+            hdri_files: None,
             collapsed: Default::default(),
             renaming: None,
             target: Target::Content,

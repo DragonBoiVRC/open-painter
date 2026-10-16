@@ -644,13 +644,19 @@ impl App {
     pub(crate) fn delete_user_brush(&mut self, name: &str) {
         if let Some(i) = self.user_brushes.iter().position(|(n, _)| n == name) {
             self.user_brushes.remove(i);
-            let _ = crate::files::delete_user_brush(&crate::files::brushes_dir(), name);
-            self.status = format!("Deleted the brush '{name}'.");
+            self.status = match crate::files::delete_user_brush(&crate::files::brushes_dir(), name) {
+                Ok(()) => format!("Deleted the brush '{name}'."),
+                Err(e) => format!("Removed '{name}' from the shelf but could not delete its file ({e}); it will come back next time."),
+            };
         }
     }
 
     /// Keep the current brush as a preset on the shelf and in the data folder.
     pub(crate) fn save_user_brush(&mut self, name: String) {
+        if builtin_brush_names().contains(&name.as_str()) {
+            self.status = format!("'{name}' is the name of a built-in brush: pick another name.");
+            return;
+        }
         let preset = BrushPreset::of(&self.brush);
         match crate::files::save_user_brush(&crate::files::brushes_dir(), &name, &preset) {
             Ok(path) => {

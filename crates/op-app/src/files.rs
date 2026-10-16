@@ -235,10 +235,16 @@ struct BrushFile {
     brush: crate::ui::panels::BrushPreset,
 }
 
-/// The file name a brush is kept under: its name with anything odd replaced.
+/// The file name a brush is kept under: its name with anything odd replaced, plus a short hash of the
+/// exact name so that `a/b` and `a_b` never share a file.
 fn brush_file_name(name: &str) -> String {
+    let name = name.trim();
     let stem: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "-_ ".contains(c) { c } else { '_' }).collect();
-    format!("{}.json", stem.trim())
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    format!("{}-{h:08x}.json", stem.trim())
 }
 
 /// Save a user brush preset into `dir`; returns where it went.
@@ -287,10 +293,16 @@ mod brush_tests {
         let (got, warnings) = load_user_brushes(dir.path());
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(got, vec![("My / brush".to_string(), b)]);
+        // Names that sanitise alike still get files of their own.
+        save_user_brush(dir.path(), "My _ brush", &BrushPreset::BASE).unwrap();
+        save_user_brush(dir.path(), "My / brush", &b).unwrap();
+        assert_eq!(load_user_brushes(dir.path()).0.len(), 2, "two brushes, two files");
+        delete_user_brush(dir.path(), "My _ brush").unwrap();
+        assert_eq!(load_user_brushes(dir.path()).0, vec![("My / brush".to_string(), b)]);
 
         // A file written before stroke opacity, lazy mouse and pressure existed.
         std::fs::write(
-            dir.path().join("Old.json"),
+            dir.path().join(brush_file_name("Old")),
             r#"{"name":"Old","brush":{"radius_pts":20.0,"hardness":0.5,"opacity":1.0,"spacing":0.15,"shape":0,"angle":0.0,"follow_path":false,"angle_jitter":0.0,"size_jitter":0.0,"position_jitter":0.0,"opacity_jitter":0.0}}"#,
         )
         .unwrap();

@@ -91,6 +91,12 @@ pub fn isolate(hidden: &HashSet<usize>, i: usize, count: usize) -> HashSet<usize
 /// longest side measured from the model's minimum corner.
 pub type BakeFrame = ([f32; 3], [f32; 3]);
 
+/// The frame of a part of the model (its bounding box) inside the whole model's box.
+pub fn bake_frame_of(whole: (glam::Vec3, glam::Vec3), part: (glam::Vec3, glam::Vec3)) -> BakeFrame {
+    let largest = (whole.1 - whole.0).max_element().max(1e-6);
+    (((part.0 - whole.0) / largest).to_array(), ((part.1 - part.0) / largest).to_array())
+}
+
 /// The op that gives a set's paint store its baked normal map and the maps projected fills read
 /// (or removes them).
 pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32, frame: BakeFrame) -> PaintOp {
@@ -134,13 +140,8 @@ impl App {
         } else {
             self.mesh.extract_set(set)
         };
-        let (mlo, mhi) = self.mesh.bounds();
-        let largest = (mhi - mlo).max_element().max(1e-6);
         match low {
-            Some(m) => {
-                let (lo, hi) = m.bounds();
-                (((lo - mlo) / largest).to_array(), ((hi - lo) / largest).to_array())
-            }
+            Some(m) => bake_frame_of(self.mesh.bounds(), m.bounds()),
             None => ([0.0; 3], [1.0; 3]),
         }
     }
@@ -378,11 +379,8 @@ impl App {
             return None;
         }
         let (x, y) = (((uv[0] * size as f32) as u32).min(size - 1), ((uv[1] * size as f32) as u32).min(size - 1));
-        let read = |tex: &eframe::wgpu::Texture, bpp: u32| {
-            let texels = crate::gpu_io::read_texture(&self.render_state.device, &self.render_state.queue, tex, size, bpp);
-            let i = ((y * size + x) * bpp) as usize;
-            texels[i..i + bpp as usize].to_vec()
-        };
+        // One texel per channel, not whole textures.
+        let read = |tex: &eframe::wgpu::Texture, bpp: u32| crate::gpu_io::read_texel(&self.render_state.device, &self.render_state.queue, tex, x as u32, y as u32, bpp);
         let base = read(&paint.output.base, 8);
         let c = |k: usize| crate::gpu_io::f16_to_f32(u16::from_le_bytes([base[k * 2], base[k * 2 + 1]]));
         // Premultiplied over the fallback colour the viewport shows where nothing is painted.
@@ -550,4 +548,24 @@ pub(crate) struct SurfaceSample {
     /// sRGB.
     pub emissive: [f32; 3],
     pub opacity: f32,
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::bake_frame_of;
+    use glam::Vec3;
+
+    #[test]
+    fn a_part_is_placed_inside_the_whole_in_units_of_its_longest_side() {
+        let whole = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 4.0, 2.0));
+        let (offset, extent) = bake_frame_of(whole, (Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 4.0, 2.0)));
+        assert_eq!(offset, [0.5, 0.0, 0.0]);
+        assert_eq!(extent, [0.5, 0.4, 0.2]);
+        // The whole thing is its own frame: origin zero, longest side one.
+        let (o, e) = bake_frame_of(whole, whole);
+        assert_eq!((o, e), ([0.0; 3], [1.0, 0.4, 0.2]));
+        // A model that does not start at the origin is measured from its own corner.
+        let shifted = (Vec3::new(-3.0, 2.0, 1.0), Vec3::new(7.0, 6.0, 3.0));
+        assert_eq!(bake_frame_of(shifted, (Vec3::new(2.0, 2.0, 1.0), Vec3::new(7.0, 6.0, 3.0))).0, [0.5, 0.0, 0.0]);
+    }
 }

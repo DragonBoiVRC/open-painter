@@ -33,6 +33,27 @@ pub fn read_texture(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Text
     out
 }
 
+/// Copy one texel of a texture to the CPU: `bpp` bytes.
+pub fn read_texel(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture, x: u32, y: u32, bpp: u32) -> Vec<u8> {
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("texel_readback"),
+        size: wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT), rows_per_image: Some(1) } },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    queue.submit([enc.finish()]);
+    buf.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("buffer map failed"));
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll failed");
+    let mapped = buf.slice(..).get_mapped_range().expect("mapped range");
+    mapped[..bpp as usize].to_vec()
+}
+
 /// Copy a texture of any size to the CPU: exactly `width * height * bpp` bytes, tightly packed.
 pub fn read_texture_rect(device: &wgpu::Device, queue: &wgpu::Queue, tex: &wgpu::Texture, width: u32, height: u32, bpp: u32) -> Vec<u8> {
     let unpadded = width * bpp;

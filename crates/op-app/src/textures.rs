@@ -312,8 +312,17 @@ fn hdri_file_name(name: &str) -> String {
 }
 
 impl App {
-    /// The environments saved in the library folder, by file name.
-    pub(crate) fn hdri_library(&self) -> Vec<String> {
+    /// The environments saved in the library folder, by file name. The folder is only re-read every
+    /// few seconds (and after an import), not on every frame.
+    pub(crate) fn hdri_library(&mut self) -> Vec<String> {
+        let fresh = self.hdri_files.as_ref().is_some_and(|(at, _)| at.elapsed() < std::time::Duration::from_secs(3));
+        if !fresh {
+            self.hdri_files = Some((std::time::Instant::now(), self.scan_hdri_library()));
+        }
+        self.hdri_files.as_ref().map(|(_, v)| v.clone()).unwrap_or_default()
+    }
+
+    fn scan_hdri_library(&self) -> Vec<String> {
         let Ok(rd) = std::fs::read_dir(files::environments_dir()) else { return Vec::new() };
         let mut names: Vec<String> = rd
             .flatten()
@@ -362,6 +371,7 @@ impl App {
                 self.hdri_rx = None;
                 match result {
                     Ok((name, img)) => {
+                        self.hdri_files = None; // a new file may have joined the library
                         let mut renderer = self.render_state.renderer.write();
                         if let Some(gpu) = renderer.callback_resources.get_mut::<ViewportGpu>() {
                             gpu.set_environment(&self.render_state.device, &self.render_state.queue, Some(&img));

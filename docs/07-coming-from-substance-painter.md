@@ -63,7 +63,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - A strip of recently used colours sits under the colour swatch in Properties - Brush.
 - File > Save viewport image (F12) writes the 3D view as it is to a PNG next to the project.
 - Changing the resolution in Texture Set Settings resamples the paint and masks instead of clearing them (undo history and baked maps are cleared).
-- Hide parts (7): click a face, UV island, mesh part or texture set to hide it so you can paint what is behind (Shift+click shows it, "Show all parts" resets). Hidden parts are a view setting and are not saved with the project.
+- Hide parts (7): click a face, UV island, mesh part or texture set to hide it so you can paint what is behind (Shift+click shows it, "Show all parts" resets). Hidden parts are a view setting and are not saved with the project. They are kept in UV space, so parts that share UV space (mirrored UVs) hide together.
 - Mask view: the backslash key shows the selected layer's mask on the model as grey (white reveals, black hides); press it again to go back.
 - Your lighting and display choices, including the HDRI in use, are remembered between sessions.
 - Ambient occlusion (screen space) in Display Settings darkens creases and where parts meet; it is a viewport look only.
