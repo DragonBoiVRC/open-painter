@@ -272,6 +272,8 @@ pub struct FillMaps {
     /// Tangent-space normal map; combined with painted height and the baked normal map.
     #[serde(default)]
     pub normal: Option<TexRef>,
+    #[serde(default)]
+    pub emissive: Option<TexRef>,
 }
 
 /// The channels a texture can feed.
@@ -282,10 +284,11 @@ pub enum Slot {
     Roughness,
     Height,
     Normal,
+    Emissive,
 }
 
 impl Slot {
-    pub const ALL: [Slot; 5] = [Slot::BaseColor, Slot::Metallic, Slot::Roughness, Slot::Height, Slot::Normal];
+    pub const ALL: [Slot; 6] = [Slot::BaseColor, Slot::Metallic, Slot::Roughness, Slot::Height, Slot::Normal, Slot::Emissive];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -294,6 +297,7 @@ impl Slot {
             Slot::Roughness => "Roughness",
             Slot::Height => "Height",
             Slot::Normal => "Normal",
+            Slot::Emissive => "Emissive",
         }
     }
 }
@@ -306,6 +310,7 @@ impl FillMaps {
             Slot::Roughness => self.roughness.as_ref(),
             Slot::Height => self.height.as_ref(),
             Slot::Normal => self.normal.as_ref(),
+            Slot::Emissive => self.emissive.as_ref(),
         }
     }
 
@@ -316,6 +321,7 @@ impl FillMaps {
             Slot::Roughness => self.roughness = tex,
             Slot::Height => self.height = tex,
             Slot::Normal => self.normal = tex,
+            Slot::Emissive => self.emissive = tex,
         }
     }
 
@@ -380,6 +386,9 @@ pub struct FillParams {
     /// Height in 0..1 where 0.5 is flat; the normal map is derived from the composited height.
     #[serde(default)]
     pub height: Option<f32>,
+    /// sRGB colour of light the surface gives off.
+    #[serde(default)]
+    pub emissive: Option<[f32; 3]>,
 }
 
 /// A procedural source for a mask. The template's parameters live in `params` by name;
@@ -606,6 +615,7 @@ pub struct ChannelMixes {
     pub metallic: ChannelMix,
     pub roughness: ChannelMix,
     pub height: ChannelMix,
+    pub emissive: ChannelMix,
     /// The normal map a fill layer brings along; its blend mode does not matter (normals replace).
     pub normal: ChannelMix,
 }
@@ -615,9 +625,9 @@ impl ChannelMixes {
         *self == Self::default()
     }
 
-    /// The four blended channels in the order the compositor uses: base, metallic, roughness, height.
-    pub fn blended(&self) -> [&ChannelMix; 4] {
-        [&self.base, &self.metallic, &self.roughness, &self.height]
+    /// The blended channels in the order the compositor uses: base, metallic, roughness, height, emissive.
+    pub fn blended(&self) -> [&ChannelMix; 5] {
+        [&self.base, &self.metallic, &self.roughness, &self.height, &self.emissive]
     }
 }
 
@@ -1300,10 +1310,10 @@ mod tests {
             assert!(m.get(slot).is_none());
             m.set(slot, Some(TexRef::new(format!("{i:032x}"))));
         }
-        assert_eq!(m.iter().count(), 5);
+        assert_eq!(m.iter().count(), 6);
         assert_eq!(m.get(Slot::Height).unwrap().id, format!("{:032x}", 3));
         m.set(Slot::Height, None);
-        assert_eq!(m.iter().count(), 4);
+        assert_eq!(m.iter().count(), 5);
         assert!(!m.is_empty());
     }
 

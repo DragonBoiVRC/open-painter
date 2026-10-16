@@ -21,6 +21,8 @@ struct Globals {
 @group(1) @binding(4) var paint_normal: texture_2d<f32>;
 // UV offset of the tile this draw shows (0, 0 unless UV tiles are in use).
 @group(1) @binding(5) var<uniform> tile: vec4<f32>;
+// Emitted light, premultiplied linear colour (black where nothing is painted).
+@group(1) @binding(6) var paint_emissive: texture_2d<f32>;
 
 // Baked map preview. light_dir.w selects the mode: 0 shaded, 1 show the map as-is,
 // 2 shaded with the map (ambient occlusion) multiplied into the ambient light, 3 the painted
@@ -178,6 +180,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     }
     let ao = select(1.0, pv.r, g.light_dir.w >= 1.5 && g.light_dir.w < 2.5);
     let pb = textureSample(paint_base, paint_samp, uv_t);
+    let pe = textureSample(paint_emissive, paint_samp, uv_t);
     let pm = textureSample(paint_metal, paint_samp, uv_t);
     let pr = textureSample(paint_rough, paint_samp, uv_t);
     let metallic = pm.r + g.params.x * (1.0 - pm.g);
@@ -190,6 +193,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         let mode = i32(g.light_dir.w + 0.5);
         if (mode == 4) { return vec4<f32>(to_srgb(albedo), 1.0); }
         if (mode == 5) { return vec4<f32>(vec3<f32>(roughness), 1.0); }
+        if (mode == 7) { return vec4<f32>(to_srgb(pe.rgb), 1.0); }
         return vec4<f32>(vec3<f32>(metallic), 1.0);
     }
 
@@ -210,6 +214,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let spec_env = environment(r, roughness);
     let f_amb = fresnel_schlick(n_dot_v, f0) * (1.0 - roughness * 0.7);
     color += (kd * albedo * diffuse_env + spec_env * f_amb) * ao;
+    color += pe.rgb;
 
     return vec4<f32>(to_srgb(tonemap(color * g.env.y)), 1.0);
 }

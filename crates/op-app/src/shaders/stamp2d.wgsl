@@ -10,6 +10,7 @@ struct VsIn {
     @location(5) values: vec4<f32>,
     @location(6) enables: vec4<f32>,
     @location(7) shape: vec4<f32>,
+    @location(8) emissive: vec4<f32>,
 };
 
 struct VsOut {
@@ -20,6 +21,7 @@ struct VsOut {
     @location(3) @interpolate(flat) values: vec4<f32>,
     @location(4) @interpolate(flat) enables: vec4<f32>,
     @location(5) @interpolate(flat) shape: vec4<f32>,
+    @location(6) @interpolate(flat) emissive: vec4<f32>,
 };
 
 @vertex
@@ -39,6 +41,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.values = v.values;
     o.enables = v.enables;
     o.shape = v.shape;
+    o.emissive = v.emissive;
     return o;
 }
 
@@ -78,6 +81,7 @@ struct FsOut {
     @location(1) metal: vec4<f32>,
     @location(2) rough: vec4<f32>,
     @location(3) height: vec4<f32>,
+    @location(4) emissive: vec4<f32>,
 };
 
 fn stamp_alpha(i: VsOut) -> f32 {
@@ -100,6 +104,8 @@ fn fs_main(i: VsOut) -> FsOut {
     o.metal = vec4<f32>(i.values.x * am, am, 0.0, am);
     o.rough = vec4<f32>(i.values.y * ar, ar, 0.0, ar);
     o.height = vec4<f32>(i.values.w * ah, ah, 0.0, ah);
+    let ae = a * i.emissive.w;
+    o.emissive = vec4<f32>(i.emissive.rgb * ae, ae);
     return o;
 }
 
@@ -121,5 +127,6 @@ fn fs_erase(i: VsOut) -> FsOut {
     o.metal = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.y);
     o.rough = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.z);
     o.height = vec4<f32>(0.0, 0.0, 0.0, a * i.enables.w);
+    o.emissive = vec4<f32>(0.0, 0.0, 0.0, a * i.emissive.w);
     return o;
 }

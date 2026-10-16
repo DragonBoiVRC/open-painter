@@ -141,6 +141,10 @@ impl App {
             ui.add_enabled_ui(self.channels.metal, |ui| slider_row(ui, "Metallic", &mut self.channels.metallic, 0.0..=1.0));
             ui.checkbox(&mut self.channels.rough, "Roughness");
             ui.add_enabled_ui(self.channels.rough, |ui| slider_row(ui, "Roughness", &mut self.channels.roughness, 0.0..=1.0));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.channels.emissive, "Emissive");
+                ui.color_edit_button_rgb(&mut self.channels.emissive_color);
+            });
             ui.checkbox(&mut self.channels.height, "Height (normal map)");
             ui.add_enabled_ui(self.channels.height, |ui| slider_row(ui, "Height", &mut self.channels.height_value, 0.0..=1.0).on_hover_text("0 digs in, 0.5 is flat, 1 raises"));
         });

@@ -7,7 +7,7 @@
 
 use crate::images::{dummy_image, GpuImage, SharedImages};
 use crate::normal_gpu::NORMAL_FORMAT;
-use crate::paint::{Layer, NodeGpu, BASE_FORMAT, VALUE_FORMAT};
+use crate::paint::{Layer, NodeGpu, BASE_FORMAT, VALUE_FORMAT, V_NORMAL};
 use eframe::egui_wgpu::wgpu::{self, util::DeviceExt};
 use op_core::{srgb_to_linear, Document, Filter, FillParams, Node, NodeId, NodeKind, Slot};
 use std::collections::HashMap;
@@ -30,8 +30,10 @@ struct Params {
     chan_mode: [u32; 4],
     /// The opacity multiplier of each of those channels (0 when switched off).
     chan_k: [f32; 4],
-    /// x: the opacity multiplier of the normal map.
+    /// x: the opacity multiplier of the normal map; y: of the emissive channel; z: its blend mode.
     chan_n: [f32; 4],
+    /// Colour of an emissive fill (linear) and, in `w`, 1 if the fill writes it.
+    emissive: [f32; 4],
 }
 
 #[repr(C)]
@@ -51,6 +53,8 @@ enum Src<'a> {
 
 pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
+    emissive_pipeline: wgpu::RenderPipeline,
+    emissive_layout: wgpu::BindGroupLayout,
     filter_pipeline: wgpu::RenderPipeline,
     filter_layout: wgpu::BindGroupLayout,
     layout: wgpu::BindGroupLayout,
@@ -139,6 +143,40 @@ impl Compositor {
             multiview_mask: None,
             cache: None,
         });
+        // The emissive channel gets its own pass and bindings (see `fs_emissive`).
+        let mut emissive_entries = vec![entries[0]];
+        emissive_entries.push(tex(7));
+        emissive_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 17,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+        emissive_entries.push(tex(18));
+        emissive_entries.push(tex(19));
+        emissive_entries.push(image_tex(20));
+        let emissive_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("composite_emissive_layout"), entries: &emissive_entries });
+        let emissive_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite_emissive_pl"),
+            bind_group_layouts: &[Some(&emissive_layout)],
+            immediate_size: 0,
+        });
+        let emissive_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite_emissive"),
+            layout: Some(&emissive_pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_emissive"),
+                compilation_options: Default::default(),
+                targets: &[target(BASE_FORMAT)],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let filter_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -155,7 +193,7 @@ impl Compositor {
             ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
             count: None,
         }];
-        filter_entries.extend((1..=9).map(filter_tex));
+        filter_entries.extend((1..=11).map(filter_tex));
         let filter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("filter_layout"), entries: &filter_entries });
         let filter_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/filter.wgsl"));
         let filter_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -171,7 +209,7 @@ impl Compositor {
                 module: &filter_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(NORMAL_FORMAT)],
+                targets: &[target(BASE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(VALUE_FORMAT), target(BASE_FORMAT), target(NORMAL_FORMAT)],
             }),
             primitive: Default::default(),
             depth_stencil: None,
@@ -181,6 +219,8 @@ impl Compositor {
         });
         Self {
             pipeline,
+            emissive_pipeline,
+            emissive_layout,
             filter_pipeline,
             filter_layout,
             layout,
@@ -341,11 +381,13 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&av[1]) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&av[2]) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&av[3]) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&av[4]) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&av[V_NORMAL]) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&bv[0]) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&bv[1]) },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&bv[2]) },
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&bv[3]) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&av[4]) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&bv[4]) },
             ],
         });
         let dv = dst.views();
@@ -388,7 +430,7 @@ impl Compositor {
         };
         // Images for the fill's textured channels. A channel whose image is not in the library is
         // simply not textured, so a missing file never breaks the stack.
-        let mut slots: [Option<std::sync::Arc<GpuImage>>; 5] = Default::default();
+        let mut slots: [Option<std::sync::Arc<GpuImage>>; 6] = Default::default();
         let (mut tex_bits, mut invert_bits, mut flip) = (0u32, 0u32, 0u32);
         let mut xf = ([1.0f32, 1.0, 0.0, 0.0], [1.0f32, 0.0]);
         if let (Src::Fill(f), Some(lib)) = (&src, &self.images) {
@@ -414,9 +456,16 @@ impl Compositor {
             color: [color[0], color[1], color[2], 0.0],
             vals: [node.opacity, metal, rough, height],
             mode: [is_fill, mask.is_some() as u32, node.blend.index(), bits],
-            chan_mode: node.channels.blended().map(|c| c.mode(node.blend).index()),
-            chan_k: node.channels.blended().map(|c| c.factor()),
-            chan_n: [node.channels.normal.factor(), 0.0, 0.0, 0.0],
+            chan_mode: [node.channels.base, node.channels.metallic, node.channels.roughness, node.channels.height].map(|c| c.mode(node.blend).index()),
+            chan_k: [node.channels.base, node.channels.metallic, node.channels.roughness, node.channels.height].map(|c| c.factor()),
+            chan_n: [node.channels.normal.factor(), node.channels.emissive.factor(), node.channels.emissive.mode(node.blend).index() as f32, 0.0],
+            emissive: match &src {
+                Src::Fill(f) => f.emissive.map_or([0.0; 4], |c| {
+                    let l = c.map(srgb_to_linear);
+                    [l[0], l[1], l[2], 1.0]
+                }),
+                Src::Tex(_) => [0.0; 4],
+            },
             tex: [tex_bits, invert_bits, flip, (!node.adjust.is_identity()) as u32],
             xf: xf.0,
             xf2: [xf.1[0], xf.1[1], self.tile[0], self.tile[1]],
@@ -445,7 +494,7 @@ impl Compositor {
         let img_view = |n: usize| -> &wgpu::TextureView {
             match &slots[n] {
                 // Base colour is read as sRGB; every other slot is data.
-                Some(i) if n == 0 => &i.srgb,
+                Some(i) if n == 0 || n == 5 => &i.srgb,
                 Some(i) => &i.linear,
                 None => &self.dummy_image.linear,
             }
@@ -464,8 +513,8 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&mv) },
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&bk[3]) },
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&sv[3]) },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&bk[4]) },
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&sv[4]) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&bk[V_NORMAL]) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&sv[V_NORMAL]) },
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(img_view(0)) },
                 wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(img_view(1)) },
                 wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(img_view(2)) },
@@ -476,19 +525,44 @@ impl Compositor {
         });
         let dv = dst.views();
         let ops = wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store };
-        let attachments = dv.each_ref().map(|v| {
-            Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops })
+        // base, metallic, roughness, height and the fill normal; the emissive channel follows.
+        let main = [&dv[0], &dv[1], &dv[2], &dv[3], &dv[V_NORMAL]];
+        let attachments = main.map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops }));
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite_pass"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let emissive_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite_emissive_bind"),
+            layout: &self.emissive_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&mv) },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 18, resource: wgpu::BindingResource::TextureView(&bk[4]) },
+                wgpu::BindGroupEntry { binding: 19, resource: wgpu::BindingResource::TextureView(&sv[4]) },
+                wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::TextureView(img_view(5)) },
+            ],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("composite_pass"),
-            color_attachments: &attachments,
+            label: Some("composite_emissive_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &dv[4], depth_slice: None, resolve_target: None, ops })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind, &[]);
+        pass.set_pipeline(&self.emissive_pipeline);
+        pass.set_bind_group(0, &emissive_bind, &[]);
         pass.draw(0..3, 0..1);
     }
 }

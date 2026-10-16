@@ -63,6 +63,8 @@ pub enum BlobKind {
     Rough,
     /// RG8 like the others: (height * coverage, coverage); 0.5 is flat.
     Height,
+    /// RGBA16F, premultiplied, like `Base`: light the surface gives off.
+    Emissive,
     /// R8 mask.
     Mask,
 }
@@ -70,7 +72,7 @@ pub enum BlobKind {
 impl BlobKind {
     pub fn bytes_per_texel(self) -> usize {
         match self {
-            BlobKind::Base => 8,
+            BlobKind::Base | BlobKind::Emissive => 8,
             BlobKind::Metal | BlobKind::Rough | BlobKind::Height => 2,
             BlobKind::Mask => 1,
         }
@@ -82,6 +84,7 @@ impl BlobKind {
             BlobKind::Metal => "metal",
             BlobKind::Rough => "rough",
             BlobKind::Height => "height",
+            BlobKind::Emissive => "emissive",
             BlobKind::Mask => "mask",
         }
     }
@@ -954,7 +957,7 @@ mod tests {
         let mut doc = Document::with_default_material();
         let paint = doc.add(None, None, "Paint", NodeKind::Paint);
         let tile = |seed: u8| {
-            let blobs = [BlobKind::Base, BlobKind::Metal, BlobKind::Rough, BlobKind::Height]
+            let blobs = [BlobKind::Base, BlobKind::Metal, BlobKind::Rough, BlobKind::Height, BlobKind::Emissive]
                 .map(|kind| TextureBlob { node: paint, kind, bytes: vec![seed; expected_len(SIZE, kind)] })
                 .to_vec();
             let mut baked = HashMap::new();

@@ -146,6 +146,10 @@ struct PaintChannels {
     height: bool,
     /// 0 digs, 0.5 is flat, 1 raises.
     height_value: f32,
+    /// Paint emissive light?
+    emissive: bool,
+    /// sRGB colour of the light, and a multiplier on how bright it is (1 is the colour as shown).
+    emissive_color: [f32; 3],
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -235,7 +239,7 @@ struct ExportJob {
     /// UDIM number of the tile, when the set has UV tiles.
     udim: Option<u32>,
     size: u32,
-    planes: [Vec<u8>; 5],
+    planes: [Vec<u8>; 6],
     /// The set's height strength, for deriving its normal map.
     height_strength: f32,
     mesh: Mesh,
@@ -537,6 +541,8 @@ impl App {
                 roughness: 0.2,
                 height: false,
                 height_value: 0.8,
+                emissive: false,
+                emissive_color: [1.0, 0.6, 0.2],
             },
             stroke: Stroke::default(),
             line_anchor: None,
@@ -937,7 +943,7 @@ impl App {
             let result = (|| -> Result<ExportOutcome, String> {
                 let mut total = ExportOutcome::default();
                 for job in jobs {
-                    let [base, metal, rough, height, layer_normal] = &job.planes;
+                    let [base, metal, rough, height, layer_normal, emissive] = &job.planes;
                     let size = job.size;
                     let mut data = TextureSetData::from_composite(size, base, metal, rough).map_err(|e| e.to_string())?;
                     let mut notes = Vec::new();
@@ -954,6 +960,7 @@ impl App {
                         }
                     }
                     data.set_height(height).map_err(|e| e.to_string())?;
+                    data.set_emissive(emissive).map_err(|e| e.to_string())?;
                     data.set_layer_normal(layer_normal).map_err(|e| e.to_string())?;
                     data.compute_normal(job.height_strength);
                     if padding > 0 {
@@ -1478,6 +1485,7 @@ impl App {
                 values: [0.0, 0.0, opacity, 0.0],
                 enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
                 shape,
+                emissive: [0.0, 0.0, 0.0, flag(c.emissive)],
             };
         }
         match target {
@@ -1489,6 +1497,7 @@ impl App {
                 values: [if erase && !self.stroke_limited { 0.0 } else { 1.0 }, 0.0, opacity, 0.0],
                 enables: [0.0; 4],
                 shape,
+                emissive: [0.0; 4],
             },
             Target::Content if erase => Stamp {
                 brush,
@@ -1496,6 +1505,7 @@ impl App {
                 values: [0.0, 0.0, opacity, 0.0],
                 enables: [1.0, 1.0, 1.0, 1.0],
                 shape,
+                emissive: [0.0, 0.0, 0.0, 1.0],
             },
             Target::Content if self.tool == Tool::Project => Stamp {
                 brush,
@@ -1504,6 +1514,7 @@ impl App {
                 // 2 asks the shader for the stencil picture's colour.
                 enables: [2.0, 0.0, 0.0, 0.0],
                 shape,
+                emissive: [0.0; 4],
             },
             Target::Content => {
                 let lin = c.base_color.map(srgb_to_linear);
@@ -1513,6 +1524,10 @@ impl App {
                     values: [c.metallic, c.roughness, opacity, c.height_value],
                     enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
                     shape,
+                    emissive: {
+                        let e = c.emissive_color.map(srgb_to_linear);
+                        [e[0], e[1], e[2], flag(c.emissive)]
+                    },
                 }
             }
         }
@@ -1638,7 +1653,7 @@ impl App {
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
         let lin = c.base_color.map(srgb_to_linear);
         let op = match target {
-            Target::Mask => PaintOp::Fill { layer, target, uvs, color: [0.0; 3], values: [if hide { 0.0 } else { 1.0 }, 0.0, self.brush.opacity, 0.0], enables: [0.0; 4] },
+            Target::Mask => PaintOp::Fill { layer, target, uvs, color: [0.0; 3], values: [if hide { 0.0 } else { 1.0 }, 0.0, self.brush.opacity, 0.0], enables: [0.0; 4], emissive: [0.0; 4] },
             Target::Content => PaintOp::Fill {
                 layer,
                 target,
@@ -1646,6 +1661,10 @@ impl App {
                 color: lin,
                 values: [c.metallic, c.roughness, self.brush.opacity, c.height_value],
                 enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
+                emissive: {
+                    let e = c.emissive_color.map(srgb_to_linear);
+                    [e[0], e[1], e[2], flag(c.emissive)]
+                },
             },
         };
         self.stroke.active = false;
@@ -1871,7 +1890,7 @@ impl App {
                         ("Ctrl + click (clone)", "set the clone source"),
                         ("I / Shift+I", "pick the colour / every channel under the cursor"),
                         ("L", "toggle symmetry"),
-                        ("C", "cycle base color / roughness / metallic views"),
+                        ("C", "cycle base color / roughness / metallic / emissive views"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
                         ("Alt + left drag", "orbit"),
@@ -2190,7 +2209,7 @@ impl App {
             // C steps through the painted channels and back to the lit view.
             let next = match self.view {
                 View::Shaded => View::Channel(0),
-                View::Channel(n) if n < 2 => View::Channel(n + 1),
+                View::Channel(n) if n < 3 => View::Channel(n + 1),
                 _ => View::Shaded,
             };
             self.set_view(next);

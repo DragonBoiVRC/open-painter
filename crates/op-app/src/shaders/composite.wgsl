@@ -17,7 +17,8 @@ struct Params {
     adj: vec4<f32>,     // colour adjustment: hue (radians), saturation, brightness, contrast (tex.w: on)
     chan_mode: vec4<u32>, // blend mode of base, metallic, roughness, height
     chan_k: vec4<f32>,  // opacity multiplier of those channels (0 when a channel is off)
-    chan_n: vec4<f32>,  // x: opacity multiplier of the normal map
+    chan_n: vec4<f32>,  // x: opacity multiplier of the normal map, y: of the emissive channel, z: its blend mode
+    emissive: vec4<f32>, // an emissive fill's linear colour; w is 1 if it writes the channel
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -39,6 +40,9 @@ struct Params {
 @group(0) @binding(15) var img_height: texture_2d<f32>;
 @group(0) @binding(16) var img_normal: texture_2d<f32>;
 @group(0) @binding(17) var img_samp: sampler;
+@group(0) @binding(18) var bk_emissive: texture_2d<f32>;
+@group(0) @binding(19) var src_emissive: texture_2d<f32>;
+@group(0) @binding(20) var img_emissive: texture_2d<f32>;
 
 struct FsIn {
     @builtin(position) pos: vec4<f32>,
@@ -306,4 +310,36 @@ fn fs_main(i: FsIn) -> Out {
     }
     o.normal = vec4<f32>(n_out * 0.5 + vec3<f32>(0.5), cov_out);
     return o;
+}
+
+
+// The emissive channel is composited in a second pass (with its own, smaller set of bindings) so
+// that neither pass needs more sampled textures than a GPU is guaranteed to offer.
+@fragment
+fn fs_emissive(i: FsIn) -> @location(0) vec4<f32> {
+    let xy = vec2<i32>(i32(i.pos.x), i32(i.pos.y));
+    var e_color = vec3<f32>(0.0);
+    var e_cov = 0.0;
+    if (p.mode.x == 1u) {
+        e_color = p.emissive.rgb;
+        e_cov = p.emissive.w;
+        if ((p.tex.x & 32u) != 0u) {
+            let s = textureSample(img_emissive, img_samp, tex_uv(i.pos_xy));
+            e_color = s.rgb;
+            e_cov = s.a;
+        }
+    } else {
+        let se = textureLoad(src_emissive, xy, 0);
+        e_cov = se.a;
+        e_color = select(vec3<f32>(0.0), se.rgb / se.a, se.a > 0.0);
+    }
+    var mask = 1.0;
+    if (p.mode.y == 1u) {
+        mask = textureLoad(mask_tex, xy, 0).r;
+        let stretched = clamp((mask - p.lv.x) / max(p.lv.y - p.lv.x, 1e-4), 0.0, 1.0);
+        let lifted = pow(stretched, 1.0 / p.lv.z);
+        mask = select(lifted, 1.0 - lifted, p.lv.w > 0.5);
+    }
+    let k = p.vals.x * mask;
+    return over(textureLoad(bk_emissive, xy, 0), e_color, e_cov * k * p.chan_n.y, u32(p.chan_n.z + 0.5));
 }

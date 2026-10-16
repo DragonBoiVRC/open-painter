@@ -933,6 +933,7 @@ mod tests {
             values: [metal_value, 0.5, 1.0, 0.0],
             enables,
             shape: [0.0; 4],
+            emissive: [0.0; 4],
         }
     }
 
@@ -961,6 +962,7 @@ mod tests {
             values: [0.0, 0.0, 1.0, 0.0],
             enables: [0.0, 1.0, 0.0, 0.0],
             shape: [0.0; 4],
+            emissive: [0.0; 4],
         };
         rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Smudge { layer, stamps: vec![smudge] }]);
         let metal = rig.metal();
@@ -1182,7 +1184,7 @@ mod tests {
         let uvs = vec![a, b, c, a, c, d];
         rig.run(&doc, &[
             PaintOp::BeginStroke { layer, target: Target::Content },
-            PaintOp::Fill { layer, target: Target::Content, uvs: uvs.clone(), color: [1.0, 0.0, 0.0], values: [0.7, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0] },
+            PaintOp::Fill { layer, target: Target::Content, uvs: uvs.clone(), color: [1.0, 0.0, 0.0], values: [0.7, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0], emissive: [0.0; 4] },
         ]);
         let m = rig.metal();
         let (value, cover) = texel_rg(&m, (0.375, 0.375));
@@ -1201,7 +1203,7 @@ mod tests {
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
         rig.run(&doc, &[
             PaintOp::BeginStroke { layer, target: Target::Mask },
-            PaintOp::Fill { layer, target: Target::Mask, uvs, color: [0.0; 3], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4] },
+            PaintOp::Fill { layer, target: Target::Mask, uvs, color: [0.0; 3], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4], emissive: [0.0; 4] },
         ]);
         let m = rig.metal();
         assert!(texel_rg(&m, (0.375, 0.375)).0 > 250, "revealed inside");
@@ -1254,6 +1256,92 @@ mod tests {
             op_core::blend::eval_fill_only(&d2)
         };
         assert!((plain.rough[0] - want.rough[0]).abs() > 0.02 && (plain.base[0] - want.base[0]).abs() > 0.02);
+    }
+
+    /// The emissive channel composites like base colour (same blend maths, its own mix settings),
+    /// brushes paint it without touching anything else, and it lights the model.
+    #[test]
+    fn the_emissive_channel_composites_paints_and_glows() {
+        use op_core::ChannelMix;
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let glow = |c: Option<[f32; 3]>| NodeKind::Fill(FillParams { emissive: c, ..Default::default() });
+        let emissive_at_center = |rig: &Rig| {
+            let e = rig.read(&rig.gpu.paint().output.emissive, 8);
+            let i = ((SIZE / 2 * SIZE + SIZE / 2) * 8) as usize;
+            [0, 1, 2, 3].map(|c| f16_to_f32(u16::from_le_bytes([e[i + c * 2], e[i + c * 2 + 1]])))
+        };
+
+        // Two glowing fills with a blend mode and an emissive-only opacity, against the CPU reference.
+        let mut doc = Document::default();
+        doc.add(None, None, "bg", glow(Some([0.9, 0.4, 0.2])));
+        let top = doc.add(None, None, "top", glow(Some([0.5, 0.7, 0.9])));
+        {
+            let n = doc.find_mut(top).unwrap();
+            n.blend = BlendMode::Screen;
+            n.opacity = 0.8;
+            n.channels.emissive = ChannelMix { enabled: true, blend: Some(BlendMode::Multiply), opacity: 0.6 };
+        }
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let want = op_core::blend::eval_fill_only(&doc).emissive;
+        let got = emissive_at_center(&rig);
+        for c in 0..4 {
+            assert!((got[c] - want[c]).abs() < 2e-3, "emissive[{c}] gpu {} cpu {}", got[c], want[c]);
+        }
+        // Switching the channel off leaves the background's glow alone.
+        doc.find_mut(top).unwrap().channels.emissive.enabled = false;
+        rig.run(&doc, &[]);
+        let off = emissive_at_center(&rig);
+        let bg = op_core::blend::eval_fill_only(&{
+            let mut d = Document::default();
+            d.add(None, None, "bg", glow(Some([0.9, 0.4, 0.2])));
+            d
+        })
+        .emissive;
+        assert!((off[0] - bg[0]).abs() < 2e-3 && (off[1] - bg[1]).abs() < 2e-3, "disabled channel changed the glow: {off:?} vs {bg:?}");
+
+        // A brush stamp writing only emissive leaves base and the other channels empty.
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let mut stamp = dab(SIZE as f32 / 2.0, 30.0, 0.0, [0.0; 4]);
+        stamp.emissive = [1.0, 0.0, 0.0, 1.0];
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let (u, v) = sphere_uv(rig.front);
+        let at = (((v * SIZE as f32) as u32).min(SIZE - 1) * SIZE + ((u * SIZE as f32) as u32).min(SIZE - 1)) as usize;
+        let e = rig.read(&rig.gpu.paint().output.emissive, 8);
+        let half = |b: &[u8], c: usize| f16_to_f32(u16::from_le_bytes([b[at * 8 + c * 2], b[at * 8 + c * 2 + 1]]));
+        assert!(half(&e, 0) > 0.95 && half(&e, 1) < 0.02 && half(&e, 3) > 0.95, "emissive stamp: {} {} {}", half(&e, 0), half(&e, 1), half(&e, 3));
+        let base = rig.read(&rig.gpu.paint().output.base, 8);
+        assert!(half(&base, 3) < 0.01, "an emissive-only stamp must not cover the base colour");
+        assert_eq!(texel_rg(&rig.metal(), (u, v)).1, 0);
+
+        // Erasing takes the glow away again.
+        let mut erase = dab(SIZE as f32 / 2.0, 30.0, 0.0, [1.0; 4]);
+        erase.emissive = [0.0, 0.0, 0.0, 1.0];
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Erase { layer, stamps: vec![erase], uv: false }]);
+        let e = rig.read(&rig.gpu.paint().output.emissive, 8);
+        assert!(half(&e, 3) < 0.05, "the eraser leaves glow behind: {}", half(&e, 3));
+    }
+
+    /// An emissive fill makes the shaded model brighter, with no key light and a dark environment.
+    #[test]
+    fn emissive_paint_lights_the_viewport() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        rig.globals.light_dir[3] = 0.0;
+        rig.globals.env = [0.0, 1.0, 0.0, 3.0]; // no key light; the flat neutral environment
+        let plain = Document::with_default_material();
+        rig.run(&plain, &[PaintOp::Reset(SIZE)]);
+        let before = center_pixel(&rig);
+        let mut glowing = Document::with_default_material();
+        glowing.add(None, None, "glow", NodeKind::Fill(FillParams { emissive: Some([1.0, 1.0, 1.0]), ..Default::default() }));
+        rig.run(&glowing, &[PaintOp::Reset(SIZE)]);
+        let after = center_pixel(&rig);
+        assert!(after[0] as i32 > before[0] as i32 + 40 && after[1] as i32 > before[1] as i32 + 40, "emissive paint should brighten the model: {before:?} -> {after:?}");
+        // The emissive channel view shows the glow colour, unlit.
+        rig.globals.light_dir[3] = 7.0;
+        rig.run(&glowing, &[]);
+        let view = center_pixel(&rig);
+        assert!(view[0] > 240 && view[1] > 240, "the emissive channel view: {view:?}");
     }
 
     #[test]
@@ -1463,6 +1551,7 @@ mod tests {
             values: [1.0, 0.0, 1.0, 0.0],
             enables: [0.0; 4],
             shape: [0.0; 4],
+            emissive: [0.0; 4],
         };
         rig.run(
             &doc,
@@ -1504,7 +1593,7 @@ mod tests {
         assert!(!rig.gpu.paint().store.contains_key(&p), "unreferenced node was kept");
     }
 
-    fn output_bytes(rig: &Rig) -> [Vec<u8>; 5] {
+    fn output_bytes(rig: &Rig) -> [Vec<u8>; 6] {
         rig.gpu.paint().capture_output(&rig.device, &rig.queue)
     }
 
@@ -1527,8 +1616,9 @@ mod tests {
             values: [0.7, 0.3, 0.9, 0.0],
             enables: [1.0, 1.0, 1.0, 0.0],
             shape: [0.0; 4],
+            emissive: [0.0; 4],
         };
-        let reveal = Stamp { brush: [SIZE as f32 / 2.0 + 10.0, SIZE as f32 / 2.0, 30.0, 0.3], color: [0.0; 4], values: [1.0, 0.0, 0.8, 0.0], enables: [0.0; 4], shape: [0.0; 4] };
+        let reveal = Stamp { brush: [SIZE as f32 / 2.0 + 10.0, SIZE as f32 / 2.0, 30.0, 0.3], color: [0.0; 4], values: [1.0, 0.0, 0.8, 0.0], enables: [0.0; 4], shape: [0.0; 4], emissive: [0.0; 4] };
         rig.run(&doc, &[PaintOp::Stamps { layer: paint, target: Target::Content, stamps: vec![content] }]);
         rig.run(&doc, &[PaintOp::Stamps { layer: paint, target: Target::Mask, stamps: vec![reveal] }]);
         let before = output_bytes(&rig);
@@ -1536,7 +1626,7 @@ mod tests {
         assert_ne!(before[2], blank[2], "painting did not change the composited roughness");
 
         let blobs = rig.gpu.paint().capture_blobs(&rig.device, &rig.queue, &doc);
-        assert_eq!(blobs.len(), 5, "base, metal, rough, height and mask of the paint layer");
+        assert_eq!(blobs.len(), 6, "base, metal, rough, height, emissive and mask of the paint layer");
         let project = op_project::Project {
             mesh_name: "sphere".into(),
             mesh: Mesh::uv_sphere(1.0, 96, 48),
@@ -1609,6 +1699,7 @@ mod tests {
             values: [0.0, 0.0, 1.0, 0.9],
             enables: [0.0, 0.0, 0.0, 1.0],
             shape: [0.0; 4],
+            emissive: [0.0; 4],
         };
         rig.run(&doc, &[PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
         let uv = sphere_uv(rig.front);
@@ -1682,6 +1773,7 @@ mod tests {
                 values: [0.0, 0.0, 1.0, 0.0],
                 enables: [1.0, 0.0, 0.0, 0.0],
                 shape,
+            emissive: [0.0; 4],
             };
             rig.run(&doc, &[PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![stamp] }]);
             let base = rig.read(&rig.gpu.paint().output.base, 8);
@@ -1713,6 +1805,7 @@ mod tests {
             values: [0.0, 0.0, 1.0, 0.0],
             enables: [1.0, 0.0, 0.0, 0.0],
             shape: [0.0; 4],
+            emissive: [0.0; 4],
         };
         rig.run(&doc, &[PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![stamp] }]);
         let base = rig.read(&rig.gpu.paint().output.base, 8);
@@ -1733,7 +1826,7 @@ mod tests {
         let m = doc2.add(None, None, "m", NodeKind::Paint);
         doc2.find_mut(m).unwrap().mask = Some(Mask::new(false));
         rig.run(&doc2, &[PaintOp::Reset(SIZE)]);
-        let reveal = Stamp { brush: [0.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4], shape: [0.0; 4] };
+        let reveal = Stamp { brush: [0.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [1.0, 0.0, 1.0, 0.0], enables: [0.0; 4], shape: [0.0; 4], emissive: [0.0; 4] };
         rig.run(&doc2, &[PaintOp::Stamps2d { layer: m, target: Target::Mask, stamps: vec![reveal] }]);
         let mask = rig.read(rig.gpu.paint().store[&m].mask.as_ref().unwrap(), 1);
         assert_eq!(mask[(SIZE / 2 * SIZE + SIZE / 2) as usize], 255);
@@ -1799,7 +1892,7 @@ mod tests {
         assert!(tile_metal(&rig, 1).chunks_exact(2).all(|p| p[0] == 255), "tile 1002 must be untouched");
 
         // A 2D stamp at global UV (1.5, 0.5) lands in tile 1002 at local (0.5, 0.5), and not in 1001.
-        let dab2d = Stamp { brush: [1.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [0.0, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0], shape: [0.0; 4] };
+        let dab2d = Stamp { brush: [1.5, 0.5, 0.05, 1.0], color: [0.0; 4], values: [0.0, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0], shape: [0.0; 4], emissive: [0.0; 4] };
         let paint2d = SetBatch { tile: None, set: 0, doc: doc.clone(), ops: vec![PaintOp::Stamps2d { layer, target: Target::Content, stamps: vec![dab2d] }] };
         rig.run_sets(&[paint2d]);
         let centre = ((SIZE / 2 * SIZE + SIZE / 2) * 2) as usize;
@@ -2068,6 +2161,7 @@ mod tests {
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Metal, bytes: (0..n * 2).map(|i| (i % 13) as u8).collect() },
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Rough, bytes: (0..n * 2).map(|i| (i % 7) as u8).collect() },
             op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Height, bytes: (0..n * 2).map(|i| (i % 5) as u8).collect() },
+            op_project::TextureBlob { node: pb, kind: op_project::BlobKind::Emissive, bytes: (0..n * 8).map(|i| (i % 17) as u8).collect() },
         ];
         let load_b = SetBatch { tile: None, set: 1, doc: b.clone(), ops: vec![PaintOp::Load { size: SIZE, blobs: blobs_b.clone() }] };
         rig.run_sets(&[stroke, load_b]);
@@ -2115,7 +2209,7 @@ mod tests {
         let mut doc = Document::default();
         doc.add(None, None, "fill", fill(Some([0.8, 0.55, 0.30]), Some(0.25), Some(0.6)));
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
-        let [base, metal, rough, _, _] = output_bytes(&rig);
+        let [base, metal, rough, ..] = output_bytes(&rig);
         let data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
         let preset = op_export::builtin_presets().remove(0);
         let dir = tempfile::tempdir().unwrap();
@@ -2150,7 +2244,7 @@ mod tests {
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);
 
         // The same steps the app's export job takes.
-        let [base, metal, rough, height, layer_normal] = output_bytes(&rig);
+        let [base, metal, rough, height, layer_normal, _] = output_bytes(&rig);
         let mut data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
         data.set_height(&height).unwrap();
         data.set_layer_normal(&layer_normal).unwrap();

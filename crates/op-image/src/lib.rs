@@ -173,6 +173,7 @@ pub fn guess_slot(file_name: &str) -> Option<Guess> {
             "height" | "displacement" | "disp" | "bump" | "heightmap" | "displace" => Some(Slot::Height),
             "roughness" | "rough" | "rgh" | "roughnessmap" => Some(Slot::Roughness),
             "metallic" | "metalness" | "metal" | "mtl" | "metallicmap" => Some(Slot::Metallic),
+            "emissive" | "emission" | "emit" | "glow" | "emissivemap" => Some(Slot::Emissive),
             // "n" alone is a normal map only at the end ("brick_n.png").
             "n" if i + 1 == words.len() && i > 0 => Some(Slot::Normal),
             _ => None,
@@ -292,6 +293,8 @@ mod tests {
         assert_eq!(g("sand_Displacement.png"), Some((Slot::Height, false)));
         assert_eq!(g("sand_Roughness.png"), Some((Slot::Roughness, false)));
         assert_eq!(g("sand_Metalness.png"), Some((Slot::Metallic, false)));
+        assert_eq!(g("lamp_Emissive.png"), Some((Slot::Emissive, false)));
+        assert_eq!(g("neon_glow.jpg"), Some((Slot::Emissive, false)));
         // The last word that names a channel wins.
         assert_eq!(g("normal_wall_roughness.png"), Some((Slot::Roughness, false)));
         // A bare "n", an unknown name and an AO map give no guess.

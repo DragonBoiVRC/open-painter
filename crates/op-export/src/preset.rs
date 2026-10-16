@@ -34,6 +34,8 @@ pub enum ColorMap {
     Diffuse,
     /// Specular color (F0) of the specular/glossiness workflow: `lerp(0.04, base, metallic)`.
     Specular,
+    /// The painted emissive colour (black where nothing glows).
+    Emissive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +59,11 @@ pub enum ChannelSrc {
 }
 
 impl ChannelSrc {
+    /// True if this source reads the emissive channel.
+    pub fn is_emissive(self) -> bool {
+        matches!(self, ChannelSrc::Color { map: ColorMap::Emissive, .. })
+    }
+
     pub fn base(comp: Comp) -> Self {
         ChannelSrc::Color { map: ColorMap::Base, comp }
     }
@@ -168,6 +175,8 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
     use ChannelSrc::*;
     let png8 = |file: &str, ch: &[ChannelSrc], srgb: bool| map(file, ch, FileFormat::Png, BitDepth::U8, srgb);
     let color = [ChannelSrc::base(Comp::R), ChannelSrc::base(Comp::G), ChannelSrc::base(Comp::B)];
+    let glow = |c| ChannelSrc::Color { map: ColorMap::Emissive, comp: c };
+    let emissive = [glow(Comp::R), glow(Comp::G), glow(Comp::B)];
     // Occlusion has no painted channel yet, so packed maps carry the baked AO (white if not baked).
     let orm = [AoMixed, Roughness, Metallic];
     vec![
@@ -177,6 +186,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
                 png8("$project_$textureSet_BaseColor(.$udim)", &color, true),
                 png8("$project_$textureSet_Roughness(.$udim)", &[Roughness], false),
                 png8("$project_$textureSet_Metallic(.$udim)", &[Metallic], false),
+                png8("$project_$textureSet_Emissive(.$udim)", &emissive, true),
             ],
         },
         ExportPreset {
@@ -184,6 +194,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
             maps: vec![
                 png8("$project_$textureSet_BaseColor(.$udim)", &color, true),
                 png8("$project_$textureSet_MetallicRoughness(.$udim)", &orm, false),
+                png8("$project_$textureSet_Emissive(.$udim)", &emissive, true),
             ],
         },
         ExportPreset {
@@ -196,6 +207,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
                     &[Normal { directx: true, comp: Comp::R }, Normal { directx: true, comp: Comp::G }, Normal { directx: true, comp: Comp::B }],
                     false,
                 ),
+                png8("$project_$textureSet_Emissive(.$udim)", &emissive, true),
             ],
         },
         ExportPreset {
@@ -212,6 +224,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
                     &[Normal { directx: false, comp: Comp::R }, Normal { directx: false, comp: Comp::G }, Normal { directx: false, comp: Comp::B }],
                     false,
                 ),
+                png8("$project_$textureSet_Emission(.$udim)", &emissive, true),
             ],
         },
         ExportPreset {
@@ -220,6 +233,7 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
                 map("$project_$textureSet_BaseColor(.$udim)", &color, FileFormat::Exr, BitDepth::F32, false),
                 map("$project_$textureSet_Roughness(.$udim)", &[Roughness], FileFormat::Exr, BitDepth::F32, false),
                 map("$project_$textureSet_Metallic(.$udim)", &[Metallic], FileFormat::Exr, BitDepth::F32, false),
+                map("$project_$textureSet_Emissive(.$udim)", &emissive, FileFormat::Exr, BitDepth::F32, false),
             ],
         },
     ]

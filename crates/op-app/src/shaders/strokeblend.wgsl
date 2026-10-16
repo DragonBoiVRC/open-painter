@@ -11,10 +11,12 @@ struct Params {
 @group(0) @binding(2) var snap_metal: texture_2d<f32>;
 @group(0) @binding(3) var snap_rough: texture_2d<f32>;
 @group(0) @binding(4) var snap_height: texture_2d<f32>;
-@group(0) @binding(5) var buf_base: texture_2d<f32>;
-@group(0) @binding(6) var buf_metal: texture_2d<f32>;
-@group(0) @binding(7) var buf_rough: texture_2d<f32>;
-@group(0) @binding(8) var buf_height: texture_2d<f32>;
+@group(0) @binding(5) var snap_emissive: texture_2d<f32>;
+@group(0) @binding(6) var buf_base: texture_2d<f32>;
+@group(0) @binding(7) var buf_metal: texture_2d<f32>;
+@group(0) @binding(8) var buf_rough: texture_2d<f32>;
+@group(0) @binding(9) var buf_height: texture_2d<f32>;
+@group(0) @binding(10) var buf_emissive: texture_2d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -27,6 +29,7 @@ struct FsOut {
     @location(1) metal: vec4<f32>,
     @location(2) rough: vec4<f32>,
     @location(3) height: vec4<f32>,
+    @location(4) emissive: vec4<f32>,
 };
 
 // Premultiplied colour: stroke * k over snapshot.
@@ -49,5 +52,6 @@ fn fs_content(@builtin(position) pos: vec4<f32>) -> FsOut {
     o.metal = over_value(textureLoad(snap_metal, xy, 0), textureLoad(buf_metal, xy, 0));
     o.rough = over_value(textureLoad(snap_rough, xy, 0), textureLoad(buf_rough, xy, 0));
     o.height = over_value(textureLoad(snap_height, xy, 0), textureLoad(buf_height, xy, 0));
+    o.emissive = over_color(textureLoad(snap_emissive, xy, 0), textureLoad(buf_emissive, xy, 0));
     return o;
 }

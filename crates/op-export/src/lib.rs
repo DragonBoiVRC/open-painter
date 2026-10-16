@@ -41,6 +41,8 @@ pub struct TextureSetData {
     pub baked: HashMap<MeshMap, BakedMap>,
     /// Painted height, 0..1 with 0.5 flat. Empty when the document has no height channel data.
     pub height: Vec<f32>,
+    /// Painted emissive colour, linear 0..1. Empty when the document gives off no light.
+    pub emissive: Vec<[f32; 3]>,
     /// Normal maps of fill layers, composited: unit xyz and coverage per texel. Empty when no layer has one.
     pub layer_normal: Vec<[f32; 4]>,
     /// Tangent-space normal derived from the height and the baked normal. `None` until
@@ -82,9 +84,30 @@ impl TextureSetData {
             roughness: resolve(rough_rg8, FALLBACK_ROUGHNESS),
             baked: HashMap::new(),
             height: Vec::new(),
+            emissive: Vec::new(),
             layer_normal: Vec::new(),
             normal: None,
         })
+    }
+
+    /// Attach the composited emissive channel: RGBA half floats (8 bytes per texel), premultiplied.
+    /// Where nothing glows the colour is black.
+    pub fn set_emissive(&mut self, rgba16f: &[u8]) -> Result<(), ExportError> {
+        let n = (self.size as usize).pow(2);
+        if rgba16f.len() != n * 8 {
+            return Err(ExportError::Data(format!("emissive has {} bytes, expected {}", rgba16f.len(), n * 8)));
+        }
+        let half = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+        let all: Vec<[f32; 3]> = rgba16f
+            .chunks_exact(8)
+            .map(|t| [0, 1, 2].map(|c| {
+                let v = half(&t[c * 2..c * 2 + 2]);
+                if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+            }))
+            .collect();
+        // Keep nothing for a document that glows nowhere, so exporters can skip the map.
+        self.emissive = if all.iter().any(|c| c.iter().any(|v| *v > 0.0)) { all } else { Vec::new() };
+        Ok(())
     }
 
     /// Attach the composited fill-layer normals: RGBA8 with the packed normal in rgb and the coverage in alpha.
@@ -207,6 +230,9 @@ impl TextureSetData {
                         if self.height.len() == self.base.len() {
                             self.height[i] = avg1(&self.height);
                         }
+                        if self.emissive.len() == self.base.len() {
+                            self.emissive[i] = avg3(&self.emissive);
+                        }
                         if let Some(nm) = &mut self.normal {
                             let a = avg3(nm);
                             let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-6);
@@ -288,6 +314,7 @@ fn sample(src: ChannelSrc, i: usize, data: &TextureSetData, encode: bool, missin
                 ColorMap::Base => b,
                 ColorMap::Diffuse => [b[0] * (1.0 - m), b[1] * (1.0 - m), b[2] * (1.0 - m)],
                 ColorMap::Specular => [0, 1, 2].map(|k| 0.04 + (b[k] - 0.04) * m),
+                ColorMap::Emissive => data.emissive.get(i).copied().unwrap_or([0.0; 3]),
             };
             enc(comp_of(c, comp))
         }
@@ -404,6 +431,10 @@ pub fn export(preset: &ExportPreset, data: &TextureSetData, ctx: &ExportContext)
     let mut outcome = ExportOutcome::default();
     let mut missing = BTreeSet::new();
     for (spec, name) in preset.maps.iter().zip(&names) {
+        // A map made only of emissive light is pointless when nothing glows: leave it out.
+        if data.emissive.is_empty() && spec.channels.iter().all(|c| c.is_emissive()) {
+            continue;
+        }
         let path = ctx.out_dir.join(name);
         write_map(&path, spec, data, &mut missing)?;
         outcome.files.push(path);
@@ -428,6 +459,7 @@ mod tests {
             roughness: vec![roughness; n],
             baked: HashMap::new(),
             height: Vec::new(),
+            emissive: Vec::new(),
             layer_normal: Vec::new(),
             normal: None,
         }
@@ -478,6 +510,29 @@ mod tests {
         assert_eq!(rough.get_pixel(2, 3).0[0], (0.8f32 * 255.0).round() as u8, "roughness stays linear");
         let metal = image::open(dir.path().join("proj_set_Metallic.png")).unwrap().to_luma8();
         assert_eq!(metal.get_pixel(0, 0).0[0], (0.3f32 * 255.0).round() as u8);
+    }
+
+    #[test]
+    fn the_emissive_map_is_written_only_when_something_glows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut d = data(2, [0.5; 3], 0.0, 0.5);
+        let plain = export(&preset("PBR Metallic Roughness"), &d, &ctx(dir.path())).unwrap();
+        assert_eq!(plain.files.len(), 3);
+        assert!(!dir.path().join("proj_set_Emissive.png").exists());
+
+        // One texel glows orange (half floats, premultiplied, alpha ignored).
+        let mut bytes = Vec::new();
+        for t in 0..4 {
+            let rgba = if t == 3 { [0.8, 0.4, 0.0, 1.0] } else { [0.0; 4] };
+            bytes.extend(f16_bytes(rgba));
+        }
+        d.set_emissive(&bytes).unwrap();
+        let glowing = export(&preset("PBR Metallic Roughness"), &d, &ctx(dir.path())).unwrap();
+        assert_eq!(glowing.files.len(), 4);
+        let e = image::open(dir.path().join("proj_set_Emissive.png")).unwrap().to_rgb8();
+        assert_eq!(e.get_pixel(1, 1).0, [0.8f32, 0.4, 0.0].map(|v| (srgb_encode(v) * 255.0).round() as u8), "emissive is colour: sRGB encoded");
+        assert_eq!(e.get_pixel(0, 0).0, [0, 0, 0]);
+        assert!(d.set_emissive(&[0; 7]).is_err());
     }
 
     #[test]

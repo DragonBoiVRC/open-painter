@@ -17,7 +17,8 @@ pub(crate) fn view_label(v: View) -> String {
         View::PaintedNormal => "Normal map".to_string(),
         View::Channel(0) => "Base color".to_string(),
         View::Channel(1) => "Roughness".to_string(),
-        View::Channel(_) => "Metallic".to_string(),
+        View::Channel(2) => "Metallic".to_string(),
+        View::Channel(_) => "Emissive".to_string(),
         View::Map(m) => m.label().to_string(),
     }
 }
@@ -36,7 +37,7 @@ impl App {
         egui::ComboBox::from_id_salt("viewport_shading").selected_text(label(self.view)).width(150.0).show_ui(ui, |ui| {
             ui.selectable_value(&mut view, View::Shaded, "Shaded");
             ui.selectable_value(&mut view, View::PaintedNormal, "Normal map");
-            for c in 0..3 {
+            for c in 0..4 {
                 ui.selectable_value(&mut view, View::Channel(c), view_label(View::Channel(c)));
             }
             if self.baked0().contains_key(&MeshMap::AmbientOcclusion) {

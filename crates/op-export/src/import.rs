@@ -163,7 +163,7 @@ fn classify(ch: &SpexpChannel, version0: bool, w: &mut Warnings) -> Source {
     }
 }
 
-/// Emissive has no channel here; it is the one known channel we replace by a constant.
+/// The document channel Substance calls Emissive.
 fn is_emissive(ch: &SpexpChannel, version0: bool) -> bool {
     let id = match &ch.map {
         MapId::Int(i) if ch.map_type == 1 => *i,
@@ -179,13 +179,13 @@ fn resolve(
     file: &str,
     w: &mut Warnings,
 ) -> ChannelSrc {
-    if is_emissive(ch, version0) {
-        w.add(format!(
-            "{file}: Emissive has no channel in this project yet; its channels are written as black (0)."
-        ));
-        return ChannelSrc::Constant(0.0);
-    }
     let comp = comp_of(ch.src);
+    if is_emissive(ch, version0) {
+        return match comp {
+            Some(c) => ChannelSrc::Color { map: ColorMap::Emissive, comp: c },
+            None => ChannelSrc::Constant(1.0),
+        };
+    }
     match classify(ch, version0, w) {
         Source::Color(map) => match comp {
             Some(c) => ChannelSrc::Color { map, comp: c },
@@ -356,12 +356,12 @@ mod tests {
     }
 
     #[test]
-    fn emissive_is_black_in_both_versions_and_says_so() {
+    fn emissive_maps_read_the_emissive_channel_in_both_versions() {
         let v0 = import(&[map("e", "png", 0, rgb(variant_u64(16), 1))], true).unwrap();
         let v1 = import(&[map("e", "png", 0, rgb(variant_i32(4), 1))], false).unwrap();
         for got in [v0, v1] {
-            assert!(got.preset.maps[0].channels.iter().all(|c| *c == ChannelSrc::Constant(0.0)));
-            assert!(got.warnings.iter().any(|w| w.contains("Emissive")));
+            assert!(got.preset.maps[0].channels.iter().all(|c| c.is_emissive()), "{:?}", got.preset.maps[0].channels);
+            assert!(got.warnings.is_empty(), "{:?}", got.warnings);
         }
     }
 
@@ -433,6 +433,7 @@ mod tests {
             roughness: vec![0.75; n],
             baked: Default::default(),
             height: Vec::new(),
+            emissive: Vec::new(),
             layer_normal: Vec::new(),
             normal: None,
         };
