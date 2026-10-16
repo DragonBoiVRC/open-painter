@@ -1601,6 +1601,56 @@ mod tests {
         assert!(near(r.get_pixel(3, 3).0[0], 0.6) && near(m.get_pixel(3, 3).0[0], 0.25));
     }
 
+    /// A set painted with imported textures exports what the textures say: the base colour image
+    /// (sRGB round trip, right way up), a scalar roughness texture, and a tilted normal map.
+    #[test]
+    fn textured_set_exports_the_textures_it_uses() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let (rough_id, normal_id) = ("11111111111111111111111111111111", "22222222222222222222222222222222");
+        rig.gpu.upload_image(&rig.device, &rig.queue, TEX_ID, &quad_image());
+        let one = |rgba8: [u8; 4]| op_image::Decoded { width: 1, height: 1, rgba8: rgba8.to_vec() };
+        rig.gpu.upload_image(&rig.device, &rig.queue, rough_id, &one([64, 64, 64, 255]));
+        rig.gpu.upload_image(&rig.device, &rig.queue, normal_id, &one([200, 190, 220, 255]));
+        let mut f = FillParams::default();
+        f.maps.set(op_core::Slot::BaseColor, Some(op_core::TexRef::new(TEX_ID)));
+        f.maps.set(op_core::Slot::Roughness, Some(op_core::TexRef::new(rough_id)));
+        f.maps.set(op_core::Slot::Normal, Some(op_core::TexRef::new(normal_id)));
+        let mut doc = Document::default();
+        doc.add(None, None, "bricks", NodeKind::Fill(f));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+
+        // The same steps the app's export job takes.
+        let [base, metal, rough, height, layer_normal] = output_bytes(&rig);
+        let mut data = op_export::TextureSetData::from_composite(SIZE, &base, &metal, &rough).unwrap();
+        data.set_height(&height).unwrap();
+        data.set_layer_normal(&layer_normal).unwrap();
+        data.compute_normal(doc.height_strength);
+        let preset = op_export::builtin_presets().into_iter().find(|p| p.name.starts_with("Unreal")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = op_export::ExportContext { project: "p", texture_set: "s", mesh: "m", out_dir: dir.path(), udim: None };
+        op_export::export(&preset, &data, &ctx).unwrap();
+
+        let q = SIZE / 4;
+        let color = image::open(dir.path().join("p_s_BaseColor.png")).unwrap().to_rgb8();
+        let at = |x: u32, y: u32| color.get_pixel(x, y).0;
+        let close = |a: [u8; 3], b: [u8; 3]| (0..3).all(|c| (a[c] as i32 - b[c] as i32).abs() <= 40);
+        assert!(close(at(q, q), [255, 0, 0]), "top left is red: {:?}", at(q, q));
+        assert!(close(at(3 * q, q), [0, 255, 0]), "top right is green: {:?}", at(3 * q, q));
+        assert!(close(at(q, 3 * q), [0, 0, 255]), "bottom left is blue: {:?}", at(q, 3 * q));
+        assert!(close(at(3 * q, 3 * q), [255, 255, 255]), "bottom right is white");
+
+        // Roughness is a data map: the texel value passes through unchanged (the Unreal preset packs it in G).
+        let orm = image::open(dir.path().join("p_s_OcclusionRoughnessMetallic.png")).unwrap().to_rgb8();
+        let g = orm.get_pixel(q, q).0[1] as i32;
+        assert!((g - 64).abs() <= 2, "roughness texel 64 exported as {g}");
+
+        // The tilted normal map survives export: x and y lean away from flat, z stays up.
+        let normal = image::open(dir.path().join("p_s_Normal.png")).unwrap().to_rgb8();
+        let n = normal.get_pixel(q, q).0;
+        assert!(n[0] > 150 && n[2] > 128, "normal red/blue: {n:?}");
+        assert!(n[1] != 128, "the DirectX green channel moved off flat: {n:?}");
+    }
+
     /// The center pixel of the last rendered frame (RGBA8).
     fn center_pixel(rig: &Rig) -> [u8; 4] {
         let tex = &rig.gpu.offscreen.as_ref().expect("a frame was rendered").color;
