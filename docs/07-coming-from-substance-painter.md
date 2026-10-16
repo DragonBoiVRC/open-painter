@@ -45,6 +45,7 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Mask levels (black, white, gamma, invert) live on the mask in Properties - Layer.
 - Brush Opacity is now called Flow (the opacity of each dab, so overlaps build up) and there is a separate Stroke opacity that caps a whole stroke, like Painter's. Stroke opacity applies to painting, projection and masks.
 - Fill (G) fills a UV island, a piece of the mesh or a whole texture set with a click, using the paint colour and channels (or white on a mask; Shift+click for black).
+- Camera: view presets (front, back, left, right, top, bottom) and a field-of-view slider are in the viewport bar and Display Settings.
 - Lazy mouse (Properties - Brush, "Lazy mouse") makes the brush trail the cursor on a string for smooth strokes.
 - Pen pressure drives brush size and/or opacity (Brush panel) when the system reports it as touch force.
 - Smudge (S) and clone (K, Ctrl+click sets the source) work in the 3D view on layer content; they copy from a screen offset and ignore symmetry.

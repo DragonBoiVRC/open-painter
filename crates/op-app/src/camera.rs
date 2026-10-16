@@ -17,7 +17,51 @@ impl Default for OrbitCamera {
     }
 }
 
+/// Looking at the model along one of its axes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewPreset {
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl ViewPreset {
+    pub const ALL: [ViewPreset; 6] = [ViewPreset::Front, ViewPreset::Back, ViewPreset::Left, ViewPreset::Right, ViewPreset::Top, ViewPreset::Bottom];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewPreset::Front => "Front",
+            ViewPreset::Back => "Back",
+            ViewPreset::Left => "Left",
+            ViewPreset::Right => "Right",
+            ViewPreset::Top => "Top",
+            ViewPreset::Bottom => "Bottom",
+        }
+    }
+}
+
+/// The orbit never reaches straight up or down, so the top and bottom views stop just short.
+const POLE_PITCH: f32 = 1.5;
+
 impl OrbitCamera {
+    /// Turn to look along an axis, keeping the target and distance. Front is the +Z side.
+    pub fn set_view(&mut self, view: ViewPreset) {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let (yaw, pitch) = match view {
+            ViewPreset::Front => (FRAC_PI_2, 0.0),
+            ViewPreset::Back => (-FRAC_PI_2, 0.0),
+            ViewPreset::Right => (0.0, 0.0),
+            ViewPreset::Left => (PI, 0.0),
+            ViewPreset::Top => (FRAC_PI_2, POLE_PITCH),
+            ViewPreset::Bottom => (FRAC_PI_2, -POLE_PITCH),
+        };
+        self.yaw = yaw;
+        self.pitch = pitch;
+    }
+
     pub fn position(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
@@ -81,6 +125,25 @@ mod tests {
         let clip = c.view_proj(1.0) * Vec3::splat(1.0).extend(1.0);
         let ndc = clip.truncate() / clip.w;
         assert!(ndc.x.abs() < 1.0 && ndc.y.abs() < 1.0, "corner outside frustum: {ndc}");
+    }
+
+    #[test]
+    fn view_presets_look_along_their_axis() {
+        let mut c = OrbitCamera::default();
+        for (view, axis) in [
+            (ViewPreset::Front, Vec3::Z),
+            (ViewPreset::Back, -Vec3::Z),
+            (ViewPreset::Right, Vec3::X),
+            (ViewPreset::Left, -Vec3::X),
+        ] {
+            c.set_view(view);
+            let dir = (c.position() - c.target).normalize();
+            assert!((dir - axis).length() < 1e-5, "{view:?}: camera at {dir}");
+        }
+        c.set_view(ViewPreset::Top);
+        assert!((c.position() - c.target).normalize().y > 0.99);
+        c.set_view(ViewPreset::Bottom);
+        assert!((c.position() - c.target).normalize().y < -0.99);
     }
 
     #[test]

@@ -43,6 +43,20 @@ impl App {
                 self.env = Default::default();
             }
         });
+        section(ui, "Camera", |ui| {
+            let mut fov = self.camera.fov_y.to_degrees();
+            if super::slider_row(ui, "Field of view", &mut fov, 10.0..=110.0).changed() {
+                self.camera.fov_y = fov.clamp(10.0, 110.0).to_radians();
+            }
+            ui.horizontal_wrapped(|ui| {
+                for v in crate::camera::ViewPreset::ALL {
+                    if ui.button(v.label()).clicked() {
+                        self.camera.set_view(v);
+                    }
+                }
+            });
+            hint(ui, "Orbit with Alt + left drag. The buttons look along an axis; F frames the model.");
+        });
         section(ui, "Shading", |ui| {
             let current = self.view;
             let mut view = current;

@@ -328,6 +328,13 @@ impl App {
                         if ui.button(ph::FRAME_CORNERS).on_hover_text("Frame model (F)").clicked() {
                             self.frame_model();
                         }
+                        egui::ComboBox::from_id_salt("camera_views").selected_text("Camera").width(70.0).show_ui(ui, |ui| {
+                            for v in crate::camera::ViewPreset::ALL {
+                                if ui.selectable_label(false, v.label()).clicked() {
+                                    self.camera.set_view(v);
+                                }
+                            }
+                        });
                         let on = self.symmetry != 0;
                         let label = format!("{}  {}", ph::BUTTERFLY, ["Symmetry", "X", "Y", "Z"][self.symmetry as usize]);
                         if ui.selectable_label(on, label).on_hover_text("Mirror strokes (L). Choose the axis in Properties - Paint.").clicked() {
