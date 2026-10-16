@@ -8,6 +8,8 @@ struct Globals {
     base_color: vec4<f32>,     // linear rgb
     params: vec4<f32>,         // x = metallic, y = roughness
     env: vec4<f32>,            // rotation (rad), exposure scale, direct light intensity, preset
+    inv_view_proj: mat4x4<f32>,
+    bg: vec4<f32>,             // x: show the environment, y: blur 0..1, z: tone mapping (0 filmic, 1 Reinhard, 2 none)
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -84,6 +86,14 @@ fn fresnel_schlick(cos_t: f32, f0: vec3<f32>) -> vec3<f32> {
 
 // Narkowicz ACES approximation, then linear -> sRGB.
 fn tonemap(c: vec3<f32>) -> vec3<f32> {
+    let mode = i32(g.bg.z + 0.5);
+    if (mode == 1) {
+        let r = c * 0.8;
+        return clamp(r / (r + vec3<f32>(1.0)) * 1.1, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    if (mode == 2) {
+        return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     let x = c * 0.6;
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
 }

@@ -20,6 +20,10 @@ pub struct Globals {
     pub params: [f32; 4],
     /// Environment: rotation (radians), exposure scale, direct light intensity, preset.
     pub env: [f32; 4],
+    pub inv_view_proj: [[f32; 4]; 4],
+    /// x: draw the HDR environment behind the model, y: how blurred it is (0..1), z: tone mapping
+    /// (0 filmic, 1 Reinhard, 2 none).
+    pub bg: [f32; 4],
 }
 
 struct Offscreen {
@@ -149,6 +153,9 @@ pub(crate) fn apply_batch(
 pub struct ViewportGpu {
     pbr: wgpu::RenderPipeline,
     wire_pipeline: wgpu::RenderPipeline,
+    bg_pipeline: wgpu::RenderPipeline,
+    /// An HDR environment is loaded (so there is something to draw behind the model).
+    env_loaded: bool,
     /// Every edge of the mesh once, as a line list over the vertex buffer, and its index count.
     wire_edges: Option<(wgpu::Buffer, u32)>,
     /// Draw the edges over the model.
@@ -319,6 +326,34 @@ impl ViewportGpu {
             cache: None,
         });
 
+        let bg_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/envbg.wgsl"));
+        let bg_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("envbg_pl"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&env.layout)],
+            immediate_size: 0,
+        });
+        let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("envbg"),
+            layout: Some(&bg_pl),
+            vertex: wgpu::VertexState { module: &bg_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &bg_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(COLOR_FORMAT.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let wire_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/wire3d.wgsl"));
         let wire_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("wire3d_pl"),
@@ -465,6 +500,8 @@ impl ViewportGpu {
         Self {
             pbr,
             wire_pipeline,
+            bg_pipeline,
+            env_loaded: false,
             wire_edges: None,
             show_wire: false,
             env,
@@ -641,6 +678,7 @@ impl ViewportGpu {
     /// Use `image` as the HDR environment (or drop it with `None`).
     pub fn set_environment(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: Option<&op_image::hdr::HdrImage>) {
         self.env.set(device, queue, image);
+        self.env_loaded = image.is_some();
     }
 
     /// Set the pictures brush strokes read (stamp alpha and stencil).
@@ -792,6 +830,13 @@ impl ViewportGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        // The environment behind the model, when asked for and when it is the lighting in use.
+        if self.env_loaded && globals.bg[0] > 0.5 && globals.env[3] as u32 == 4 {
+            pass.set_pipeline(&self.bg_pipeline);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_bind_group(1, &self.env.bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
         if let (Some(v), Some(i)) = (&self.vbuf, &self.ibuf) {
             pass.set_pipeline(&self.pbr);
             pass.set_vertex_buffer(0, v.slice(..));
@@ -960,6 +1005,8 @@ mod tests {
                 base_color: [0.18; 4],
                 params: [0.0, 0.5, near, far],
                 env: [0.0, 1.0, 1.0, 0.0],
+                inv_view_proj: cam.view_proj(1.0).inverse().to_cols_array_2d(),
+                bg: [0.0; 4],
             };
             Some(Self { device, queue, gpu, globals, front: cp.normalize() })
         }
@@ -2472,6 +2519,41 @@ mod tests {
         rig.gpu.show_wire = false;
         rig.run(&doc, &[]);
         assert_eq!(frame(&rig), plain, "switching it off restores the plain render");
+    }
+
+    /// With an HDR environment loaded and "show the environment" on, the sky is drawn behind the
+    /// model; tone mapping changes how bright values come out.
+    #[test]
+    fn the_environment_can_be_the_backdrop_and_tone_mapping_applies() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let doc = Document::with_default_material();
+        let corner = |rig: &Rig| {
+            let tex = &rig.gpu.offscreen.as_ref().expect("a frame was rendered").color;
+            let px = crate::gpu_io::read_texture(&rig.device, &rig.queue, tex, SIZE, 4);
+            [px[0], px[1], px[2]]
+        };
+        let sky = op_image::hdr::HdrImage { width: 32, height: 16, rgb: (0..32 * 16).flat_map(|_| [0.8, 0.1, 0.1]).collect() };
+        rig.globals.env = [0.0, 1.0, 0.0, 4.0];
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let plain = corner(&rig);
+        rig.gpu.set_environment(&rig.device, &rig.queue, Some(&sky));
+        rig.run(&doc, &[]);
+        assert_eq!(corner(&rig), plain, "the backdrop stays the plain colour until it is switched on");
+        rig.globals.bg = [1.0, 0.0, 0.0, 0.0];
+        rig.run(&doc, &[]);
+        let filmic = corner(&rig);
+        assert!(filmic[0] > filmic[1] as u8 + 60 && filmic[0] > 100, "a red sky behind the model: {filmic:?}");
+        rig.globals.bg = [1.0, 0.0, 2.0, 0.0];
+        rig.run(&doc, &[]);
+        let none = corner(&rig);
+        assert!(none[0] > filmic[0], "no tone mapping keeps the red brighter than filmic: {none:?} vs {filmic:?}");
+        rig.globals.bg = [1.0, 0.0, 1.0, 0.0];
+        rig.run(&doc, &[]);
+        assert_ne!(corner(&rig), filmic, "Reinhard differs from filmic");
+        // With another lighting preset the environment is not shown even if the box is ticked.
+        rig.globals.env = [0.0, 1.0, 0.0, 0.0];
+        rig.run(&doc, &[]);
+        assert_eq!(corner(&rig), plain);
     }
 
     /// Preview modes: 0 shaded, 1 the map as-is, 2 shaded with the map darkening the ambient light.

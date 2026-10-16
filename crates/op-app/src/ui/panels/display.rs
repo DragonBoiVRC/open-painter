@@ -35,6 +35,20 @@ impl App {
                     self.start_hdri_import();
                 }
             });
+            ui.add_enabled_ui(self.env.preset == 4 && self.hdri_name.is_some(), |ui| {
+                ui.checkbox(&mut self.env.show_background, "Show the environment behind the model");
+                if self.env.show_background {
+                    super::slider_row(ui, "Background blur", &mut self.env.background_blur, 0.0..=1.0);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Tone mapping");
+                egui::ComboBox::from_id_salt("tonemap").selected_text(["Filmic", "Reinhard", "None"][self.env.tonemap as usize % 3]).show_ui(ui, |ui| {
+                    for (i, name) in ["Filmic", "Reinhard", "None"].iter().enumerate() {
+                        ui.selectable_value(&mut self.env.tonemap, i as u32, *name);
+                    }
+                });
+            });
             super::slider_row(ui, "Rotation", &mut self.env.rotation, 0.0..=360.0);
             super::slider_row(ui, "Exposure", &mut self.env.exposure, -3.0..=3.0);
             super::slider_row(ui, "Key light", &mut self.env.light, 0.0..=3.0);

@@ -104,11 +104,16 @@ struct Environment {
     exposure: f32,
     /// Strength of the key light.
     light: f32,
+    /// Draw the HDR environment behind the model, and how blurred it is (0..1).
+    show_background: bool,
+    background_blur: f32,
+    /// Tone mapping: 0 filmic, 1 Reinhard, 2 none.
+    tonemap: u32,
 }
 
 impl Default for Environment {
     fn default() -> Self {
-        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0 }
+        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0 }
     }
 }
 
