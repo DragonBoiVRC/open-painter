@@ -243,6 +243,9 @@ impl App {
                     if tool_button(ui, ph::HAND_POINTING, "Smudge (S)", self.tool == Tool::Smudge).clicked() {
                         self.tool = Tool::Smudge;
                     }
+                    if tool_button(ui, ph::PROJECTOR_SCREEN, "Projection (J): paint the stencil picture onto the model", self.tool == Tool::Project).clicked() {
+                        self.tool = Tool::Project;
+                    }
                     if tool_button(ui, ph::COPY_SIMPLE, "Clone (K): Ctrl+click sets the source", self.tool == Tool::Clone).clicked() {
                         self.tool = Tool::Clone;
                     }

@@ -36,16 +36,20 @@ fn tip_alpha(off: vec2<f32>, shape: vec4<f32>, radius_px: f32) -> f32 {
     return pic_value(textureSampleLevel(tip_tex, pic_samp, l * 0.5 + 0.5, lod));
 }
 
-// The stencil's value at a screen pixel, or 0 outside it.
-fn stencil_at(px: vec2<f32>) -> f32 {
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+// The stencil picture at a screen pixel (rgb as stored, alpha 0 outside it).
+fn stencil_color(px: vec2<f32>) -> vec4<f32> {
     let d = px - sg.stencil.xy;
     let c = sg.stencil_xf.x;
     let s = sg.stencil_xf.y;
     var l = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y) / max(sg.stencil.zw, vec2<f32>(1e-3));
     if (sg.stencil_xf.w > 0.5) { l.x = -l.x; }
-    if (max(abs(l.x), abs(l.y)) >= 1.0) { return 0.0; }
+    if (max(abs(l.x), abs(l.y)) >= 1.0) { return vec4<f32>(0.0); }
     let lod = log2(max(f32(textureDimensions(stencil_tex).y) / (2.0 * max(sg.stencil.w, 1.0)), 1.0));
-    return pic_value(textureSampleLevel(stencil_tex, pic_samp, l * 0.5 + 0.5, lod));
+    return textureSampleLevel(stencil_tex, pic_samp, l * 0.5 + 0.5, lod);
 }
 
 struct VsIn {
@@ -167,9 +171,12 @@ fn alpha_at(i: VsOut, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
         d = shape_dist(off, i.shape);
         if (d >= 1.0) { return -1.0; }
     }
+    // enables.x == 2 marks a projection stamp: the stencil picture supplies colour and alpha.
+    let project = i.enables.x > 1.5;
     var stencil = 1.0;
     if (sg.stencil_xf.z > 0.5) {
-        stencil = stencil_at(px);
+        let sc = stencil_color(px);
+        stencil = select(pic_value(sc), sc.a, project);
         if (stencil <= 0.003) { return -1.0; }
     }
 
@@ -206,12 +213,20 @@ fn stamp_alpha(i: VsOut) -> f32 {
 fn fs_main(i: VsOut) -> FsOut {
     let a = stamp_alpha(i);
     if (a < 0.0) { discard; }
-    let ab = a * i.enables.x;
+    let project = i.enables.x > 1.5;
+    var color = i.color.rgb;
+    if (project) {
+        let clip = sg.view_proj * vec4<f32>(i.world_pos, 1.0);
+        let ndc = clip.xyz / clip.w;
+        let px = vec2<f32>((ndc.x * 0.5 + 0.5) * sg.viewport.x, (0.5 - ndc.y * 0.5) * sg.viewport.y);
+        color = srgb_to_linear(stencil_color(px).rgb);
+    }
+    let ab = a * min(i.enables.x, 1.0);
     let am = a * i.enables.y;
     let ar = a * i.enables.z;
     let ah = a * i.enables.w;
     var o: FsOut;
-    o.base = vec4<f32>(i.color.rgb * ab, ab);
+    o.base = vec4<f32>(color * ab, ab);
     o.metal = vec4<f32>(i.values.x * am, am, 0.0, am);
     o.rough = vec4<f32>(i.values.y * ar, ar, 0.0, ar);
     o.height = vec4<f32>(i.values.w * ah, ah, 0.0, ah);

@@ -999,6 +999,27 @@ mod tests {
         assert!(tip_count > 0 && (tip_count as f32) < round_count as f32 * 0.8, "image tip painted {tip_count} vs round {round_count}");
     }
 
+    /// A projection stamp paints the stencil picture's own colour, not the brush colour.
+    #[test]
+    fn projection_paints_the_stencil_pictures_colour() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let (device, queue) = (&rig.device, &rig.queue);
+        let red = [255u8, 0, 0, 255];
+        rig.gpu.upload_image(device, queue, "red", &op_image::Decoded { width: 2, height: 2, rgba8: [red; 4].concat() });
+        rig.gpu.set_brush_pictures(crate::images::BrushPictures { stencil: Some("red".into()), stencil_place: [0.5, 0.5, 2.0, 0.0], ..Default::default() });
+        let mut stamp = dab(SIZE as f32 / 2.0, 30.0, 0.0, [2.0, 0.0, 0.0, 0.0]);
+        stamp.color = [0.0, 0.0, 1.0, 0.0]; // blue brush colour, which projection must ignore
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let base = rig.read(&rig.gpu.paint().output.base, 8);
+        let (u, v) = sphere_uv(rig.front);
+        let i = ((((v * SIZE as f32) as u32).min(SIZE - 1) * SIZE + ((u * SIZE as f32) as u32).min(SIZE - 1)) * 8) as usize;
+        let px = |c: usize| f16_to_f32(u16::from_le_bytes([base[i + c * 2], base[i + c * 2 + 1]]));
+        assert!(px(0) > 0.95 && px(1) < 0.05 && px(2) < 0.05 && px(3) > 0.95, "got rgba {} {} {} {}", px(0), px(1), px(2), px(3));
+    }
+
     #[test]
     fn projective_brush_paints_visible_side_only_and_undoes() {
         let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };

@@ -11,7 +11,7 @@ impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Brush", |ui| {
             ui.horizontal(|ui| {
-                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone")] {
+                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone"), (Tool::Project, "Project")] {
                     if ui.selectable_label(self.tool == tool, label).clicked() {
                         self.tool = tool;
                     }
@@ -20,6 +20,9 @@ impl App {
             if self.tool == Tool::Smudge {
                 slider_row(ui, "Smear distance", &mut self.brush.smudge_distance, 0.05..=1.5);
                 hint(ui, "Drags the paint under the brush along the stroke. Works on the layer's content in the 3D view.");
+            }
+            if self.tool == Tool::Project {
+                hint(ui, "Paints the stencil picture onto the model from the camera's point of view. Set the stencil below, line it up, then paint over it.");
             }
             if self.tool == Tool::Clone {
                 hint(ui, "Ctrl+click to choose where to copy from, then paint. The offset stays until you pick a new source.");

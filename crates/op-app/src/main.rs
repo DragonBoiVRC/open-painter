@@ -136,6 +136,8 @@ enum Tool {
     Smudge,
     /// Copies paint from another place on the surface.
     Clone,
+    /// Paints the stencil picture onto the surface through the brush, as a projector would.
+    Project,
 }
 
 #[derive(Default)]
@@ -1438,6 +1440,14 @@ impl App {
                 enables: [1.0, 1.0, 1.0, 1.0],
                 shape,
             },
+            Target::Content if self.tool == Tool::Project => Stamp {
+                brush,
+                color: [0.0, 0.0, 0.0, plane],
+                values: [0.0, 0.0, opacity, 0.0],
+                // 2 asks the shader for the stencil picture's colour.
+                enables: [2.0, 0.0, 0.0, 0.0],
+                shape,
+            },
             Target::Content => {
                 let lin = c.base_color.map(srgb_to_linear);
                 Stamp {
@@ -2055,7 +2065,7 @@ impl App {
             self.symmetry = if self.symmetry == 0 { 1 } else { 0 };
             self.status = if self.symmetry == 0 { "Symmetry off".into() } else { "Symmetry on: strokes are mirrored across X".into() };
         }
-        let (smaller, larger, paint, erase, smudge, clone, frame) = ui.input(|i| {
+        let (smaller, larger, paint, erase, smudge, clone, project, frame) = ui.input(|i| {
             (
                 i.key_pressed(Key::OpenBracket),
                 i.key_pressed(Key::CloseBracket),
@@ -2063,6 +2073,7 @@ impl App {
                 i.key_pressed(Key::E) || i.key_pressed(Key::Num2),
                 i.key_pressed(Key::S) && !i.modifiers.any() || i.key_pressed(Key::Num3),
                 i.key_pressed(Key::K) && !i.modifiers.any() || i.key_pressed(Key::Num4),
+                i.key_pressed(Key::J) && !i.modifiers.any() || i.key_pressed(Key::Num5),
                 i.key_pressed(Key::F) && !i.modifiers.any(),
             )
         });
@@ -2083,6 +2094,9 @@ impl App {
         }
         if clone {
             self.tool = Tool::Clone;
+        }
+        if project {
+            self.tool = Tool::Project;
         }
         if frame {
             self.frame_model();

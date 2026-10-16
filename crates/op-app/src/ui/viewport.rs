@@ -147,7 +147,9 @@ impl App {
                         }
                     }
                     let copies = matches!(self.tool, Tool::Smudge | Tool::Clone);
-                    let blocked = if copies && target == crate::Target::Mask {
+                    let blocked = if self.tool == Tool::Project && (target == crate::Target::Mask || self.brush_pics.stencil.is_none()) {
+                        Some("Projection paints the stencil picture onto layer content: pick a stencil in Properties - Brush")
+                    } else if copies && target == crate::Target::Mask {
                         Some("Smudge and clone work on layer content, not masks")
                     } else if self.tool == Tool::Clone && !self.stroke.active {
                         match self.clone_source.take() {
