@@ -393,22 +393,31 @@ impl Compositor {
                 NodeKind::Paint => {
                     let Some(content) = store.get(&node.id).and_then(|g| g.content.as_ref()) else { continue };
                     let filtered = self.filtered(device, encoder, content, &node.filters);
-                    self.pass(device, encoder, &back, &front, Src::Tex(filtered.as_ref().unwrap_or(content)), node, mask);
+                    self.pass(device, encoder, &back, &front, Src::Tex(filtered.as_ref().unwrap_or(content)), node, mask, true);
                     if let Some(f) = filtered {
                         self.pool.push(f);
                     }
                 }
                 NodeKind::Fill(f) => match self.projected_fill(device, encoder, f) {
                     Some(layer) => {
-                        self.pass(device, encoder, &back, &front, Src::Tex(&layer), node, mask);
+                        self.pass(device, encoder, &back, &front, Src::Tex(&layer), node, mask, true);
                         self.pool.push(layer);
                     }
-                    None => self.pass(device, encoder, &back, &front, Src::Fill(f), node, mask),
+                    None => {
+                        // A fill that sets neither emissive nor opacity leaves those channels as they were:
+                        // skip their pass and hand the backdrop's textures on instead.
+                        let extras = f.emissive.is_some() || f.opacity.is_some() || f.maps.emissive.is_some() || f.maps.opacity.is_some();
+                        self.pass(device, encoder, &back, &front, Src::Fill(f), node, mask, extras);
+                        if !extras {
+                            std::mem::swap(&mut back.emissive, &mut front.emissive);
+                            std::mem::swap(&mut back.opacity, &mut front.opacity);
+                        }
+                    }
                 },
                 NodeKind::Group { children } => {
                     let result = self.composite_nodes(device, encoder, children, store);
                     let filtered = self.filtered(device, encoder, &result, &node.filters);
-                    self.pass(device, encoder, &back, &front, Src::Tex(filtered.as_ref().unwrap_or(&result)), node, mask);
+                    self.pass(device, encoder, &back, &front, Src::Tex(filtered.as_ref().unwrap_or(&result)), node, mask, true);
                     if let Some(f) = filtered {
                         self.pool.push(f);
                     }
@@ -616,6 +625,7 @@ impl Compositor {
         src: Src<'_>,
         node: &Node,
         mask: Option<&wgpu::Texture>,
+        extras: bool,
     ) {
         let (is_fill, color, metal, rough, height, bits) = match &src {
             Src::Fill(f) => {
@@ -745,6 +755,9 @@ impl Compositor {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
+        }
+        if !extras {
+            return;
         }
         let emissive_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite_emissive_bind"),
