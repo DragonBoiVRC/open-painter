@@ -454,6 +454,8 @@ struct App {
     uv_wire: bool,
     /// Colours painted with lately, newest first (sRGB), for the swatch strip.
     recent_colors: Vec<[f32; 3]>,
+    /// Show the selected layer's mask on the model (toggled with the backslash key).
+    mask_view: bool,
     /// A colour-selection mask waiting for the user to click the piece of the model it should select.
     pick_id_for: Option<NodeId>,
     /// Section plane: axis (0 off, 1 x, 2 y, 3 z), position as a fraction of the model's size, flipped.
@@ -617,6 +619,7 @@ impl App {
             show_wireframe: false,
             section: (0, 0.5, false),
             pick_id_for: None,
+            mask_view: false,
             recent_colors: Vec::new(),
             paint_through: false,
             paint_backfaces: false,
@@ -2027,6 +2030,7 @@ impl App {
                         ("L", "toggle symmetry"),
                         ("W", "show or hide the mesh edges"),
                         ("F12", "save the 3D view as a PNG"),
+                        ("\\", "show the selected layer's mask on the model"),
                         ("C", "cycle base color / roughness / metallic / emissive / opacity views"),
                         ("[  ]", "smaller / larger brush"),
                         ("F", "frame the model"),
@@ -2351,6 +2355,10 @@ impl App {
             };
             self.set_view(next);
             self.status = format!("Viewport: {}", crate::ui::viewport::view_label(next));
+        }
+        if ui.input(|i| i.key_pressed(Key::Backslash) && !i.modifiers.any()) {
+            self.mask_view = !self.mask_view;
+            self.status = if self.mask_view { "Showing the selected layer's mask on the model (\\ to go back).".into() } else { String::new() };
         }
         if ui.input(|i| i.key_pressed(Key::F12)) {
             self.save_viewport_image();

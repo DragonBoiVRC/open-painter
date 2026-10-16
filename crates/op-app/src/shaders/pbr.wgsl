@@ -176,6 +176,10 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
 
     let pv = textureSample(preview_tex, preview_samp, uv_t);
     let nmap = textureSample(paint_normal, paint_samp, uv_t).rgb;
+    // The selected layer's mask, as grey (white reveals).
+    if (g.light_dir.w > 19.5) {
+        return vec4<f32>(vec3<f32>(pv.r), 1.0);
+    }
     if (g.light_dir.w > 2.5 && g.light_dir.w < 3.5) {
         return vec4<f32>(nmap, 1.0);
     }

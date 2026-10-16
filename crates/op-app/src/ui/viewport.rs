@@ -255,6 +255,8 @@ impl App {
             let l = Vec3::new(0.5, 0.8, 0.6);
             Vec3::new(c * l.x - s * l.z, l.y, s * l.x + c * l.z).normalize()
         };
+        // `\\` shows the selected layer's mask on the model, if it has one.
+        let mask_view = if self.mask_view { self.selected.filter(|id| self.doc.find(*id).is_some_and(|n| n.mask.as_ref().is_some_and(|m| m.enabled))) } else { None };
         let (near, far) = self.camera.near_far();
         let globals = Globals {
             view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).to_cols_array_2d(),
@@ -264,6 +266,7 @@ impl App {
                 light.y,
                 light.z,
                 match self.view {
+                    _ if mask_view.is_some() => 20.0,
                     View::Shaded => 0.0,
                     View::Map(_) => 1.0,
                     View::ShadedAo => 2.0,
@@ -281,7 +284,7 @@ impl App {
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ViewportCallback { globals, size_px, batches, active: self.active, hidden: self.hidden_flags(), wireframe: self.show_wireframe, fxaa: self.env.fxaa, paint_through: [self.paint_through, self.paint_backfaces] },
+            ViewportCallback { globals, size_px, batches, active: self.active, hidden: self.hidden_flags(), wireframe: self.show_wireframe, fxaa: self.env.fxaa, mask_view, paint_through: [self.paint_through, self.paint_backfaces] },
         ));
 
         // Brush outline: dark under light so it reads on any surface.

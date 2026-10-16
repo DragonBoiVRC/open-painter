@@ -162,6 +162,8 @@ pub struct ViewportGpu {
     wire_edges: Option<(wgpu::Buffer, u32)>,
     /// Draw the edges over the model.
     pub show_wire: bool,
+    /// Show this layer's mask on the model instead of the shaded surface (light_dir.w = 20).
+    pub mask_view: Option<u64>,
     /// Paint reaches hidden surfaces / back faces.
     pub paint_through: [bool; 2],
     /// The HDR environment the shader reflects when the lighting preset asks for it.
@@ -525,6 +527,7 @@ impl ViewportGpu {
             env_loaded: false,
             wire_edges: None,
             show_wire: false,
+            mask_view: None,
             paint_through: [false; 2],
             env,
             uv_pipeline,
@@ -863,6 +866,18 @@ impl ViewportGpu {
             pass.set_bind_group(1, &self.env.bind, &[]);
             pass.draw(0..3, 0..1);
         }
+        // The mask being viewed, as the "preview" picture of each tile of the active set.
+        let mask_binds: Vec<Option<wgpu::BindGroup>> = match (self.mask_view, self.sets.get(self.active)) {
+            (Some(node), Some(unit)) => unit
+                .tiles
+                .iter()
+                .map(|paint| {
+                    let mask = paint.store.get(&node)?.mask.as_ref()?;
+                    Some(make_preview_bind(device, &self.preview_layout, &mask.create_view(&Default::default()), &self.preview_sampler))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         if let (Some(v), Some(i)) = (&self.vbuf, &self.ibuf) {
             pass.set_pipeline(&self.pbr);
             pass.set_vertex_buffer(0, v.slice(..));
@@ -879,7 +894,11 @@ impl ViewportGpu {
                     if count == 0 {
                         continue;
                     }
-                    let preview = if set == self.active { self.preview_tiles.get(ti).unwrap_or(&self.preview_bind) } else { &self.preview_bind };
+                    let preview = if set == self.active {
+                        mask_binds.get(ti).and_then(Option::as_ref).or_else(|| self.preview_tiles.get(ti)).unwrap_or(&self.preview_bind)
+                    } else {
+                        &self.preview_bind
+                    };
                     pass.set_bind_group(1, paint.material_bind(), &[]);
                     pass.set_bind_group(2, preview, &[]);
                     pass.set_bind_group(3, &self.env.bind, &[]);
@@ -960,6 +979,8 @@ pub struct ViewportCallback {
     pub wireframe: bool,
     /// Smooth the edges of the picture.
     pub fxaa: bool,
+    /// Show this layer's mask on the model.
+    pub mask_view: Option<u64>,
     /// Paint reaches hidden surfaces / back faces.
     pub paint_through: [bool; 2],
 }
@@ -977,6 +998,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             gpu.active = self.active.min(gpu.sets.len().saturating_sub(1));
             gpu.hidden = self.hidden.clone();
             gpu.show_wire = self.wireframe;
+            gpu.mask_view = self.mask_view;
             gpu.fxaa = self.fxaa;
             gpu.paint_through = self.paint_through;
             gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
@@ -1806,6 +1828,35 @@ mod tests {
         rig.run(&lit, &[PaintOp::ShowAll]);
         rig.run(&lit, &[]);
         assert_eq!(center_pixel(&rig), shown, "everything is back");
+    }
+
+    /// The mask view shows the selected layer's mask on the model as grey: black hides, white reveals.
+    #[test]
+    fn the_mask_view_shows_the_mask_on_the_model() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::with_default_material();
+        let layer = doc.add(None, None, "metal", fill(None, Some(1.0), None));
+        doc.find_mut(layer).unwrap().mask = Some(Mask::new(false));
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        rig.globals.light_dir[3] = 20.0;
+        rig.gpu.mask_view = Some(layer);
+        rig.run(&doc, &[]);
+        let hidden = center_pixel(&rig);
+        assert!(hidden[0] < 8 && hidden[1] < 8, "a black mask reads black: {hidden:?}");
+        let reveal = {
+            let mut r = dab(SIZE as f32 / 2.0, 40.0, 1.0, [0.0; 4]);
+            r.values[0] = 1.0;
+            r
+        };
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Mask }, PaintOp::Stamps { layer, target: Target::Mask, stamps: vec![reveal] }]);
+        rig.run(&doc, &[]);
+        let shown = center_pixel(&rig);
+        assert!(shown[0] > 247 && shown[1] > 247 && shown[2] > 247, "the painted part reads white: {shown:?}");
+        // Off again: the shaded model returns.
+        rig.gpu.mask_view = None;
+        rig.globals.light_dir[3] = 0.0;
+        rig.run(&doc, &[]);
+        assert_ne!(center_pixel(&rig), shown);
     }
 
     /// Paint reaches the far side of the model only when both "through" options are on.
