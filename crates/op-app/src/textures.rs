@@ -301,44 +301,6 @@ impl App {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn library_file_names_round_trip_and_reject_impostors() {
-        let id = "0123456789abcdef0123456789abcdef";
-        let file = library_file_name(id, "wood/planks BaseColor.png");
-        assert_eq!(parse_library_file_name(&file), Some((id.to_string(), "planks BaseColor.png".to_string())));
-        for bad in ["wood.png", "../x--y.png", "0123--x.png", &format!("{}--x", "G".repeat(32)), ""] {
-            assert!(parse_library_file_name(bad).is_none(), "{bad}");
-        }
-        // A name can contain the separator without confusing the id.
-        let tricky = library_file_name(id, "a--b.png");
-        assert_eq!(parse_library_file_name(&tricky).unwrap().0, id);
-    }
-
-    #[test]
-    fn names_are_cleaned_for_storage() {
-        assert_eq!(clean_name("../../etc/passwd"), "passwd");
-        assert_eq!(clean_name("C:\\tex\\wood.png"), "wood.png");
-        assert_eq!(clean_name(".."), "texture");
-        assert_eq!(clean_name("  "), "texture");
-        assert_eq!(clean_name("naïve:tex*.png"), "naïve_tex_.png");
-        assert!(clean_name(&"a".repeat(500)).len() <= 120);
-    }
-
-    #[test]
-    fn only_image_files_are_recognised() {
-        for ok in ["a.png", "A.JPG", "x.tga", "y.EXR", "z.tiff", "w.webp"] {
-            assert!(is_image_path(Path::new(ok)), "{ok}");
-        }
-        for no in ["a.fbx", "b.opproj", "c", "d.png.txt", "e.glb"] {
-            assert!(!is_image_path(Path::new(no)), "{no}");
-        }
-    }
-}
-
 /// File extensions an HDR environment can come in.
 const HDRI_EXTENSIONS: [&str; 3] = ["hdr", "exr", "png"];
 
@@ -435,4 +397,42 @@ fn read_hdri(path: &Path, save: bool) -> Result<(String, op_image::hdr::HdrImage
         }
     }
     Ok((name, img))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn library_file_names_round_trip_and_reject_impostors() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let file = library_file_name(id, "wood/planks BaseColor.png");
+        assert_eq!(parse_library_file_name(&file), Some((id.to_string(), "planks BaseColor.png".to_string())));
+        for bad in ["wood.png", "../x--y.png", "0123--x.png", &format!("{}--x", "G".repeat(32)), ""] {
+            assert!(parse_library_file_name(bad).is_none(), "{bad}");
+        }
+        // A name can contain the separator without confusing the id.
+        let tricky = library_file_name(id, "a--b.png");
+        assert_eq!(parse_library_file_name(&tricky).unwrap().0, id);
+    }
+
+    #[test]
+    fn names_are_cleaned_for_storage() {
+        assert_eq!(clean_name("../../etc/passwd"), "passwd");
+        assert_eq!(clean_name("C:\\tex\\wood.png"), "wood.png");
+        assert_eq!(clean_name(".."), "texture");
+        assert_eq!(clean_name("  "), "texture");
+        assert_eq!(clean_name("naïve:tex*.png"), "naïve_tex_.png");
+        assert!(clean_name(&"a".repeat(500)).len() <= 120);
+    }
+
+    #[test]
+    fn only_image_files_are_recognised() {
+        for ok in ["a.png", "A.JPG", "x.tga", "y.EXR", "z.tiff", "w.webp"] {
+            assert!(is_image_path(Path::new(ok)), "{ok}");
+        }
+        for no in ["a.fbx", "b.opproj", "c", "d.png.txt", "e.glb"] {
+            assert!(!is_image_path(Path::new(no)), "{no}");
+        }
+    }
 }
