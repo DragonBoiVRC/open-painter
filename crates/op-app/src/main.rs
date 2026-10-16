@@ -167,6 +167,14 @@ impl Default for Environment {
     }
 }
 
+/// Whether a ray hit on the triangle starting at index `first`, at point `hit`, is a surface the user can
+/// see: not hidden, and not on the cut-away side of the section plane (`plane` is `[nx, ny, nz, w]`,
+/// all zero for no plane; the cut side is where `dot(hit, n) > w`).
+fn hit_is_visible(hidden: &std::collections::HashSet<usize>, plane: [f32; 4], first: usize, hit: glam::Vec3) -> bool {
+    let cut = glam::Vec3::new(plane[0], plane[1], plane[2]);
+    !hidden.contains(&first) && !(cut.length_squared() > 0.5 && hit.dot(cut) > plane[3])
+}
+
 /// Put `c` first in the list of recent colours (once, at most twelve).
 fn push_recent(list: &mut Vec<[f32; 3]>, c: [f32; 3]) {
     if list.first() == Some(&c) {
@@ -502,6 +510,9 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    /// The triangles (by the index of their first corner) the user has hidden, mirroring the GPU's
+    /// hidden-parts mask so clicks do not land on them.
+    hidden_tris: std::collections::HashSet<usize>,
     /// A colour-selection mask waiting for the user to click the piece of the model it should select.
     pick_id_for: Option<NodeId>,
     /// Section plane: axis (0 off, 1 x, 2 y, 3 z), position as a fraction of the model's size, flipped.
@@ -669,6 +680,7 @@ impl App {
             show_wireframe: false,
             section: (0, 0.5, false),
             pick_id_for: None,
+            hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
             recent_colors: Vec::new(),
             paint_through: false,
@@ -755,6 +767,7 @@ impl App {
         }
         self.mesh = mesh;
         self.mesh_name = name;
+        self.hidden_tris.clear();
     }
 
     fn project_name(&self) -> String {
@@ -1214,7 +1227,7 @@ impl App {
                 let n = results.first().map_or(0, |r| r.maps.len());
                 let covered: usize = results.iter().map(|r| r.covered).sum();
                 // The bake belongs to the set it was started for, which may no longer be the active one.
-                let extents: Vec<[f32; 3]> = (0..results.len()).map(|t| self.bake_extent(set, t)).collect();
+                let extents: Vec<sets::BakeFrame> = (0..results.len()).map(|t| self.bake_extent(set, t)).collect();
                 let normals = self.with_set(set, |st| {
                     let mut ops = Vec::new();
                     for (t, result) in results.into_iter().enumerate() {
@@ -1770,9 +1783,10 @@ impl App {
 
     /// The UV positions of the triangles (three per triangle) the click along a ray selects, by the
     /// fill scope, in the active texture set.
-    fn picked_triangles(&mut self, origin: glam::Vec3, dir: glam::Vec3) -> Option<Vec<[f32; 2]>> {
+    fn picked_triangles(&mut self, origin: glam::Vec3, dir: glam::Vec3) -> Option<(Vec<usize>, Vec<[f32; 2]>)> {
         let active = self.active;
-        let Some((set, first)) = self.mesh.raycast_triangle_where(origin, dir, |s| s == active) else {
+        let hit = self.mesh.raycast_triangle_with(origin, dir, |s| s == active, self.ray_accept());
+        let Some((set, first)) = hit else {
             self.status = "No model under the cursor.".into();
             return None;
         };
@@ -1788,13 +1802,37 @@ impl App {
         if firsts.is_empty() {
             return None;
         }
-        Some(firsts.iter().flat_map(|&t| (0..3).map(move |c| t + c)).map(|i| self.mesh.vertices[self.mesh.indices[i] as usize].uv).collect())
+        let uvs = firsts.iter().flat_map(|&t| (0..3).map(move |c| t + c)).map(|i| self.mesh.vertices[self.mesh.indices[i] as usize].uv).collect();
+        Some((firsts, uvs))
+    }
+
+    /// The test a ray hit has to pass to count as the surface the user sees: not a part they hid and
+    /// not cut away by the section plane.
+    pub(crate) fn ray_accept(&self) -> impl Fn(usize, glam::Vec3) -> bool + '_ {
+        let plane = self.section_plane();
+        move |first, hit| hit_is_visible(&self.hidden_tris, plane, first, hit)
+    }
+
+    /// Show every part of the model again.
+    pub(crate) fn show_all_parts(&mut self) {
+        self.pending.push(PaintOp::ShowAll);
+        let ranges = self.mesh.set_ranges();
+        if let Some(r) = ranges.get(self.active) {
+            self.hidden_tris.retain(|t| !(r.first_index as usize..(r.first_index + r.index_count) as usize).contains(t));
+        }
     }
 
     /// Hide (or, with `show`, reveal again) the part of the model a click along a ray lands on.
     fn hide_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, show: bool) {
-        let Some(uvs) = self.picked_triangles(origin, dir) else { return };
-        self.status = format!("{} {} triangle(s). Show all parts in Properties - Brush.", if show { "Showed" } else { "Hid" }, uvs.len() / 3);
+        let Some((firsts, uvs)) = self.picked_triangles(origin, dir) else { return };
+        self.status = format!("{} {} triangle(s). Show all parts in Properties - Brush.", if show { "Showed" } else { "Hid" }, firsts.len());
+        for t in firsts {
+            if show {
+                self.hidden_tris.remove(&t);
+            } else {
+                self.hidden_tris.insert(t);
+            }
+        }
         self.pending.push(PaintOp::Hide { uvs, hidden: !show });
     }
 
@@ -1808,7 +1846,7 @@ impl App {
                 return;
             }
         };
-        let Some(uvs) = self.picked_triangles(origin, dir) else { return };
+        let Some((_, uvs)) = self.picked_triangles(origin, dir) else { return };
         let triangles = uvs.len() / 3;
         let c = &self.channels;
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
@@ -2531,7 +2569,7 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod lazy_tests {
-    use super::{lazy_step, push_recent, DisplaySettings};
+    use super::{hit_is_visible, lazy_step, push_recent, DisplaySettings};
 
     #[test]
     fn display_settings_survive_a_round_trip_and_bad_files_give_defaults() {
@@ -2552,6 +2590,18 @@ mod lazy_tests {
         assert!(odd.env.show_transparency, "missing keys take their defaults");
         std::fs::write(&path, "not json at all").unwrap();
         assert_eq!(DisplaySettings::load(&path), DisplaySettings::default());
+    }
+
+    #[test]
+    fn clicks_pass_through_hidden_parts_and_cut_away_surfaces() {
+        let hidden = std::collections::HashSet::from([3usize]);
+        let point = glam::Vec3::new(0.5, 0.0, 0.0);
+        assert!(hit_is_visible(&hidden, [0.0; 4], 0, point));
+        assert!(!hit_is_visible(&hidden, [0.0; 4], 3, point), "a hidden triangle");
+        // A plane cutting everything with x > 0.2: the point at x = 0.5 is cut away, x = -0.5 is not.
+        let plane = [1.0, 0.0, 0.0, 0.2];
+        assert!(!hit_is_visible(&hidden, plane, 0, point));
+        assert!(hit_is_visible(&hidden, plane, 0, glam::Vec3::new(-0.5, 0.0, 0.0)));
     }
 
     #[test]

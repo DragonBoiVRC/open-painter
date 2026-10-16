@@ -287,7 +287,7 @@ impl App {
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
-            ViewportCallback { globals, size_px, batches, active: self.active, hidden: self.hidden_flags(), wireframe: self.show_wireframe, fxaa: self.env.fxaa, mask_view, paint_through: [self.paint_through, self.paint_backfaces] },
+            ViewportCallback { globals, size_px, batches, active: self.active, hidden: self.hidden_flags(), wireframe: self.show_wireframe, fxaa: self.env.fxaa, mask_view, uv_buffer: matches!(self.tool, Tool::Smudge | Tool::Clone), paint_through: [self.paint_through, self.paint_backfaces] },
         ));
 
         // Brush outline: dark under light so it reads on any surface.

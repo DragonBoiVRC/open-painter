@@ -165,11 +165,16 @@ pub struct ViewportGpu {
     /// An HDR environment is loaded (so there is something to draw behind the model).
     env_loaded: bool,
     /// Every edge of the mesh once, as a line list over the vertex buffer, and its index count.
-    wire_edges: Option<(wgpu::Buffer, u32)>,
+    /// The edges of each tile of each set as line lists over the vertex buffer, built when first wanted.
+    wire_edges: Vec<Vec<Option<(wgpu::Buffer, u32)>>>,
+    /// The mesh changed since the edge lists were built.
+    wire_dirty: bool,
     /// Draw the edges over the model.
     pub show_wire: bool,
     /// Show this layer's mask on the model instead of the shaded surface (light_dir.w = 20).
     pub mask_view: Option<u64>,
+    /// Draw the UV buffer each frame (only smudge and clone read it).
+    pub uv_buffer: bool,
     /// Paint reaches hidden surfaces / back faces.
     pub paint_through: [bool; 2],
     /// The HDR environment the shader reflects when the lighting preset asks for it.
@@ -411,7 +416,7 @@ impl ViewportGpu {
         let wire_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/wire3d.wgsl"));
         let wire_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("wire3d_pl"),
-            bind_group_layouts: &[Some(&globals_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&paint.material_layout)],
             immediate_size: 0,
         });
         let wire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -574,9 +579,11 @@ impl ViewportGpu {
             ssao_depth_layout: depth_layout,
             bg_pipeline,
             env_loaded: false,
-            wire_edges: None,
+            wire_edges: Vec::new(),
+            wire_dirty: true,
             show_wire: false,
             mask_view: None,
+            uv_buffer: true,
             paint_through: [false; 2],
             env,
             uv_pipeline,
@@ -671,25 +678,7 @@ impl ViewportGpu {
         }));
         self.index_count = mesh.indices.len() as u32;
         self.cpu_indices = mesh.indices.clone();
-        self.wire_edges = {
-            let mut seen = std::collections::HashSet::new();
-            let mut edges: Vec<u32> = Vec::new();
-            for t in mesh.indices.chunks_exact(3) {
-                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-                    if seen.insert((a.min(b), a.max(b))) {
-                        edges.extend([a, b]);
-                    }
-                }
-            }
-            (!edges.is_empty()).then(|| {
-                let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mesh_edges"),
-                    contents: bytemuck::cast_slice(&edges),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-                (buf, edges.len() as u32)
-            })
-        };
+        self.wire_dirty = true;
         self.uv.generation += 1;
         self.ranges = mesh.set_ranges().iter().map(|s| (s.first_index, s.index_count)).collect();
         let layout = mesh.unit_ranges(udim);
@@ -734,6 +723,41 @@ impl ViewportGpu {
                 p.rebuild(device, queue, doc, size);
             }
         }
+    }
+
+    /// Build the edge lists the wireframe overlay draws: every edge once per tile of each set.
+    fn build_wire_edges(&mut self, device: &wgpu::Device) {
+        self.wire_edges = self
+            .sets
+            .iter()
+            .map(|unit| {
+                unit.tile_ranges
+                    .iter()
+                    .map(|&(first, count)| {
+                        let end = ((first + count) as usize).min(self.cpu_indices.len());
+                        let tris = &self.cpu_indices[(first as usize).min(end)..end];
+                        let mut seen = std::collections::HashSet::new();
+                        let mut edges: Vec<u32> = Vec::new();
+                        for t in tris.chunks_exact(3) {
+                            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                                if seen.insert((a.min(b), a.max(b))) {
+                                    edges.extend([a, b]);
+                                }
+                            }
+                        }
+                        (!edges.is_empty()).then(|| {
+                            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("mesh_edges"),
+                                contents: bytemuck::cast_slice(&edges),
+                                usage: wgpu::BufferUsages::INDEX,
+                            });
+                            (buf, edges.len() as u32)
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        self.wire_dirty = false;
     }
 
     /// Make `image` available to fill layers under `id`. Uploading the same id again keeps the first.
@@ -859,6 +883,9 @@ impl ViewportGpu {
     /// Apply each batch to its set's paint store, then draw every set with its own material.
     pub fn render_sets(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, globals: &Globals, size: [u32; 2], batches: &[SetBatch]) {
         self.ensure_offscreen(device, size);
+        if self.show_wire && self.wire_dirty {
+            self.build_wire_edges(device);
+        }
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(globals));
         let mut plain = *globals;
         plain.light_dir[3] = 0.0;
@@ -956,12 +983,21 @@ impl ViewportGpu {
                 }
             }
         }
-        if let (true, Some(v), Some((edges, count))) = (self.show_wire, &self.vbuf, &self.wire_edges) {
+        if let (true, Some(v)) = (self.show_wire, &self.vbuf) {
             pass.set_pipeline(&self.wire_pipeline);
             pass.set_bind_group(0, &self.globals_bind, &[]);
             pass.set_vertex_buffer(0, v.slice(..));
-            pass.set_index_buffer(edges.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..*count, 0, 0..1);
+            for (set, unit) in self.sets.iter().enumerate() {
+                if self.hidden.get(set).copied().unwrap_or(false) {
+                    continue;
+                }
+                for (ti, paint) in unit.tiles.iter().enumerate() {
+                    let Some(Some((edges, count))) = self.wire_edges.get(set).and_then(|t| t.get(ti)) else { continue };
+                    pass.set_bind_group(1, paint.material_bind(), &[]);
+                    pass.set_index_buffer(edges.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..*count, 0, 0..1);
+                }
+            }
         }
         drop(pass);
 
@@ -992,6 +1028,9 @@ impl ViewportGpu {
         }
 
         // The UV buffer, for the next frame's smudge and clone stamps.
+        if !self.uv_buffer {
+            return;
+        }
         let mut uv_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("uvbuf_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1057,6 +1096,8 @@ pub struct ViewportCallback {
     pub fxaa: bool,
     /// Show this layer's mask on the model.
     pub mask_view: Option<u64>,
+    /// Keep the UV buffer up to date (smudge and clone need it).
+    pub uv_buffer: bool,
     /// Paint reaches hidden surfaces / back faces.
     pub paint_through: [bool; 2],
 }
@@ -1075,6 +1116,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             gpu.hidden = self.hidden.clone();
             gpu.show_wire = self.wireframe;
             gpu.mask_view = self.mask_view;
+            gpu.uv_buffer = self.uv_buffer;
             gpu.fxaa = self.fxaa;
             gpu.paint_through = self.paint_through;
             gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
@@ -1681,7 +1723,7 @@ mod tests {
             }
         }
         let normal: Vec<u8> = [128u8, 128, 255, 255].repeat((SIZE * SIZE) as usize);
-        let projection = crate::paint::ProjectionData { position, normal, extent: [1.0, 1.0, 1.0] };
+        let projection = crate::paint::ProjectionData { position, normal, offset: [0.0; 3], extent: [1.0, 1.0, 1.0] };
         rig.run(&doc, &[PaintOp::SetBakedNormal { size: SIZE, rgba8: None, projection: Some(projection) }]);
         let projected = px(&rig, x, y);
         assert!(projected[0] > 0.9 && projected[2] < 0.1, "planar Z should read the flipped row (red), got {projected:?}");
@@ -1881,6 +1923,23 @@ mod tests {
         let hidden = center_pixel(&rig);
         assert_ne!(hidden, shown, "the hidden model should not be drawn");
         assert!(hidden[0] < 40 && hidden[1] < 40, "the clear colour shows: {hidden:?}");
+        // Hidden means hidden in every view, and the wireframe does not float over it either.
+        for view in [3.0, 4.0, 7.0, 8.0] {
+            rig.globals.light_dir[3] = view;
+            rig.run(&lit, &[]);
+            assert_eq!(center_pixel(&rig), hidden, "view {view} drew a hidden part");
+        }
+        rig.globals.light_dir[3] = 0.0;
+        let frame = |rig: &Rig| {
+            let tex = &rig.gpu.offscreen.as_ref().expect("a frame").color;
+            crate::gpu_io::read_texture(&rig.device, &rig.queue, tex, SIZE, 4)
+        };
+        rig.run(&lit, &[]);
+        let bare = frame(&rig);
+        rig.gpu.show_wire = true;
+        rig.run(&lit, &[]);
+        assert_eq!(frame(&rig), bare, "wire lines over a hidden model");
+        rig.gpu.show_wire = false;
 
         // Nothing lands on hidden parts.
         rig.run(&doc, &[PaintOp::Reset(SIZE)]);

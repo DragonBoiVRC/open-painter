@@ -2,7 +2,7 @@
 
 use super::{hint, section, slider_row};
 use crate::ui::theme;
-use crate::{App, PaintOp, Tool};
+use crate::{App, Tool};
 
 /// Names of the stamp shapes, in the order the shaders number them.
 const SHAPES: [&str; 6] = ["Round", "Square", "Diamond", "Chalk", "Streaks", "Image"];
@@ -31,7 +31,7 @@ impl App {
                     }
                 });
                 if ui.button("Show all parts").clicked() {
-                    self.pending.push(PaintOp::ShowAll);
+                    self.show_all_parts();
                 }
                 hint(ui, "Click the model to hide that part so you can paint what is behind it. Shift+click shows it again. Hidden parts are not saved with the project.");
             }

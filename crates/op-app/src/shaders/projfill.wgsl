@@ -14,7 +14,8 @@ struct Params {
                            // z: inverted scalar channels (same bits), w: projection (1 triplanar, 2 X, 3 Y, 4 Z)
     xf: vec4<f32>,         // tiling x, y, offset x, y
     xf2: vec4<f32>,        // cos and sin of the rotation, triplanar sharpness, _
-    extent: vec4<f32>,     // the model's size along x, y, z with the largest axis as 1
+    extent: vec4<f32>,     // the baked mesh's size along x, y, z, in units of the model's longest side
+    offset: vec4<f32>,     // where that box starts, in the same units from the model's minimum corner
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -76,7 +77,7 @@ fn project(t: texture_2d<f32>, q: vec3<f32>, w: vec3<f32>) -> vec4<f32> {
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
     let xy = vec2<i32>(pos.xy);
-    let q = textureLoad(pos_tex, xy, 0).rgb * p.extent.xyz;
+    let q = textureLoad(pos_tex, xy, 0).rgb * p.extent.xyz + p.offset.xyz;
     let n = textureLoad(nrm_tex, xy, 0).rgb * 2.0 - vec3<f32>(1.0);
     var w = pow(abs(n), vec3<f32>(max(p.xf2.z, 0.1)));
     w = w / max(w.x + w.y + w.z, 1e-6);

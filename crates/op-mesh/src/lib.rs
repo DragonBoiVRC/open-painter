@@ -127,14 +127,35 @@ impl Mesh {
 
     /// The nearest visible surface along a ray: its texture set, the distance and the UV coordinate hit.
     pub fn raycast_uv_where(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool) -> Option<(usize, f32, [f32; 2])> {
+        self.raycast_uv_with(origin, dir, visible, |_, _| true)
+    }
+
+    /// Like [`Mesh::raycast_uv_where`], and a hit also has to be accepted: `accept` gets the index of the
+    /// triangle's first corner and the point hit, and can refuse hidden or cut-away surfaces.
+    pub fn raycast_uv_with(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool, accept: impl Fn(usize, Vec3) -> bool) -> Option<(usize, f32, [f32; 2])> {
+        self.raycast_impl(origin, dir, visible, accept).map(|(set, _, dist, uv)| (set, dist, uv))
+    }
+
+    /// The nearest visible triangle along a ray: its texture set and the index of its first corner in
+    /// `indices` (a multiple of three).
+    pub fn raycast_triangle_where(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool) -> Option<(usize, usize)> {
+        self.raycast_triangle_with(origin, dir, visible, |_, _| true)
+    }
+
+    /// Like [`Mesh::raycast_triangle_where`] with an `accept` test (see [`Mesh::raycast_uv_with`]).
+    pub fn raycast_triangle_with(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool, accept: impl Fn(usize, Vec3) -> bool) -> Option<(usize, usize)> {
+        self.raycast_impl(origin, dir, visible, accept).map(|(set, first, _, _)| (set, first))
+    }
+
+    fn raycast_impl(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool, accept: impl Fn(usize, Vec3) -> bool) -> Option<(usize, usize, f32, [f32; 2])> {
         let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
-        let mut best: Option<(usize, f32, [f32; 2])> = None;
+        let mut best: Option<(usize, usize, f32, [f32; 2])> = None;
         for (set, r) in self.set_ranges().iter().enumerate() {
             if !visible(set) {
                 continue;
             }
-            let tris = &self.indices[r.first_index as usize..(r.first_index + r.index_count) as usize];
-            for t in tris.chunks_exact(3) {
+            for first in (r.first_index..r.first_index + r.index_count).step_by(3) {
+                let t = &self.indices[first as usize..first as usize + 3];
                 let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
                 // Moller-Trumbore.
                 let (e1, e2) = (b - a, c - a);
@@ -155,52 +176,14 @@ impl Mesh {
                     continue;
                 }
                 let dist = e2.dot(q) * inv;
-                if dist > 0.0 && best.is_none_or(|(_, d, _)| dist < d) {
+                if dist > 0.0 && best.is_none_or(|(_, _, d, _)| dist < d) && accept(first as usize, origin + dir * dist) {
                     let uv = |i: u32| Vec2::from(self.vertices[i as usize].uv);
                     let hit = uv(t[0]) * (1.0 - u - v) + uv(t[1]) * u + uv(t[2]) * v;
-                    best = Some((set, dist, hit.to_array()));
+                    best = Some((set, first as usize, dist, hit.to_array()));
                 }
             }
         }
         best
-    }
-
-    /// The nearest visible triangle along a ray: its texture set and the index of its first corner in
-    /// `indices` (a multiple of three).
-    pub fn raycast_triangle_where(&self, origin: Vec3, dir: Vec3, visible: impl Fn(usize) -> bool) -> Option<(usize, usize)> {
-        let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
-        let mut best: Option<(usize, usize, f32)> = None;
-        for (set, r) in self.set_ranges().iter().enumerate() {
-            if !visible(set) {
-                continue;
-            }
-            for first in (r.first_index..r.first_index + r.index_count).step_by(3) {
-                let t = &self.indices[first as usize..first as usize + 3];
-                let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
-                let (e1, e2) = (b - a, c - a);
-                let p = dir.cross(e2);
-                let det = e1.dot(p);
-                if det.abs() < 1e-12 {
-                    continue;
-                }
-                let inv = 1.0 / det;
-                let s = origin - a;
-                let u = s.dot(p) * inv;
-                if !(0.0..=1.0).contains(&u) {
-                    continue;
-                }
-                let q = s.cross(e1);
-                let v = dir.dot(q) * inv;
-                if v < 0.0 || u + v > 1.0 {
-                    continue;
-                }
-                let dist = e2.dot(q) * inv;
-                if dist > 0.0 && best.is_none_or(|(_, _, d)| dist < d) {
-                    best = Some((set, first as usize, dist));
-                }
-            }
-        }
-        best.map(|(set, first, _)| (set, first))
     }
 
     /// The triangles connected to the one starting at index `first`, as the first-corner indices of
@@ -731,5 +714,19 @@ mod tests {
         assert_eq!(m.connected_triangles(12, Connect::FlatFace(5.0)), vec![12]);
         // A generous tolerance walks over the crease.
         assert_eq!(m.connected_triangles(0, Connect::FlatFace(100.0)), vec![0, 3, 6, 9]);
+    }
+
+    #[test]
+    fn a_ray_can_see_through_triangles_the_caller_refuses() {
+        // Two parallel triangles, the one at z=1 in front of the one at z=0.
+        let v = |z: f32| [Vertex { position: [-1.0, -1.0, z], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] }, Vertex { position: [1.0, -1.0, z], normal: [0.0, 0.0, 1.0], uv: [1.0, 0.0] }, Vertex { position: [0.0, 1.0, z], normal: [0.0, 0.0, 1.0], uv: [0.5, 1.0] }];
+        let mut vertices = v(0.0).to_vec();
+        vertices.extend(v(1.0));
+        let m = Mesh { vertices, indices: vec![0, 1, 2, 3, 4, 5], sets: Vec::new() };
+        let (o, d) = (Vec3::new(0.0, 0.0, 5.0), -Vec3::Z);
+        assert_eq!(m.raycast_triangle_where(o, d, |_| true), Some((0, 3)), "the front triangle first");
+        assert_eq!(m.raycast_triangle_with(o, d, |_| true, |first, _| first != 3), Some((0, 0)), "refusing it reveals the one behind");
+        assert_eq!(m.raycast_triangle_with(o, d, |_| true, |_, hit| hit.z < 0.5), Some((0, 0)), "refusing by position too");
+        assert!(m.raycast_uv_with(o, d, |_| true, |_, _| false).is_none(), "refusing everything hits nothing");
     }
 }

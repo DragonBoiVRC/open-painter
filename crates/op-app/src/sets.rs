@@ -87,9 +87,13 @@ pub fn isolate(hidden: &HashSet<usize>, i: usize, count: usize) -> HashSet<usize
     if alone { HashSet::new() } else { (0..count).filter(|s| *s != i).collect() }
 }
 
+/// Where a baked mesh sits in the whole model: its box's start and size, in units of the model's
+/// longest side measured from the model's minimum corner.
+pub type BakeFrame = ([f32; 3], [f32; 3]);
+
 /// The op that gives a set's paint store its baked normal map and the maps projected fills read
-/// (or removes them). `extent` is the size of the baked mesh along x, y, z.
-pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32, extent: [f32; 3]) -> PaintOp {
+/// (or removes them).
+pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32, frame: BakeFrame) -> PaintOp {
     let rgba8 = baked.get(&MeshMap::NormalBase).filter(|b| b.size == size && b.channels == 3).map(|b| {
         let mut out = Vec::with_capacity(b.texels() * 4);
         for i in 0..b.texels() {
@@ -111,8 +115,7 @@ pub fn baked_normal_op(baked: &HashMap<MeshMap, BakedMap>, size: u32, extent: [f
             normal.extend(nrm.texel(i).map(|v| (v * 255.0 + 0.5) as u8));
             normal.push(255);
         }
-        let largest = extent.iter().cloned().fold(1e-6f32, f32::max);
-        ProjectionData { position, normal, extent: extent.map(|e| (e / largest).max(1e-3)) }
+        ProjectionData { position, normal, offset: frame.0, extent: frame.1.map(|e| e.max(1e-3)) }
     });
     PaintOp::SetBakedNormal { size, rgba8, projection }
 }
@@ -123,18 +126,23 @@ pub fn has_uploadable_bakes(baked: &HashMap<MeshMap, BakedMap>) -> bool {
 }
 
 impl App {
-    /// The size of the mesh a tile of `set` is baked from along x, y, z (what a Position bake is
-    /// normalised by).
-    pub(crate) fn bake_extent(&self, set: usize, tile: usize) -> [f32; 3] {
+    /// Where the mesh a tile of `set` is baked from sits in the whole model (what a Position bake is
+    /// normalised by), in units of the model's longest side from its minimum corner.
+    pub(crate) fn bake_extent(&self, set: usize, tile: usize) -> BakeFrame {
         let low = if self.udim {
             self.mesh.set_tiles(set).get(tile).and_then(|t| self.mesh.extract_tile(set, *t))
         } else {
             self.mesh.extract_set(set)
         };
-        low.map_or([1.0; 3], |m| {
-            let (lo, hi) = m.bounds();
-            (hi - lo).to_array()
-        })
+        let (mlo, mhi) = self.mesh.bounds();
+        let largest = (mhi - mlo).max_element().max(1e-6);
+        match low {
+            Some(m) => {
+                let (lo, hi) = m.bounds();
+                (((lo - mlo) / largest).to_array(), ((hi - lo) / largest).to_array())
+            }
+            None => ([0.0; 3], [1.0; 3]),
+        }
     }
 
     /// Per-set "hidden" flags for the 3D view.
@@ -342,7 +350,7 @@ impl App {
         let near = inv.project_point3(ndc.extend(0.0));
         let far = inv.project_point3(ndc.extend(1.0));
         let active = self.active;
-        let (set, _, uv) = self.mesh.raycast_uv_where(near, (far - near).normalize_or_zero(), |s| s == active)?;
+        let (set, _, uv) = self.mesh.raycast_uv_with(near, (far - near).normalize_or_zero(), |s| s == active, self.ray_accept())?;
         if set != active || !(0.0..1.0).contains(&uv[0]) || !(0.0..1.0).contains(&uv[1]) {
             return None;
         }
@@ -360,7 +368,7 @@ impl App {
         let inv = self.camera.view_proj(w / h).inverse();
         let near = inv.project_point3(ndc.extend(0.0));
         let far = inv.project_point3(ndc.extend(1.0));
-        let (set, _, uv) = self.mesh.raycast_uv_where(near, (far - near).normalize_or_zero(), |s| !self.hidden_sets.contains(&s))?;
+        let (set, _, uv) = self.mesh.raycast_uv_with(near, (far - near).normalize_or_zero(), |s| !self.hidden_sets.contains(&s), self.ray_accept())?;
         let renderer = self.render_state.renderer.read();
         let gpu = renderer.callback_resources.get::<ViewportGpu>()?;
         let paint = gpu.sets.get(set)?;
@@ -460,7 +468,7 @@ impl App {
         }
         let (doc, size) = (st.doc.clone(), st.tex_size);
         self.gpu_rebuild(set, &doc, size);
-        let extents: Vec<[f32; 3]> = (0..self.parked[set].as_ref().map_or(0, |st| st.bakes.len())).map(|t| self.bake_extent(set, t)).collect();
+        let extents: Vec<BakeFrame> = (0..self.parked[set].as_ref().map_or(0, |st| st.bakes.len())).map(|t| self.bake_extent(set, t)).collect();
         let ops: Vec<(usize, PaintOp)> = self.parked[set]
             .as_ref()
             .map(|st| st.bakes.iter().enumerate().filter(|(_, b)| has_uploadable_bakes(&b.baked)).map(|(t, b)| (t, baked_normal_op(&b.baked, size, extents[t]))).collect())

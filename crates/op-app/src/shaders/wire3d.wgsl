@@ -16,10 +16,14 @@ struct Globals {
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
+// The paint layer's material group, for the parts the user hid and the UV tile offset.
+@group(1) @binding(5) var<uniform> tile: vec4<f32>;
+@group(1) @binding(8) var hidden_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
+    @location(1) uv: vec2<f32>,
 };
 
 @vertex
@@ -29,12 +33,16 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @lo
     c.z = c.z - 0.0008 * c.w;
     o.clip = c;
     o.world_pos = position;
+    o.uv = uv;
     return o;
 }
 
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
-    if (dot(g.clip.xyz, g.clip.xyz) > 0.5 && dot(i.world_pos, g.clip.xyz) > g.clip.w) {
+    let local = i.uv - tile.xy;
+    let hdims = vec2<f32>(textureDimensions(hidden_tex));
+    let hidden = textureLoad(hidden_tex, vec2<i32>(clamp(local * hdims, vec2<f32>(0.0), hdims - vec2<f32>(1.0))), 0).r > 0.5;
+    if (hidden || (dot(g.clip.xyz, g.clip.xyz) > 0.5 && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
         discard;
     }
     return vec4<f32>(0.02, 0.02, 0.03, 0.55);

@@ -157,7 +157,10 @@ pub struct ProjectionData {
     pub position: Vec<u8>,
     /// RGBA8, packed 0..1.
     pub normal: Vec<u8>,
-    /// Size of the bounding box along x, y, z with the largest axis as 1.
+    /// Where the baked mesh's bounding box starts, and its size, as fractions of the whole model's
+    /// longest side measured from the model's own minimum corner. A texel's position is
+    /// `position * extent + offset`, so projections line up across texture sets.
+    pub offset: [f32; 3],
     pub extent: [f32; 3],
 }
 
@@ -1429,6 +1432,7 @@ impl PaintGpu {
                             crate::composite::ProjectionMaps {
                                 position: upload("projection_position", BASE_FORMAT, &p.position),
                                 normal: upload("projection_normal", wgpu::TextureFormat::Rgba8Unorm, &p.normal),
+                                offset: p.offset,
                                 extent: p.extent,
                             }
                         });
@@ -1577,7 +1581,7 @@ impl PaintGpu {
                     if count == 0 {
                         continue;
                     }
-                    let pad = 1.5 / self.size as f32;
+                    let pad = 0.5 / self.size as f32;
                     let mut verts: Vec<[f32; 2]> = Vec::with_capacity(count);
                     for tri in uvs[..count].chunks_exact(3) {
                         let c = [(tri[0][0] + tri[1][0] + tri[2][0]) / 3.0, (tri[0][1] + tri[1][1] + tri[2][1]) / 3.0];

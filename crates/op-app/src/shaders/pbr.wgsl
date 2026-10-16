@@ -170,6 +170,11 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
     // Back faces are dropped (as culling would), except when a section plane opens the model up: then
     // the inside is shown, lit as the surface it is.
     let section_on = dot(g.clip.xyz, g.clip.xyz) > 0.5;
+    // Parts the user hid, surfaces a section plane cuts away and back faces never appear, in any view.
+    let hidden = textureSample(paint_hidden, paint_samp, uv_t).r > 0.5;
+    if (hidden || (!front && !section_on) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
+        discard;
+    }
     var n = normalize(i.normal);
     if (!front) { n = -n; }
     // The direction to the camera: from the surface point, or against the view direction when the
@@ -248,10 +253,6 @@ fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f3
 
     // See-through paint is shown dithered: the surface is dropped from the picture (and its depth) in
     // proportion to how transparent it is. Switched off with bg.w = 0.
-    let hidden = textureSample(paint_hidden, paint_samp, uv_t).r > 0.5;
-    if (hidden || (!front && !section_on) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
-        discard;
-    }
     if (g.bg.w > 0.5 && opacity < 0.999) {
         let noise = fract(sin(dot(i.clip.xy, vec2<f32>(12.9898, 78.233))) * 43758.5453);
         if (opacity <= noise) { discard; }

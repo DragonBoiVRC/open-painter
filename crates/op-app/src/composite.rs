@@ -47,7 +47,9 @@ pub struct ProjectionMaps {
     pub position: wgpu::Texture,
     /// World space normal, RGBA8 packed 0..1.
     pub normal: wgpu::Texture,
-    /// The bounding box's size along x, y, z with the largest axis as 1.
+    /// Where the baked mesh's box starts and how big it is, in units of the whole model's longest
+    /// side from its minimum corner (see `ProjectionData`).
+    pub offset: [f32; 3],
     pub extent: [f32; 3],
 }
 
@@ -62,6 +64,7 @@ struct ProjParams {
     xf: [f32; 4],
     xf2: [f32; 4],
     extent: [f32; 4],
+    offset: [f32; 4],
 }
 
 #[repr(C)]
@@ -476,6 +479,7 @@ impl Compositor {
             xf: [f.uv.tiling[0], f.uv.tiling[1], f.uv.offset[0], f.uv.offset[1]],
             xf2: [cos, sin, sharpness, 0.0],
             extent: [maps.extent[0], maps.extent[1], maps.extent[2], 0.0],
+            offset: [maps.offset[0], maps.offset[1], maps.offset[2], 0.0],
         };
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("projfill_params"),
