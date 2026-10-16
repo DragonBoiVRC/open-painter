@@ -22,6 +22,40 @@ pub fn blend(mode: BlendMode, cb: f32, cs: f32) -> f32 {
         BlendMode::Darken => cb.min(cs),
         BlendMode::Lighten => cb.max(cs),
         BlendMode::Difference => (cb - cs).abs(),
+        BlendMode::SoftLight => {
+            if cs <= 0.5 {
+                cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
+            } else {
+                let d = if cb <= 0.25 { ((16.0 * cb - 12.0) * cb + 4.0) * cb } else { cb.sqrt() };
+                cb + (2.0 * cs - 1.0) * (d - cb)
+            }
+        }
+        BlendMode::HardLight => {
+            if cs <= 0.5 { 2.0 * cb * cs } else { cb + (2.0 * cs - 1.0) - cb * (2.0 * cs - 1.0) }
+        }
+        BlendMode::ColorDodge => {
+            if cb <= 0.0 {
+                0.0
+            } else if cs >= 1.0 {
+                1.0
+            } else {
+                (cb / (1.0 - cs)).min(1.0)
+            }
+        }
+        BlendMode::ColorBurn => {
+            if cb >= 1.0 {
+                1.0
+            } else if cs <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - cb) / cs).min(1.0)
+            }
+        }
+        BlendMode::LinearBurn => (cb + cs - 1.0).max(0.0),
+        BlendMode::Exclusion => cb + cs - 2.0 * cb * cs,
+        BlendMode::Divide => {
+            if cs <= 0.0 { 1.0 } else { (cb / cs).min(1.0) }
+        }
     }
 }
 

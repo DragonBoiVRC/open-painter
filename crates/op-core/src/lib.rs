@@ -164,10 +164,17 @@ pub enum BlendMode {
     Darken,
     Lighten,
     Difference,
+    SoftLight,
+    HardLight,
+    ColorDodge,
+    ColorBurn,
+    LinearBurn,
+    Exclusion,
+    Divide,
 }
 
 impl BlendMode {
-    pub const ALL: [BlendMode; 9] = [
+    pub const ALL: [BlendMode; 16] = [
         BlendMode::Normal,
         BlendMode::Multiply,
         BlendMode::Screen,
@@ -177,6 +184,13 @@ impl BlendMode {
         BlendMode::Darken,
         BlendMode::Lighten,
         BlendMode::Difference,
+        BlendMode::SoftLight,
+        BlendMode::HardLight,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::Exclusion,
+        BlendMode::Divide,
     ];
 
     pub fn name(self) -> &'static str {
@@ -190,6 +204,13 @@ impl BlendMode {
             BlendMode::Darken => "Darken",
             BlendMode::Lighten => "Lighten",
             BlendMode::Difference => "Difference",
+            BlendMode::SoftLight => "Soft light",
+            BlendMode::HardLight => "Hard light",
+            BlendMode::ColorDodge => "Color dodge",
+            BlendMode::ColorBurn => "Color burn",
+            BlendMode::LinearBurn => "Linear burn",
+            BlendMode::Exclusion => "Exclusion",
+            BlendMode::Divide => "Divide",
         }
     }
 

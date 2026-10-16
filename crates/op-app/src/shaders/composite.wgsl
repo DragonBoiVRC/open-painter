@@ -63,6 +63,29 @@ fn blend_mode(cb: vec3<f32>, cs: vec3<f32>, mode: u32) -> vec3<f32> {
         case 6u: { return min(cb, cs); }
         case 7u: { return max(cb, cs); }
         case 8u: { return abs(cb - cs); }
+        case 9u: {
+            let d = select(sqrt(cb), ((16.0 * cb - 12.0) * cb + 4.0) * cb, cb <= vec3<f32>(0.25));
+            let dark = cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
+            let light = cb + (2.0 * cs - 1.0) * (d - cb);
+            return select(light, dark, cs <= vec3<f32>(0.5));
+        }
+        case 10u: {
+            let light = cb + (2.0 * cs - 1.0) - cb * (2.0 * cs - 1.0);
+            return select(light, 2.0 * cb * cs, cs <= vec3<f32>(0.5));
+        }
+        case 11u: {
+            let v = min(cb / max(1.0 - cs, vec3<f32>(1e-6)), vec3<f32>(1.0));
+            return select(select(v, vec3<f32>(1.0), cs >= vec3<f32>(1.0)), vec3<f32>(0.0), cb <= vec3<f32>(0.0));
+        }
+        case 12u: {
+            let v = vec3<f32>(1.0) - min((vec3<f32>(1.0) - cb) / max(cs, vec3<f32>(1e-6)), vec3<f32>(1.0));
+            return select(select(v, vec3<f32>(0.0), cs <= vec3<f32>(0.0)), vec3<f32>(1.0), cb >= vec3<f32>(1.0));
+        }
+        case 13u: { return max(cb + cs - vec3<f32>(1.0), vec3<f32>(0.0)); }
+        case 14u: { return cb + cs - 2.0 * cb * cs; }
+        case 15u: {
+            return select(min(cb / max(cs, vec3<f32>(1e-6)), vec3<f32>(1.0)), vec3<f32>(1.0), cs <= vec3<f32>(0.0));
+        }
         default: { return cs; }
     }
 }
