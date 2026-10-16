@@ -82,7 +82,16 @@ impl App {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {
                     let local = [(pos.x - rect.min.x) * ppp, (pos.y - rect.min.y) * ppp];
+                    let cam = self.camera;
+                    let camera = [cam.target.x, cam.target.y, cam.target.z, cam.distance, cam.yaw, cam.pitch];
+                    // Shift+click continues from where the last stroke ended, as long as nothing moved.
+                    if mods.shift && !self.stroke.active {
+                        if let Some(a) = self.line_anchor.filter(|a| a.layer == layer && a.target == target && a.camera == camera) {
+                            self.begin_line(a.px, ppp, layer, target);
+                        }
+                    }
                     self.stroke_to(local, ppp, layer, target, &mut stamps);
+                    self.line_anchor = Some(crate::LineAnchor { px: local, layer, target, camera });
                     stamp_target = Some((layer, target));
                     ui.ctx().request_repaint();
                 }

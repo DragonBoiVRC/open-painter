@@ -77,6 +77,15 @@ struct Stroke {
     next_in: f32,
 }
 
+/// The end of the last viewport stroke, valid only while the camera has not moved.
+#[derive(Clone, Copy, PartialEq)]
+struct LineAnchor {
+    px: [f32; 2],
+    layer: NodeId,
+    target: Target,
+    camera: [f32; 6],
+}
+
 /// One undoable step. Structure edits store both document states; stroke steps are
 /// kept on the GPU (texture snapshots) and only counted here, in order.
 enum Hist {
@@ -241,6 +250,10 @@ struct App {
     brush: Brush,
     channels: PaintChannels,
     stroke: Stroke,
+    /// Where the last viewport stroke ended, so Shift+click can continue it in a straight line.
+    line_anchor: Option<LineAnchor>,
+    /// The panel layout while Tab has hidden everything but the views.
+    stashed_dock: Option<DockState<Tab>>,
     tex_size: u32,
     pending: Vec<PaintOp>,
     undo: Vec<Hist>,
@@ -369,6 +382,8 @@ impl App {
                 height_value: 0.8,
             },
             stroke: Stroke::default(),
+            line_anchor: None,
+            stashed_dock: None,
             tex_size: DEFAULT_TEXTURE_SIZE,
             pending: Vec::new(),
             undo: Vec::new(),
@@ -1270,6 +1285,14 @@ impl App {
     }
 
     /// Advance the stroke to `to`, emitting evenly spaced stamps along the path.
+    /// Start a stroke at `from` without stamping there, so the next `stroke_to` draws a line out of it.
+    fn begin_line(&mut self, from: [f32; 2], ppp: f32, layer: NodeId, target: Target) {
+        let spacing = (self.brush.radius_pts * ppp * self.brush.spacing).max(1.0);
+        self.stroke = Stroke { active: true, last_px: from, next_in: spacing };
+        self.pending.push(PaintOp::BeginStroke { layer, target });
+        self.push_hist(Hist::Stroke);
+    }
+
     fn stroke_to(&mut self, to: [f32; 2], ppp: f32, layer: NodeId, target: Target, out: &mut Vec<Stamp>) {
         let spacing = (self.brush.radius_pts * ppp * self.brush.spacing).max(1.0);
         if !self.stroke.active {
@@ -1523,6 +1546,10 @@ impl App {
                 egui::Grid::new("shortcut_grid").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
                     for (keys, what) in [
                         ("Ctrl+N / Ctrl+O / Ctrl+S", "new / open / save"),
+                        ("Ctrl+Shift+S / Ctrl+E", "save as / export textures"),
+                        ("Tab", "hide or show all panels"),
+                        ("F1 / F3 / F4", "3D and 2D views / 3D only / show the 2D view"),
+                        ("Shift + click", "paint a straight line from the last stroke"),
                         ("Ctrl+Z / Ctrl+Y", "undo / redo"),
                         ("Ctrl+D / Ctrl+G", "duplicate / group the selected layer"),
                         ("Delete / F2", "delete / rename the selected layer"),
@@ -1730,12 +1757,29 @@ fn srgb_for_display(c: [f32; 3]) -> [f32; 4] {
 }
 
 impl App {
+    /// Tab: hide every panel but the 3D and 2D views, or bring them all back.
+    fn toggle_panels(&mut self) {
+        if let Some(saved) = self.stashed_dock.take() {
+            self.dock = Some(saved);
+            return;
+        }
+        let Some(current) = self.dock.take() else { return };
+        let mut bare = DockState::new(vec![Tab::Viewport]);
+        if dock::is_open(&current, Tab::Uv2d) {
+            bare.main_surface_mut().split_right(egui_dock::NodeIndex::root(), 0.5, vec![Tab::Uv2d]);
+        }
+        self.stashed_dock = Some(current);
+        self.dock = Some(bare);
+    }
+
     fn handle_shortcuts(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use egui::{Key, Modifiers};
-        let (undo, redo, save, new, open, quit, dup, group, next_set, prev_set) = ui.input_mut(|i| {
+        let (undo, redo, save, save_as, export, new, open, quit, dup, group, next_set, prev_set) = ui.input_mut(|i| {
             let redo = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y);
             let undo = i.consume_key(Modifiers::COMMAND, Key::Z);
+            let save_as = i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
             let save = i.consume_key(Modifiers::COMMAND, Key::S);
+            let export = i.consume_key(Modifiers::COMMAND, Key::E);
             let new = i.consume_key(Modifiers::COMMAND, Key::N);
             let open = i.consume_key(Modifiers::COMMAND, Key::O);
             let quit = i.consume_key(Modifiers::COMMAND, Key::Q);
@@ -1743,7 +1787,7 @@ impl App {
             let group = i.consume_key(Modifiers::COMMAND, Key::G);
             let next_set = i.consume_key(Modifiers::COMMAND, Key::PageDown);
             let prev_set = i.consume_key(Modifiers::COMMAND, Key::PageUp);
-            (undo, redo, save, new, open, quit, dup, group, next_set, prev_set)
+            (undo, redo, save, save_as, export, new, open, quit, dup, group, next_set, prev_set)
         });
         if dup {
             self.layer_command(layers::LayerCmd::Duplicate);
@@ -1770,6 +1814,15 @@ impl App {
                 None => self.dialog = Some(PathDialog { save: true, path: self.default_save_path() }),
             }
         }
+        if save_as {
+            self.dialog = Some(PathDialog { save: true, path: self.default_save_path() });
+        }
+        if export {
+            if self.export.dir.is_empty() {
+                self.export.dir = self.default_export_dir().display().to_string();
+            }
+            self.export.open = true;
+        }
         if new {
             self.request(Pending::New, ctx);
         }
@@ -1790,6 +1843,26 @@ impl App {
             self.show_all_sets();
         } else if hide && self.set_ranges_len() > 1 {
             self.toggle_set_visible(self.active);
+        }
+        // Tab is consumed so egui does not also move keyboard focus around the menu bar.
+        let tab = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
+        let (f1, f3, f4) = ui.input(|i| {
+            let plain = !i.modifiers.any();
+            (i.key_pressed(Key::F1) && plain, i.key_pressed(Key::F3) && plain, i.key_pressed(Key::F4) && plain)
+        });
+        if tab {
+            self.toggle_panels();
+        }
+        if f1 || f3 || f4 {
+            if let Some(mut dock) = self.dock.take() {
+                // F1: 3D and 2D together. F3: the 3D view alone. F4: bring the 2D view to the front.
+                if f3 {
+                    dock::close(&mut dock, Tab::Uv2d);
+                } else {
+                    dock::open(&mut dock, Tab::Uv2d);
+                }
+                self.dock = Some(dock);
+            }
         }
         let (delete, rename) = ui.input(|i| (i.key_pressed(Key::Delete), i.key_pressed(Key::F2)));
         if delete {
