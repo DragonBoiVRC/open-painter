@@ -310,7 +310,11 @@ impl App {
 
     /// A hint over the window while files are being dragged onto it.
     pub(crate) fn drop_hint(&self, ctx: &egui::Context) {
-        let n = ctx.input(|i| i.raw.hovered_files.len());
+        // X11 can announce the same file more than once while a drag moves, so count distinct paths.
+        let n = ctx.input(|i| {
+            let mut seen = std::collections::HashSet::new();
+            i.raw.hovered_files.iter().filter(|f| seen.insert(f.path.clone())).count()
+        });
         if n == 0 {
             return;
         }

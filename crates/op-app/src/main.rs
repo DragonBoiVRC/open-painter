@@ -2544,7 +2544,14 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.housekeeping(&ctx);
 
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| Some(f.path().to_path_buf())).collect());
+        let raw_drops: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let mut dropped = Vec::new();
+        for p in raw_drops {
+            match files::resolve_dropped(&p) {
+                Ok(p) => dropped.push(p),
+                Err(e) => self.status = format!("Drop failed: {e}"),
+            }
+        }
         // Image files go to the texture library; the first other file is a model or project to open.
         let (images, others): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(|p| textures::is_image_path(p));
         if !images.is_empty() {
@@ -2567,6 +2574,12 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // winit's Wayland backend cannot accept files dragged in from a file manager, so prefer
+    // XWayland when there is one. Set OPEN_PAINTER_WAYLAND=1 to stay on native Wayland.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_some() && std::env::var_os("OPEN_PAINTER_WAYLAND").is_none() {
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

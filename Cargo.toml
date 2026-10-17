@@ -6,3 +6,6 @@ members = ["crates/op-mesh", "crates/op-app", "crates/op-core", "crates/op-expor
 version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[patch.crates-io]
+winit = { path = "vendor/winit" }

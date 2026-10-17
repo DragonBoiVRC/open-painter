@@ -326,3 +326,41 @@ mod brush_tests {
         assert!(save_user_brush(dir.path(), "   ", &BrushPreset::BASE).is_err());
     }
 }
+
+/// A dropped item that is a network address (`smb://user@host/share/dir/file`), as file managers
+/// send for remote folders, turned into a local path: through a mounted share if there is one,
+/// otherwise by downloading it with KDE or GNOME's tools. Plain paths come back unchanged.
+pub fn resolve_dropped(path: &Path) -> Result<PathBuf, String> {
+    let s = path.to_string_lossy();
+    let Some((scheme, rest)) = s.split_once("://") else { return Ok(path.to_path_buf()) };
+    let after_host = rest.split_once('/').map_or("", |(_, p)| p);
+    if scheme == "smb" {
+        // `//server/share on /mnt/x type cifs`: the share name is the first part of the path.
+        let (share, inner) = after_host.split_once('/').unwrap_or((after_host, ""));
+        if let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") {
+            for line in mounts.lines() {
+                let mut f = line.split_whitespace();
+                let (Some(src), Some(mount), Some(kind)) = (f.next(), f.next(), f.next()) else { continue };
+                if kind == "cifs" && src.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(share)) {
+                    let candidate = Path::new(&mount.replace("\\040", " ")).join(inner);
+                    if candidate.is_file() {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
+    }
+    let name = after_host.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("dropped");
+    let dir = std::env::temp_dir().join("open-painter-drop");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{name}: {e}"))?;
+    let dest = dir.join(name);
+    let _ = std::fs::remove_file(&dest);
+    let tools: [(&str, &[&str]); 2] = [("kioclient5", &["copy"]), ("gio", &["copy"])];
+    for (tool, args) in tools {
+        let ok = std::process::Command::new(tool).args(args).arg(&*s).arg(&dest).status().is_ok_and(|st| st.success());
+        if ok && dest.is_file() {
+            return Ok(dest);
+        }
+    }
+    Err(format!("{name}: could not reach {scheme}:// address (is the share mounted?)"))
+}
