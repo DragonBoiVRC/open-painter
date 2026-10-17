@@ -405,16 +405,21 @@ impl Mesh {
         Ok(mesh)
     }
 
-    /// Load a Wavefront OBJ; each `usemtl` material becomes a texture set.
+    /// Load a Wavefront OBJ; each `usemtl` material becomes a texture set. Its V axis points up; the
+    /// mesh is converted to the image convention (V down) the rest of the app uses.
     pub fn load_obj(path: impl AsRef<Path>) -> Result<Self, MeshError> {
-        obj::load(path.as_ref())
+        let mut mesh = obj::load(path.as_ref())?;
+        mesh.flip_v_per_tile();
+        Ok(mesh)
     }
 
     /// Load every mesh in an FBX file (binary, version 7.x), with its node transforms applied and
     /// converted to Y-up. Triangles are grouped by material into [`SetRange`]s; materials with the
     /// same name on different objects share one set.
     pub fn load_fbx(path: impl AsRef<Path>) -> Result<Self, MeshError> {
-        fbx::load(path.as_ref())
+        let mut mesh = fbx::load(path.as_ref())?;
+        mesh.flip_v_per_tile();
+        Ok(mesh)
     }
 
     /// Load every triangle primitive in the default scene of a glTF/GLB file,

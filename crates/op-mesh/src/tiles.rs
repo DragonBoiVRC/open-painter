@@ -78,6 +78,40 @@ impl Mesh {
         tiles
     }
 
+    /// Convert UVs from V-up (OBJ, FBX, Substance, Unity) to V-down (image rows, glTF): inside each
+    /// triangle's own tile row, `v` becomes `2k + 1 - v`, so UDIM tile numbers do not change. A vertex
+    /// shared by triangles in different tile rows is copied, one per row.
+    pub fn flip_v_per_tile(&mut self) {
+        let mut copies: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+        let mut vertices = std::mem::take(&mut self.vertices);
+        for t in 0..self.indices.len() / 3 {
+            let tri = [self.indices[t * 3], self.indices[t * 3 + 1], self.indices[t * 3 + 2]];
+            let centroid = tri.iter().map(|i| vertices[*i as usize].uv[1]).sum::<f32>() / 3.0;
+            let row = Tile::containing(0.0, centroid).v;
+            for (k, i) in tri.into_iter().enumerate() {
+                let new = *copies.entry((i, row)).or_insert_with(|| {
+                    let mut v = vertices[i as usize];
+                    v.uv[1] = 2.0 * row as f32 + 1.0 - v.uv[1];
+                    vertices.push(v);
+                    (vertices.len() - 1) as u32
+                });
+                self.indices[t * 3 + k] = new;
+            }
+        }
+        // Indices now point at the flipped copies only; keep just those (in first-use order).
+        let mut remap = vec![u32::MAX; vertices.len()];
+        let mut kept = Vec::with_capacity(vertices.len());
+        for idx in self.indices.iter_mut() {
+            let r = &mut remap[*idx as usize];
+            if *r == u32::MAX {
+                *r = kept.len() as u32;
+                kept.push(vertices[*idx as usize]);
+            }
+            *idx = *r;
+        }
+        self.vertices = kept;
+    }
+
     /// Order each set's triangles by tile (keeping the order inside a tile), so every tile of a set is
     /// one contiguous run of the index buffer. Sets stay where they are.
     pub fn partition_tiles(&mut self) {
@@ -158,6 +192,31 @@ impl Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flipping_v_keeps_each_triangle_in_its_tile_and_copies_shared_vertices() {
+        let v = |u: f32, w: f32| Vertex { position: [0.0; 3], normal: [0.0, 0.0, 1.0], uv: [u, w] };
+        // Triangle A sits in row 0; triangle B in row 1; they share vertex 1, which lies on v = 1.0.
+        let mut m = Mesh {
+            vertices: vec![v(0.1, 0.2), v(0.5, 1.0), v(0.9, 0.2), v(0.1, 1.8), v(0.9, 1.8)],
+            indices: vec![0, 1, 2, 1, 3, 4],
+            ..Default::default()
+        };
+        m.flip_v_per_tile();
+        let uv = |k: usize| m.vertices[m.indices[k] as usize].uv;
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        // Row 0: v -> 1 - v. Row 1: v -> 3 - v (so 1.8 -> 1.2 and the shared 1.0 -> 2.0).
+        assert!(near(uv(0)[1], 0.8) && near(uv(1)[1], 0.0) && near(uv(2)[1], 0.8));
+        assert!(near(uv(3)[1], 2.0) && near(uv(4)[1], 1.2) && near(uv(5)[1], 1.2));
+        assert_eq!(m.tile_of(&m.indices[0..3]).udim(), 1001);
+        assert_eq!(m.tile_of(&m.indices[3..6]).udim(), 1011);
+        assert_eq!(m.vertices.len(), 6, "the shared vertex exists once per row");
+        // Flipping an ordinary single-tile mesh is just 1 - v with no extra vertices.
+        let mut n = Mesh { vertices: vec![v(0.0, 0.25), v(1.0, 0.75), v(0.5, 0.5)], indices: vec![0, 1, 2], ..Default::default() };
+        n.flip_v_per_tile();
+        assert_eq!(n.vertices.len(), 3);
+        assert_eq!(n.vertices.iter().map(|x| x.uv[1]).collect::<Vec<_>>(), vec![0.75, 0.25, 0.5]);
+    }
 
     /// Two sets; set 0 has quads in tiles 1001, 1002 and 1011, set 1 only in 1001.
     fn mesh() -> Mesh {
