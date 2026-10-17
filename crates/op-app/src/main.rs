@@ -563,6 +563,7 @@ struct App {
     display_saved: Option<DisplaySettings>,
     layout_check: Instant,
     show_shortcuts: bool,
+    texture_import: Option<textures::TextureImport>,
 }
 
 fn is_project(p: &Path) -> bool {
@@ -744,6 +745,7 @@ impl App {
             layout_json: String::new(),
             layout_check: Instant::now(),
             show_shortcuts: false,
+            texture_import: None,
         };
         app.load_texture_library();
         // The HDRI that was in use last time comes back with the rest of the lighting.
@@ -2546,7 +2548,7 @@ impl eframe::App for App {
         // Image files go to the texture library; the first other file is a model or project to open.
         let (images, others): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(|p| textures::is_image_path(p));
         if !images.is_empty() {
-            self.import_texture_files(&images);
+            self.begin_texture_drop(&images);
         }
         if let Some(p) = others.into_iter().next() {
             let action = if is_project(&p) { Pending::Open(p) } else { Pending::Mesh(p) };
@@ -2555,6 +2557,8 @@ impl eframe::App for App {
 
         self.handle_shortcuts(ui, &ctx);
         self.ui_frame(ui);
+        self.texture_import_window(&ctx);
+        self.drop_hint(&ctx);
         // A drag that ended anywhere that did not take it is over.
         if ctx.input(|i| !i.pointer.any_down()) {
             egui::DragAndDrop::clear_payload(&ctx);

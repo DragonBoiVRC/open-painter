@@ -22,6 +22,19 @@ pub fn is_image_path(p: &Path) -> bool {
     p.extension().is_some_and(|e| IMAGE_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
+/// One dropped file in the import window: the channel it is used for (`None` keeps it in the library only).
+pub struct ImportItem {
+    pub id: String,
+    pub slot: Option<Slot>,
+    pub flip_green: bool,
+}
+
+/// The import window's state.
+pub struct TextureImport {
+    pub items: Vec<ImportItem>,
+    pub into_selected: bool,
+}
+
 pub struct TextureAsset {
     pub id: String,
     pub name: String,
@@ -158,11 +171,16 @@ impl App {
     }
 
     /// Import several files and say how it went.
-    pub(crate) fn import_texture_files(&mut self, paths: &[std::path::PathBuf]) {
-        let (mut ok, mut errors) = (0, Vec::new());
+    pub(crate) fn import_texture_files(&mut self, paths: &[std::path::PathBuf]) -> Vec<String> {
+        let (mut ok, mut errors, mut ids) = (0, Vec::new(), Vec::new());
         for p in paths {
             match self.import_texture_file(p) {
-                Ok(_) => ok += 1,
+                Ok(id) => {
+                    ok += 1;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
                 Err(e) => errors.push(e),
             }
         }
@@ -174,6 +192,133 @@ impl App {
         if ok > 0 {
             self.shelf.category = crate::ui::panels::shelf_textures();
         }
+        ids
+    }
+
+    /// Files dropped on the window: add them to the library, then ask where each one goes.
+    pub(crate) fn begin_texture_drop(&mut self, paths: &[std::path::PathBuf]) {
+        let ids = self.import_texture_files(paths);
+        let items: Vec<ImportItem> = ids
+            .into_iter()
+            .filter_map(|id| {
+                let guess = self.texture(&id)?.guess();
+                Some(ImportItem { id, slot: Some(guess.map_or(Slot::BaseColor, |g| g.slot)), flip_green: guess.is_some_and(|g| g.directx) })
+            })
+            .collect();
+        if !items.is_empty() {
+            let into_selected = self.selected_fill().is_some();
+            self.texture_import = Some(TextureImport { items, into_selected });
+        }
+    }
+
+    fn selected_fill(&self) -> Option<op_core::NodeId> {
+        self.selected.filter(|s| matches!(self.doc.find(*s).map(|n| &n.kind), Some(NodeKind::Fill(_))))
+    }
+
+    /// Put every chosen texture on its channel in one step (one undo): on the selected fill layer, or
+    /// on a new one.
+    fn apply_texture_import(&mut self, imp: &TextureImport) {
+        let chosen: Vec<(Slot, TexRef)> = imp
+            .items
+            .iter()
+            .filter_map(|i| i.slot.map(|s| (s, TexRef { flip_green: s == Slot::Normal && i.flip_green, ..TexRef::new(&i.id) })))
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        match self.selected_fill().filter(|_| imp.into_selected) {
+            Some(layer) => self.edit(|d| {
+                if let Some(NodeKind::Fill(f)) = d.find_mut(layer).map(|n| &mut n.kind) {
+                    for (s, tex) in chosen.iter().cloned() {
+                        f.maps.set(s, Some(tex));
+                    }
+                }
+            }),
+            None => {
+                let mut f = FillParams::default();
+                for (s, tex) in chosen.iter().cloned() {
+                    f.maps.set(s, Some(tex));
+                }
+                self.add_node("Textured fill", NodeKind::Fill(f));
+            }
+        }
+        self.status = format!("Applied {} texture(s) to the layer.", chosen.len());
+    }
+
+    /// The import window shown after files are dropped on the app.
+    pub(crate) fn texture_import_window(&mut self, ctx: &egui::Context) {
+        let Some(mut imp) = self.texture_import.take() else { return };
+        let has_selected = self.selected_fill().is_some();
+        let (mut apply, mut keep) = (false, true);
+        egui::Window::new("Import textures").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.label("Choose what each file is used for. Names are matched to channels automatically.");
+            ui.add_space(4.0);
+            egui::Grid::new("texture_import_grid").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+                for (n, item) in imp.items.iter_mut().enumerate() {
+                    let name = self.assets.iter().find(|a| a.id == item.id).map_or("(missing)", |a| a.name.as_str());
+                    ui.label(name);
+                    let current = item.slot.map_or("Library only", Slot::label);
+                    egui::ComboBox::from_id_salt(("import_slot", n)).selected_text(current).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut item.slot, None, "Library only");
+                        for s in Slot::ALL {
+                            ui.selectable_value(&mut item.slot, Some(s), s.label());
+                        }
+                    });
+                    if item.slot == Some(Slot::Normal) {
+                        ui.checkbox(&mut item.flip_green, "Flip green (DirectX)");
+                    } else {
+                        ui.label("");
+                    }
+                    ui.end_row();
+                }
+            });
+            let mut counts = std::collections::HashMap::new();
+            for s in imp.items.iter().filter_map(|i| i.slot) {
+                *counts.entry(s).or_insert(0) += 1;
+            }
+            if counts.values().any(|c| *c > 1) {
+                ui.colored_label(ui.visuals().warn_fg_color, "Two files share a channel; the last one in the list wins.");
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Apply to:");
+                ui.radio_value(&mut imp.into_selected, false, "New fill layer");
+                ui.add_enabled_ui(has_selected, |ui| ui.radio_value(&mut imp.into_selected, true, "Selected fill layer"));
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let any = imp.items.iter().any(|i| i.slot.is_some());
+                if ui.add_enabled(any, egui::Button::new("Import")).clicked() {
+                    apply = true;
+                    keep = false;
+                }
+                if ui.button(if any { "Library only" } else { "Close" }).clicked() {
+                    keep = false;
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            keep = false;
+        }
+        if apply {
+            self.apply_texture_import(&imp);
+        }
+        if keep {
+            self.texture_import = Some(imp);
+        }
+    }
+
+    /// A hint over the window while files are being dragged onto it.
+    pub(crate) fn drop_hint(&self, ctx: &egui::Context) {
+        let n = ctx.input(|i| i.raw.hovered_files.len());
+        if n == 0 {
+            return;
+        }
+        let rect = ctx.content_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop_hint")));
+        painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(140));
+        painter.rect_stroke(rect.shrink(8.0), 6.0, egui::Stroke::new(2.0, egui::Color32::WHITE), egui::StrokeKind::Inside);
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, format!("Drop to import {n} file(s)"), egui::FontId::proportional(24.0), egui::Color32::WHITE);
     }
 
     /// Read the library folder at startup. Files that do not parse as `<id>--<name>` are ignored.
