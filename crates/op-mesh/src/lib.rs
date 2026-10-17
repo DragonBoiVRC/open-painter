@@ -277,23 +277,50 @@ impl Mesh {
         it.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)))
     }
 
-    /// Recompute smooth, area-weighted vertex normals from the triangles.
+    /// Recompute smooth, area-weighted vertex normals from the triangles. Vertices at the same
+    /// position (split apart by UV seams, say) share their faces, so a seam does not show as a
+    /// lighting edge; only faces within 60 degrees of each other are blended, so creases stay sharp.
     pub fn recompute_normals(&mut self) {
-        let mut acc = vec![Vec3::ZERO; self.vertices.len()];
-        for tri in self.indices.chunks_exact(3) {
-            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-            let (pa, pb, pc) = (
-                Vec3::from(self.vertices[a].position),
-                Vec3::from(self.vertices[b].position),
-                Vec3::from(self.vertices[c].position),
-            );
-            let n = (pb - pa).cross(pc - pa); // length = 2 * area
-            acc[a] += n;
-            acc[b] += n;
-            acc[c] += n;
+        const BLEND_COS: f32 = 0.5; // cos(60 degrees)
+        let pos = |i: usize| Vec3::from(self.vertices[i].position);
+        let tris: Vec<Vec3> = self
+            .indices
+            .chunks_exact(3)
+            .map(|t| {
+                let (pa, pb, pc) = (pos(t[0] as usize), pos(t[1] as usize), pos(t[2] as usize));
+                (pb - pa).cross(pc - pa) // length = 2 * area
+            })
+            .collect();
+        // What each vertex's own faces say, and the faces at each position grouped into smoothing
+        // clusters: a face joins the first cluster whose first face is within 60 degrees of it. The
+        // clusters belong to the position, so every seam copy of a vertex gets the same normal.
+        let mut own = vec![Vec3::ZERO; self.vertices.len()];
+        let mut clusters: std::collections::HashMap<[u32; 3], Vec<(Vec3, Vec3)>> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<([u32; 3], u32)> = std::collections::HashSet::new();
+        for (f, tri) in self.indices.chunks_exact(3).enumerate() {
+            let Some(dir) = tris[f].try_normalize() else { continue };
+            for &i in tri {
+                own[i as usize] += tris[f];
+                let key = self.vertices[i as usize].position.map(f32::to_bits);
+                if !seen.insert((key, f as u32)) {
+                    continue; // a degenerate face can list one position twice
+                }
+                let list = clusters.entry(key).or_default();
+                match list.iter_mut().find(|(rep, _)| rep.dot(dir) > BLEND_COS) {
+                    Some((_, sum)) => *sum += tris[f],
+                    None => list.push((dir, tris[f])),
+                }
+            }
         }
-        for (v, n) in self.vertices.iter_mut().zip(acc) {
-            v.normal = n.try_normalize().unwrap_or(Vec3::Y).into();
+        for (i, v) in self.vertices.iter_mut().enumerate() {
+            let Some(reference) = own[i].try_normalize() else {
+                v.normal = Vec3::Y.into();
+                continue;
+            };
+            let best = clusters
+                .get(&v.position.map(f32::to_bits))
+                .and_then(|list| list.iter().max_by(|a, b| a.0.dot(reference).total_cmp(&b.0.dot(reference))));
+            v.normal = best.and_then(|(_, sum)| sum.try_normalize()).unwrap_or(reference).into();
         }
     }
 
@@ -513,6 +540,27 @@ mod tests {
         let (lo, hi) = m.bounds();
         assert!((hi - Vec3::ONE).abs().max_element() < 1e-3);
         assert!((lo + Vec3::ONE).abs().max_element() < 1e-3);
+    }
+
+    #[test]
+    fn recomputed_normals_agree_across_a_split_seam_but_keep_creases() {
+        let v = |x: f32, y: f32, z: f32, u: f32| Vertex { position: [x, y, z], normal: [0.0; 3], uv: [u, 0.0] };
+        // Two triangles of a gently bent strip sharing the edge (0,0,0)-(0,1,0), with the edge
+        // vertices duplicated as a UV seam would, then a second pair folded 90 degrees.
+        let mut m = Mesh {
+            vertices: vec![
+                v(-1.0, 0.0, 0.0, 0.0), v(0.0, 0.0, 0.0, 1.0), v(0.0, 1.0, 0.0, 1.0),
+                v(0.0, 0.0, 0.0, 0.0), v(1.0, 0.0, 0.3, 1.0), v(0.0, 1.0, 0.0, 0.0),
+                v(10.0, 0.0, 0.0, 0.0), v(11.0, 0.0, 0.0, 1.0), v(10.0, 1.0, 0.0, 0.0),
+                v(10.0, 0.0, 0.0, 0.0), v(10.0, 0.0, 1.0, 1.0), v(10.0, 1.0, 0.0, 0.0),
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            ..Default::default()
+        };
+        m.recompute_normals();
+        let n = |i: usize| Vec3::from(m.vertices[i].normal);
+        assert!((n(1) - n(3)).length() < 1e-6, "the seam copies must share one normal");
+        assert!(n(6).dot(n(9)).abs() < 0.01, "a 90 degree crease stays sharp: {:?} {:?}", n(6), n(9));
     }
 
     #[test]
