@@ -1,4 +1,4 @@
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions), not(feature = "console")), windows_subsystem = "windows")]
 
 mod camera;
 mod composite;
@@ -1502,6 +1502,7 @@ impl App {
 
     /// Undo the most recent edit in any texture set, switching to its set first.
     fn do_undo(&mut self) {
+        eprintln!("[undo] requested: hist_order={:?} undo={} active={}", self.hist_order, self.undo.len(), self.active);
         let Some(&set) = self.hist_order.last() else { return };
         if set != self.active {
             self.switch_set(set);
@@ -1539,6 +1540,7 @@ impl App {
                 self.modified = true;
             }
             Some(Hist::Stroke) => {
+                eprintln!("[undo] queued stroke undo");
                 self.pending.push(PaintOp::UndoStroke);
                 self.redo.push(Hist::Stroke);
                 self.modified = true;

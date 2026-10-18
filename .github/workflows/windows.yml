@@ -16,6 +16,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --workspace --release
+      - name: Build console variant
+        run: |
+          cargo build --release -p op-app --features console
+          Copy-Item target/release/op-app.exe op-app-console.exe
       - name: Build
         run: cargo build --release -p op-app
       - name: Package
@@ -23,6 +27,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist/open-painter | Out-Null
           Copy-Item target/release/op-app.exe dist/open-painter/open-painter.exe
+          Copy-Item op-app-console.exe dist/open-painter/open-painter-console.exe
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, THIRD_PARTY.md dist/open-painter/
           Compress-Archive -Path dist/open-painter -DestinationPath open-painter-windows-x64.zip
       - uses: actions/upload-artifact@v4

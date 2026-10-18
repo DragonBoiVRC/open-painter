@@ -1336,7 +1336,9 @@ impl PaintGpu {
             match op {
                 PaintOp::BeginStroke { layer, target } => {
                     self.stroke_limit = None;
-                    if let Some(s) = self.snapshot_of(device, encoder, *layer, *target) {
+                    let snap = self.snapshot_of(device, encoder, *layer, *target);
+                    eprintln!("[undo] gpu: begin stroke, snapshot taken: {}", snap.is_some());
+                    if let Some(s) = snap {
                         self.undo.push(s);
                         self.redo.clear();
                         self.trim_history();
@@ -1366,6 +1368,7 @@ impl PaintGpu {
                     }
                 }
                 PaintOp::UndoStroke => {
+                    eprintln!("[undo] gpu: {} snapshots", self.undo.len());
                     if let Some(snap) = self.undo.pop() {
                         if let Some(cur) = self.swap_snapshot(device, encoder, snap) {
                             self.redo.push(cur);
