@@ -48,6 +48,12 @@ background. The new version is used the next time you start the program. To turn
 `off` in `~/.config/open-painter/auto-update`, or set `OPEN_PAINTER_NO_UPDATE=1`. The update log is
 `~/.local/state/open-painter/update.log`.
 
+## Windows
+
+Each push builds a Windows x64 zip in GitHub Actions (`.github/workflows/windows.yml`); download it
+from the workflow run's artifacts, or from the release page for tagged versions. Unzip and run
+`open-painter.exe`. To build it yourself, `cargo build --release -p op-app` works on Windows too.
+
 ## Layout
 
 | Crate | What it does |

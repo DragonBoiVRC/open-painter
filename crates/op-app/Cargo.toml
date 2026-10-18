@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.37.0"
 egui-phosphor = { version = "0.14.0", path = "../egui-phosphor" }
 egui_dock = { version = "0.21.1", path = "../egui_dock", features = ["serde"] }
@@ -23,6 +23,9 @@ op-project = { version = "0.0.1", path = "../op-project" }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["wayland", "x11"] }
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png"] }
