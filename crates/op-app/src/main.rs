@@ -3,6 +3,7 @@
 mod camera;
 mod composite;
 mod envmap;
+mod export_ui;
 mod files;
 mod gpu_io;
 mod images;
@@ -331,6 +332,12 @@ struct ExportJob {
 
 struct ExportUi {
     open: bool,
+    tab: export_ui::ExportTab,
+    /// Sidebar selection: None is "Global settings", Some(i) is texture set i.
+    sel: Option<usize>,
+    /// File type and bit depth that replace the template's (None keeps the template's own).
+    file_type: Option<op_export::FileFormat>,
+    bit_depth: Option<op_export::BitDepth>,
     preset: usize,
     dir: String,
     padding: u32,
@@ -713,6 +720,10 @@ impl App {
             preset_warnings,
             export: ExportUi {
                 open: false,
+                tab: Default::default(),
+                sel: None,
+                file_type: None,
+                bit_depth: None,
                 preset: 0,
                 dir: String::new(),
                 padding: DEFAULT_PADDING,
@@ -752,6 +763,8 @@ impl App {
             show_shortcuts: false,
             texture_import: None,
         };
+        let saved_export = export_ui::SavedExport::load();
+        app.export.apply_saved(saved_export, &app.presets);
         app.load_texture_library();
         // The HDRI that was in use last time comes back with the rest of the lighting.
         if let (4, Some(name)) = (display.env.preset, display.hdri.clone()) {
@@ -1026,6 +1039,7 @@ impl App {
             return;
         }
         let Some(preset) = self.presets.get(self.export.preset).cloned() else { return };
+        let preset = export_ui::with_overrides(preset, self.export.file_type, self.export.bit_depth);
         let ranges = self.mesh.set_ranges();
         let chosen: Vec<usize> = (0..ranges.len()).filter(|i| !self.export.skip_sets.contains(i)).collect();
         if chosen.is_empty() {
@@ -2255,105 +2269,7 @@ impl App {
             });
         }
 
-        if self.export.open {
-            let mut open = true;
-            egui::Window::new("Export textures").open(&mut open).collapsible(false).show(ctx, |ui| {
-                let idx = self.export.preset.min(self.presets.len() - 1);
-                egui::ComboBox::from_label("Preset").selected_text(&self.presets[idx].name).show_ui(ui, |ui| {
-                    for (i, p) in self.presets.iter().enumerate() {
-                        ui.selectable_value(&mut self.export.preset, i, &p.name);
-                    }
-                });
-                ui.small("Files:");
-                for m in &self.presets[idx].maps {
-                    ui.small(format!("  {}.{}", m.file, m.format.extension()));
-                }
-                ui.label("Folder:");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.export.dir).desired_width(330.0));
-                    if picker::browse_button(ui, self.picker.is_some()) {
-                        let cur = self.export.dir.clone();
-                        self.browse(picker::Field::ExportDir, &cur);
-                    }
-                });
-                let ranges = self.mesh.set_ranges();
-                if ranges.len() > 1 {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Texture sets:");
-                        if ui.small_button("All").clicked() {
-                            self.export.skip_sets.clear();
-                        }
-                        if ui.small_button("None").clicked() {
-                            self.export.skip_sets = (0..ranges.len()).collect();
-                        }
-                    });
-                    egui::ScrollArea::vertical().id_salt("export_sets").max_height(140.0).show(ui, |ui| {
-                        for (i, r) in ranges.iter().enumerate() {
-                            let mut on = !self.export.skip_sets.contains(&i);
-                            if ui.checkbox(&mut on, format!("{}  ({} tris)", r.name, r.index_count / 3)).changed() {
-                                if on {
-                                    self.export.skip_sets.remove(&i);
-                                } else {
-                                    self.export.skip_sets.insert(i);
-                                }
-                            }
-                        }
-                    });
-                    if !self.presets[idx].separates_texture_sets() {
-                        ui.colored_label(egui::Color32::YELLOW, "This preset's file names have no $textureSet: only one set can be exported at a time.");
-                    }
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label("Texture set name:");
-                        ui.text_edit_singleline(&mut self.export.set_name);
-                    });
-                }
-                ui.add(egui::Slider::new(&mut self.export.padding, 0..=64).text("Edge padding (texels)"));
-                let busy = self.export.running.is_some();
-                let chosen = (0..ranges.len()).filter(|i| !self.export.skip_sets.contains(i)).count();
-                let collides = chosen > 1 && !self.presets[idx].separates_texture_sets();
-                let ready = !busy && !self.export.dir.trim().is_empty() && chosen > 0 && !collides;
-                let label = if ranges.len() > 1 { format!("Export {chosen} texture set(s)") } else { "Export".to_string() };
-                if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
-                    self.todo.push(Todo::Export);
-                    ctx.request_repaint();
-                }
-                if busy {
-                    ui.label("Exporting...");
-                }
-                for w in &self.preset_warnings {
-                    ui.colored_label(egui::Color32::YELLOW, format!("Preset skipped: {w}"));
-                }
-                for n in &self.export.last_notes {
-                    ui.colored_label(egui::Color32::YELLOW, n);
-                }
-                ui.separator();
-                ui.label("Import a Substance Painter preset (.spexp):");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.export.import_path).desired_width(330.0));
-                    if picker::browse_button(ui, self.picker.is_some()) {
-                        let cur = self.export.import_path.clone();
-                        self.browse(picker::Field::PresetImport, &cur);
-                    }
-                });
-                if ui.add_enabled(!self.export.import_path.trim().is_empty(), egui::Button::new("Import preset")).clicked() {
-                    self.import_preset();
-                }
-                if !self.export.report.is_empty() {
-                    egui::ScrollArea::vertical().id_salt("import_report").max_height(180.0).show(ui, |ui| {
-                        for (i, line) in self.export.report.iter().enumerate() {
-                            if i == 0 {
-                                ui.label(line);
-                            } else {
-                                ui.colored_label(egui::Color32::YELLOW, line);
-                            }
-                        }
-                    });
-                }
-            });
-            self.export.open = open;
-        }
+        self.export_window(ctx);
     }
 }
 

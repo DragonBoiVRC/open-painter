@@ -63,6 +63,10 @@ pub fn display_path() -> PathBuf {
     data_dir().join("display.json")
 }
 
+pub fn export_settings_path() -> PathBuf {
+    data_dir().join("export.json")
+}
+
 pub fn brushes_dir() -> PathBuf {
     data_dir().join("brushes")
 }
