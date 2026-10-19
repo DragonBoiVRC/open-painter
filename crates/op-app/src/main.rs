@@ -116,6 +116,9 @@ struct Environment {
     tonemap: u32,
     /// Show see-through (low opacity) paint as dithered holes.
     show_transparency: bool,
+    /// Draw both sides of every surface, lighting the side that faces the camera, so parts with
+    /// inverted normals (mirrored copies, inside-out shells) look right instead of showing their inside.
+    two_sided: bool,
     /// Smooth jagged edges in the 3D view (FXAA).
     fxaa: bool,
     /// Screen-space ambient occlusion: darkens creases and where parts meet.
@@ -166,7 +169,7 @@ impl DisplaySettings {
 
 impl Default for Environment {
     fn default() -> Self {
-        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true, fxaa: true, ssao: false, ssao_strength: 0.8, ssao_radius: 12.0 }
+        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true, two_sided: true, fxaa: true, ssao: false, ssao_strength: 0.8, ssao_radius: 12.0 }
     }
 }
 

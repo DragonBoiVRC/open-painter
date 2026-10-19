@@ -167,12 +167,13 @@ fn environment(dir: vec3<f32>, blur: f32) -> vec3<f32> {
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let uv_t = i.uv - tile.xy;
-    // Back faces are dropped (as culling would), except when a section plane opens the model up: then
-    // the inside is shown, lit as the surface it is.
+    // Back faces are dropped (as culling would), except when a section plane opens the model up (then
+    // the inside is shown, lit as the surface it is) or the view is two-sided (forward.w = 1).
     let section_on = dot(g.clip.xyz, g.clip.xyz) > 0.5;
     // Parts the user hid, surfaces a section plane cuts away and back faces never appear, in any view.
     let hidden = textureSample(paint_hidden, paint_samp, uv_t).r > 0.5;
-    if (hidden || (!front && !section_on) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
+    let two_sided = g.forward.w > 0.5;
+    if (hidden || (!front && !section_on && !two_sided) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
         discard;
     }
     var n = normalize(i.normal);

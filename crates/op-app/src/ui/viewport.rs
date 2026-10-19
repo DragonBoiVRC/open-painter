@@ -262,7 +262,7 @@ impl App {
             view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).to_cols_array_2d(),
             // w is 1 for a perspective camera and 0 for an orthographic one.
             camera_pos: [cam.x, cam.y, cam.z, if self.camera.ortho { 0.0 } else { 1.0 }],
-            forward: { let (_, _, f) = self.camera.basis(); [f.x, f.y, f.z, 0.0] },
+            forward: { let (_, _, f) = self.camera.basis(); [f.x, f.y, f.z, if self.env.two_sided { 1.0 } else { 0.0 }] },
             ssao: [if self.env.ssao { self.env.ssao_strength } else { 0.0 }, self.env.ssao_radius * ppp, 0.0, 0.0],
             light_dir: [
                 light.x,

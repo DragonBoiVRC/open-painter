@@ -44,11 +44,12 @@ fn vs_main(v: VsIn) -> VsOut {
 @fragment
 fn fs_main(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec2<f32> {
     let section_on = dot(g.clip.xyz, g.clip.xyz) > 0.5;
-    // Culled back faces, unless a section plane shows the inside; cut-away surfaces are skipped.
+    // Culled back faces, unless a section plane shows the inside or the view is two-sided (forward.w = 1); cut-away surfaces are skipped.
     let local = i.uv - tile.xy;
     let hdims = vec2<f32>(textureDimensions(hidden_tex));
     let hidden = textureLoad(hidden_tex, vec2<i32>(clamp(local * hdims, vec2<f32>(0.0), hdims - vec2<f32>(1.0))), 0).r > 0.5;
-    if (hidden || (!front && !section_on) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
+    let two_sided = g.forward.w > 0.5;
+    if (hidden || (!front && !section_on && !two_sided) || (section_on && dot(i.world_pos, g.clip.xyz) > g.clip.w)) {
         discard;
     }
     return i.uv;

@@ -50,6 +50,7 @@ impl App {
                 });
             });
             ui.checkbox(&mut self.env.show_transparency, "Show opacity (see-through paint)").on_hover_text("See-through paint is drawn as dithered holes; switch off to see the model solid");
+            ui.checkbox(&mut self.env.two_sided, "Show back faces (two-sided)").on_hover_text("Draws both sides of every surface and lights the side facing you, so parts with flipped normals look right. Switch off to hide back faces like a one-sided material.");
             ui.checkbox(&mut self.env.fxaa, "Smooth edges (anti-aliasing)");
             ui.checkbox(&mut self.env.ssao, "Ambient occlusion (screen space)").on_hover_text("Darkens creases and where parts meet. A look for the viewport only: it is not painted or exported.");
             if self.env.ssao {
