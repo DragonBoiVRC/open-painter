@@ -5,6 +5,39 @@ use crate::paint::PaintOp;
 use crate::{App, TEXTURE_SIZES};
 
 impl App {
+    /// Change the active set's resolution. The paint and masks are resampled to the new size; the stroke
+    /// history (snapshots at the old size) is dropped.
+    pub(crate) fn resize_active_set(&mut self, size: u32) {
+        if size == self.tex_size {
+            return;
+        }
+        self.tex_size = size;
+        self.clear_active_history();
+        self.pending.push(PaintOp::Resize(size));
+        // Baked maps are tied to the resolution they were baked at.
+        self.clear_baked();
+        self.thumbs_dirty();
+        self.modified = true;
+    }
+
+    /// Change any set's resolution from the Texture Sets list. A set nothing was painted in has no
+    /// GPU store to resample, so only its size changes; otherwise it becomes the active set first.
+    pub(crate) fn resize_set(&mut self, i: usize, size: u32) {
+        if i != self.active {
+            let idle = matches!(self.parked.get(i), Some(Some(st)) if !st.materialized);
+            if idle {
+                self.with_set(i, |st| {
+                    st.tex_size = size;
+                    st.bakes.iter_mut().for_each(|b| *b = Default::default());
+                });
+                self.modified = true;
+                return;
+            }
+            self.switch_set(i);
+        }
+        self.resize_active_set(size);
+    }
+
     pub(crate) fn texture_set_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Resolution", |ui| {
             ui.horizontal(|ui| {
@@ -18,14 +51,9 @@ impl App {
                         }
                     });
                 if self.tex_size != before {
-                    // The paint and masks are resampled to the new size; the stroke history (snapshots at the
-                    // old size) is dropped.
-                    self.clear_active_history();
-                    self.pending.push(PaintOp::Resize(self.tex_size));
-                    // Baked maps are tied to the resolution they were baked at.
-                    self.clear_baked();
-                    self.thumbs_dirty();
-                    self.modified = true;
+                    let size = self.tex_size;
+                    self.tex_size = before;
+                    self.resize_active_set(size);
                 }
             });
             hint(ui, "Changing the resolution keeps your paint (resampled) but clears the undo history and the baked maps: bake again afterwards.");

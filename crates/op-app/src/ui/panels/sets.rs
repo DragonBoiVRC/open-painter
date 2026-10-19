@@ -11,6 +11,7 @@ impl App {
         let mut pick = None;
         let mut eye_action: Option<(usize, bool)> = None;
         let mut menu_action: Option<(usize, u8)> = None;
+        let mut resize: Option<(usize, u32)> = None;
         egui::Frame::NONE.fill(theme::LIST).stroke(egui::Stroke::new(1.0, theme::BORDER)).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             egui::ScrollArea::vertical().id_salt("set_list").auto_shrink([false, false]).show(ui, |ui| {
@@ -50,9 +51,25 @@ impl App {
                         eye_action = Some((i, ui.input(|inp| inp.modifiers.alt)));
                     }
                     let tiles = self.tile_count(i);
-                    let name_rect = egui::Rect::from_min_max(rect.min + egui::vec2(34.0, 0.0), rect.max - egui::vec2(if tiles > 1 { 112.0 } else { 64.0 }, 0.0));
+                    let name_rect = egui::Rect::from_min_max(rect.min + egui::vec2(34.0, 0.0), rect.max - egui::vec2(if tiles > 1 { 112.0 } else { 64.0 } + 64.0, 0.0));
                     p.with_clip_rect(name_rect).text(name_rect.left_center(), egui::Align2::LEFT_CENTER, &r.name, egui::FontId::proportional(12.5), text);
                     let count = if tiles > 1 { format!("{tiles} tiles  {}", tri_label(r.index_count / 3)) } else { tri_label(r.index_count / 3) };
+                    // The set's resolution: click for the list of sizes.
+                    let size = if i == self.active { self.tex_size } else { self.parked[i].as_ref().map_or(0, |st| st.tex_size) };
+                    if size > 0 {
+                        let w = 62.0;
+                        let right = rect.right() - if tiles > 1 { 112.0 } else { 64.0 };
+                        let size_rect = egui::Rect::from_min_max(egui::pos2(right - w, rect.top() + 3.0), egui::pos2(right, rect.bottom() - 3.0));
+                        let mut b = ui.new_child(egui::UiBuilder::new().max_rect(size_rect));
+                        b.menu_button(egui::RichText::new(format!("{size}²")).size(11.5).color(theme::ACCENT), |ui| {
+                            for s in crate::TEXTURE_SIZES {
+                                if ui.selectable_label(s == size, format!("{s}x{s}")).clicked() {
+                                    resize = Some((i, s));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
                     p.text(
                         rect.right_center() - egui::vec2(8.0, 0.0),
                         egui::Align2::RIGHT_CENTER,
@@ -94,6 +111,9 @@ impl App {
                     self.show_all_sets();
                 }
             });
+        }
+        if let Some((i, s)) = resize {
+            self.resize_set(i, s);
         }
         if let Some((i, alt)) = eye_action {
             if alt { self.isolate_set(i) } else { self.toggle_set_visible(i) }

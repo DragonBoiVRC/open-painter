@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use viewport::ViewportGpu;
 
-const TEXTURE_SIZES: [u32; 4] = [512, 1024, 2048, 4096];
+const TEXTURE_SIZES: [u32; 6] = [128, 256, 512, 1024, 2048, 4096];
 const MAX_HISTORY: usize = 300;
 const DEFAULT_AUTOSAVE_SECS: u64 = 120;
 const DEFAULT_PADDING: u32 = 8;
