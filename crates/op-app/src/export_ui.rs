@@ -368,6 +368,7 @@ impl App {
         }
         ui.add_space(6.0);
         ui.weak("Edge padding (dilation) extends colours past the UV borders so mip-maps and filtering don't show seams.");
+        self.export_notes(ui);
     }
 
     /// The pane for one texture set selected in the sidebar.
@@ -385,6 +386,7 @@ impl App {
         if included {
             self.write_files_list(ui, idx, name);
         }
+        self.export_notes(ui);
     }
 
     fn write_files_list(&self, ui: &mut egui::Ui, idx: usize, set_name: &str) {
@@ -473,6 +475,24 @@ impl App {
         }
     }
 
+    /// Warnings about templates that were skipped and notes from the last export (for example maps
+    /// that were not baked).
+    fn export_notes(&self, ui: &mut egui::Ui) {
+        if self.export.last_notes.is_empty() && self.preset_warnings.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for w in &self.preset_warnings {
+                ui.colored_label(WARN, format!("Template skipped: {w}"));
+            }
+            for n in &self.export.last_notes {
+                ui.colored_label(WARN, n);
+            }
+        });
+    }
+
     fn export_list_tab(&mut self, ui: &mut egui::Ui) {
         let idx = self.export.preset.min(self.presets.len() - 1);
         let ranges = self.mesh.set_ranges();
@@ -496,6 +516,7 @@ impl App {
             ui.add_space(4.0);
             ui.colored_label(WARN, "This template's file names have no $textureSet: only one set can be exported at a time.");
         }
+        self.export_notes(ui);
     }
 
     /// Number of image files the current selection will write.
@@ -517,12 +538,6 @@ impl App {
         let ready = !busy && !self.export.dir.trim().is_empty() && chosen > 0 && !collides;
         let textures = self.export_texture_count();
 
-        for w in &self.preset_warnings {
-            ui.colored_label(WARN, format!("Template skipped: {w}"));
-        }
-        for n in &self.export.last_notes {
-            ui.colored_label(WARN, n);
-        }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui.add_sized([110.0, 30.0], egui::Button::new("Reset all")).clicked() {
@@ -544,6 +559,13 @@ impl App {
                     ui.spinner();
                     ui.label("Exporting...");
                 } else {
+                    // The messages themselves are in the body: the footer must keep a fixed height, or
+                    // the window grows to fit it and never settles.
+                    let notes = self.export.last_notes.len() + self.preset_warnings.len();
+                    if notes > 0 {
+                        ui.colored_label(WARN, format!("{notes} note(s) from the last export"));
+                        ui.separator();
+                    }
                     let what = if textures == 1 { "texture" } else { "textures" };
                     ui.label(format!("{textures} {what} selected for export"));
                 }

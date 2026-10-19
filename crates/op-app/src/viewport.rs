@@ -32,6 +32,16 @@ pub struct Globals {
     pub ssao: [f32; 4],
 }
 
+/// How putting a picture on the GPU went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadOutcome {
+    Full,
+    /// The GPU was nearly full: the picture is kept at half its width and height.
+    Reduced,
+    /// There was no room for it.
+    Failed,
+}
+
 struct Offscreen {
     size: [u32; 2],
     color: wgpu::Texture,
@@ -765,18 +775,29 @@ impl ViewportGpu {
     }
 
     /// Make `image` available to fill layers under `id`. Uploading the same id again keeps the first.
-    pub fn upload_image(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, id: &str, image: &op_image::Decoded) {
+    /// A GPU that is out of memory gets a half-size copy, or none (see [`UploadOutcome`]).
+    pub fn upload_image(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, id: &str, image: &op_image::Decoded) -> UploadOutcome {
         let mut lib = self.images.lock().expect("image library lock");
-        if !lib.contains(id) {
-            lib.insert(id, crate::images::upload_image(device, queue, image));
-            drop(lib);
-            // Layers that were composited without it must be composited again.
-            for set in &mut self.sets {
-                for tile in &mut set.tiles {
-                    tile.invalidate();
-                }
+        if lib.contains(id) {
+            return UploadOutcome::Full;
+        }
+        let (gpu, outcome) = match crate::images::upload_image(device, queue, image) {
+            crate::images::Upload::Full(g) => (Some(g), UploadOutcome::Full),
+            crate::images::Upload::Reduced(g) => (Some(g), UploadOutcome::Reduced),
+            crate::images::Upload::Failed => (None, UploadOutcome::Failed),
+        };
+        match gpu {
+            Some(g) => lib.insert(id, g),
+            None => lib.mark_failed(id),
+        }
+        drop(lib);
+        // Layers that were composited without it must be composited again.
+        for set in &mut self.sets {
+            for tile in &mut set.tiles {
+                tile.invalidate();
             }
         }
+        outcome
     }
 
     /// Use `image` as the HDR environment (or drop it with `None`).
@@ -792,6 +813,11 @@ impl ViewportGpu {
 
     pub fn has_image(&self, id: &str) -> bool {
         self.images.lock().expect("image library lock").contains(id)
+    }
+
+    /// True if the GPU had no room for this picture when it was last tried.
+    pub fn image_failed(&self, id: &str) -> bool {
+        self.images.lock().expect("image library lock").has_failed(id)
     }
 
     /// Hold `batch` until the next frame is rendered; queued batches run before that frame's own.

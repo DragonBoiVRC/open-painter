@@ -33,10 +33,34 @@ pub fn dummy_image(device: &wgpu::Device) -> GpuImage {
     make(device, 1, 1, 1)
 }
 
-/// Upload `img` with a generated mip chain.
-pub fn upload_image(device: &wgpu::Device, queue: &wgpu::Queue, img: &Decoded) -> GpuImage {
+/// How an upload went.
+pub enum Upload {
+    Full(GpuImage),
+    /// The GPU was nearly full, so the picture was kept at half its width and height.
+    Reduced(GpuImage),
+    /// Not even the smaller copy fitted.
+    Failed,
+}
+
+/// Upload `img` with a generated mip chain. A GPU that is out of memory does not crash the app: the
+/// picture is tried at half size (a quarter of the memory), and then given up on.
+pub fn upload_image(device: &wgpu::Device, queue: &wgpu::Queue, img: &Decoded) -> Upload {
     let mips = op_image::mip_chain(img);
-    let gpu = make(device, img.width, img.height, mips.len() as u32);
+    for skip in 0..2 {
+        if skip >= mips.len() {
+            break;
+        }
+        let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let gpu = write_levels(device, queue, &mips[skip..]);
+        if pollster::block_on(scope.pop()).is_none() {
+            return if skip == 0 { Upload::Full(gpu) } else { Upload::Reduced(gpu) };
+        }
+    }
+    Upload::Failed
+}
+
+fn write_levels(device: &wgpu::Device, queue: &wgpu::Queue, mips: &[op_image::Mip]) -> GpuImage {
+    let gpu = make(device, mips[0].width, mips[0].height, mips.len() as u32);
     for (level, m) in mips.iter().enumerate() {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -71,6 +95,8 @@ pub struct BrushPictures {
 #[derive(Default)]
 pub struct ImageLibrary {
     map: HashMap<String, Arc<GpuImage>>,
+    /// Pictures the GPU had no room for; they are not retried every frame.
+    failed: std::collections::HashSet<String>,
     pub brush: BrushPictures,
 }
 
@@ -83,6 +109,14 @@ impl ImageLibrary {
 
     pub fn get(&self, id: &str) -> Option<Arc<GpuImage>> {
         self.map.get(id).cloned()
+    }
+
+    pub fn mark_failed(&mut self, id: &str) {
+        self.failed.insert(id.to_string());
+    }
+
+    pub fn has_failed(&self, id: &str) -> bool {
+        self.failed.contains(id)
     }
 
     pub fn insert(&mut self, id: &str, image: GpuImage) {

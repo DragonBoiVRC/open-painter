@@ -4,7 +4,7 @@
 //! needed (previews, upload to the GPU). Imported files are kept in the user's data folder so the
 //! library is there next session, and the ones a project uses are embedded in the project.
 
-use crate::{files, viewport::ViewportGpu, App};
+use crate::{files, viewport::{UploadOutcome, ViewportGpu}, App};
 use op_core::{Document, FillParams, NodeKind, Slot, TexRef};
 use op_image::{Decoded, Guess};
 use std::path::Path;
@@ -366,12 +366,23 @@ impl App {
         let mut renderer = self.render_state.renderer.write();
         let Some(gpu) = renderer.callback_resources.get_mut::<ViewportGpu>() else { return };
         for id in ids {
-            if gpu.has_image(&id) {
+            if gpu.has_image(&id) || gpu.image_failed(&id) {
                 continue;
             }
-            if let Some(img) = self.texture(&id).and_then(|a| a.decoded()) {
-                gpu.upload_image(&self.render_state.device, &self.render_state.queue, &id, img);
-            }
+            let Some(asset) = self.texture(&id) else { continue };
+            let Some(img) = asset.decoded() else { continue };
+            let notice = match gpu.upload_image(&self.render_state.device, &self.render_state.queue, &id, img) {
+                UploadOutcome::Full => continue,
+                UploadOutcome::Reduced => format!(
+                    "The GPU is nearly out of memory: '{}' is shown at half resolution. Close other GPU programs or remove unused textured layers.",
+                    asset.name
+                ),
+                UploadOutcome::Failed => format!(
+                    "The GPU is out of memory: '{}' could not be loaded, so its layer uses its constant values. Close other GPU programs or remove unused textured layers, then reopen the project.",
+                    asset.name
+                ),
+            };
+            self.gpu_notices.borrow_mut().push(notice);
         }
     }
 

@@ -45,6 +45,9 @@ const MAX_HISTORY: usize = 300;
 const DEFAULT_AUTOSAVE_SECS: u64 = 120;
 const DEFAULT_PADDING: u32 = 8;
 
+/// Set by the GPU error handler when the card ran out of memory somewhere other than a picture upload.
+static GPU_OUT_OF_MEMORY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 struct Brush {
     radius_pts: f32,
     hardness: f32,
@@ -578,6 +581,9 @@ struct App {
     layout_check: Instant,
     show_shortcuts: bool,
     texture_import: Option<textures::TextureImport>,
+    /// Messages about the GPU running short of memory, raised while uploading pictures (which only
+    /// has `&self`) and shown in the status bar by `housekeeping`.
+    gpu_notices: std::cell::RefCell<Vec<String>>,
 }
 
 fn is_project(p: &Path) -> bool {
@@ -587,6 +593,18 @@ fn is_project(p: &Path) -> bool {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         let rs = cc.wgpu_render_state.clone().expect("wgpu backend required");
+        // A GPU error should not close the app (and lose the session): note it and carry on. The
+        // default handler panics.
+        rs.device.on_uncaptured_error(std::sync::Arc::new(|e: eframe::egui_wgpu::wgpu::Error| {
+            if matches!(e, eframe::egui_wgpu::wgpu::Error::OutOfMemory { .. }) {
+                GPU_OUT_OF_MEMORY.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Once an error starts it tends to repeat every frame; log only the first few.
+            static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+                eprintln!("wgpu error: {e}");
+            }
+        }));
         let gpu = ViewportGpu::new(&rs.device, &rs.queue, rs.target_format);
         rs.renderer.write().callback_resources.insert(gpu);
 
@@ -765,6 +783,7 @@ impl App {
             layout_check: Instant::now(),
             show_shortcuts: false,
             texture_import: None,
+            gpu_notices: Default::default(),
         };
         let saved_export = export_ui::SavedExport::load();
         app.export.apply_saved(saved_export, &app.presets);
@@ -1356,6 +1375,11 @@ impl App {
 
     /// Runs at the start of every frame: queued GPU reads, autosave timer, background results.
     fn housekeeping(&mut self, ctx: &egui::Context) {
+        if GPU_OUT_OF_MEMORY.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.status = "The GPU ran out of memory. Save your work (Ctrl+S) and restart Open Painter; some parts may look wrong until then.".into();
+        } else if let Some(n) = self.gpu_notices.borrow_mut().pop() {
+            self.status = n;
+        }
         for t in std::mem::take(&mut self.todo) {
             match t {
                 Todo::Save(p) => self.do_save(p, ctx),
