@@ -54,6 +54,8 @@ fn document_channel(index: u32) -> Option<&'static str> {
         9 => "Anisotropy angle",
         10 => "Transmissive",
         13 => "Metallic",
+        14 => "Normal",
+        15 => "Ambient occlusion",
         24 => "Diffuse",
         25 => "Specular level",
         27 => "Scattering",
@@ -133,6 +135,14 @@ fn classify(ch: &SpexpChannel, version0: bool, w: &mut Warnings) -> Source {
                 6 => Source::Gray(ChannelSrc::Smoothness),
                 7 => Source::Gray(ChannelSrc::Roughness),
                 13 => Source::Gray(ChannelSrc::Metallic),
+                // Normal / ambient occlusion document channels: this project has no painted ones, and
+                // Substance writes them at their neutral value (white) when nothing is painted, so a
+                // white placeholder matches its output (a black one would zero e.g. the blue and
+                // alpha of Poiyomi's MetallicSmoothness map).
+                other @ (14 | 15) => Source::Missing {
+                    what: format!("the {} channel", document_channel(other).unwrap_or("?")),
+                    value: 1.0,
+                },
                 other => Source::Missing {
                     what: match document_channel(other) {
                         Some(name) => format!("the {name} channel"),
@@ -335,7 +345,7 @@ mod tests {
             vec![
                 Ch { src: 4, id: variant_u64(1 << 13), ty: 1 },  // metallic: exact
                 Ch { src: 4, id: variant_str("Glossiness"), ty: 2 },
-                Ch { src: 4, id: variant_u64(1 << 14), ty: 1 },  // not identified
+                Ch { src: 4, id: variant_u64(1 << 20), ty: 1 },  // not identified
                 Ch { src: 4, id: variant_u64(1 << 25), ty: 1 },  // specular level: known but unsupported
             ],
         )];
@@ -344,7 +354,7 @@ mod tests {
         assert_eq!((c[0], c[1]), (ChannelSrc::Metallic, ChannelSrc::Smoothness));
         assert_eq!((c[2], c[3]), (ChannelSrc::Constant(0.0), ChannelSrc::Constant(0.0)));
         let joined = got.warnings.join("\n");
-        assert!(joined.contains("channel B") && joined.contains("#14"), "{joined}");
+        assert!(joined.contains("channel B") && joined.contains("#20"), "{joined}");
         assert!(joined.contains("channel A") && joined.contains("Specular level"), "{joined}");
         // Height, on the other hand, is a real channel now.
         let h = import(&[map("h", "png", 0, vec![Ch { src: 4, id: variant_u64(1 << 1), ty: 1 }])], true).unwrap();
