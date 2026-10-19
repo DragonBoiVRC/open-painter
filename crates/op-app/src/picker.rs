@@ -33,11 +33,17 @@ fn filters(field: Field) -> (&'static str, &'static [&'static str]) {
 impl App {
     /// Open a native dialog for `field`, starting at the field's current text if it is a path.
     pub(crate) fn browse(&mut self, field: Field, current: &str) {
-        if self.picker.is_some() {
-            return;
+        if self.picker.is_none() {
+            self.browse_req = Some((field, current.to_string()));
         }
+    }
+
+    /// Start the dialog `browse` asked for. It needs the window, so the dialog opens on top of it.
+    pub(crate) fn start_browse(&mut self, frame: &eframe::Frame) {
+        let Some((field, current)) = self.browse_req.take() else { return };
+        let current = current.as_str();
         let (label, exts) = filters(field);
-        let mut dialog = rfd::FileDialog::new();
+        let mut dialog = rfd::FileDialog::new().set_parent(frame);
         if !exts.is_empty() {
             dialog = dialog.add_filter(label, exts);
         }

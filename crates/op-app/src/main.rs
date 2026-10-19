@@ -501,6 +501,8 @@ struct App {
     todo: Vec<Todo>,
     dialog: Option<PathDialog>,
     picker: Option<picker::Picker>,
+    /// A Browse click waiting for the next frame, which has the window to parent the dialog to.
+    browse_req: Option<(picker::Field, String)>,
     /// Previews of the active set's paint and masks, keyed by (layer, is_mask).
     thumbs: HashMap<(NodeId, bool), egui::TextureHandle>,
     paint_rev: u64,
@@ -683,6 +685,7 @@ impl App {
             todo: Vec::new(),
             dialog: None,
             picker: None,
+            browse_req: None,
             thumbs: HashMap::new(),
             paint_rev: 1,
             thumb_rev: 0,
@@ -2544,7 +2547,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.housekeeping(&ctx);
 
@@ -2568,6 +2571,7 @@ impl eframe::App for App {
 
         self.handle_shortcuts(ui, &ctx);
         self.ui_frame(ui);
+        self.start_browse(frame);
         self.texture_import_window(&ctx);
         self.drop_hint(&ctx);
         // A drag that ended anywhere that did not take it is over.
