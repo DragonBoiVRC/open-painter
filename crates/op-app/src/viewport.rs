@@ -686,7 +686,8 @@ impl ViewportGpu {
         self.ranges = mesh.set_ranges().iter().map(|s| (s.first_index, s.index_count)).collect();
         let layout = mesh.unit_ranges(udim);
         // Keep the stores that are still wanted (a store is identified by its position), add the
-        // missing ones at the default size (a `Reset`/`Load` op gives the real size) and drop the rest.
+        // missing ones at the placeholder size (a `Reset`/`Load` op gives the real size; starting small keeps a many-set model
+        // from exhausting VRAM first) and drop the rest.
         let mut old: Vec<Vec<PaintGpu>> = std::mem::take(&mut self.sets).into_iter().map(|s| s.tiles).collect();
         old.reverse();
         for set in 0..self.ranges.len() {
@@ -695,7 +696,7 @@ impl ViewportGpu {
             have.reverse();
             let mut tiles = Vec::new();
             for r in &wanted {
-                let mut paint = have.pop().unwrap_or_else(|| PaintGpu::new(device, crate::paint::DEFAULT_TEXTURE_SIZE));
+                let mut paint = have.pop().unwrap_or_else(|| PaintGpu::new(device, crate::sets::PLACEHOLDER_SIZE));
                 paint.set_images(self.images.clone());
                 paint.set_tile(device, r.tile);
                 tiles.push(paint);

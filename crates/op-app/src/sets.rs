@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// Size of the paint store of a set nobody has touched.
-const PLACEHOLDER_SIZE: u32 = 64;
+pub(crate) const PLACEHOLDER_SIZE: u32 = 64;
 
 /// Baked maps of one UV tile of a set, and a revision that changes whenever they do (generated
 /// masks regenerate when it moves).
