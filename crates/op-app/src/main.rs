@@ -2,6 +2,7 @@
 
 mod camera;
 mod composite;
+mod history;
 mod envmap;
 mod export_ui;
 mod files;
@@ -499,6 +500,8 @@ struct App {
     stashed_dock: Option<DockState<Tab>>,
     tex_size: u32,
     pending: Vec<PaintOp>,
+    /// Whether a stroke was in progress at the last frame, to notice when it ends.
+    stroke_was_active: bool,
     undo: Vec<Hist>,
     redo: Vec<Hist>,
     /// Which texture set each undo entry belongs to, oldest first, so undo follows the order edits were made in.
@@ -701,6 +704,7 @@ impl App {
             stashed_dock: None,
             tex_size: DEFAULT_TEXTURE_SIZE,
             pending: Vec::new(),
+            stroke_was_active: false,
             undo: Vec::new(),
             redo: Vec::new(),
             hist_order: Vec::new(),
@@ -2063,6 +2067,10 @@ impl App {
     /// The operations to send with this frame: those for the whole set, then those for single tiles.
     fn take_batches(&mut self, mut ops: Vec<PaintOp>) -> Vec<viewport::SetBatch> {
         self.ensure_doc_images(&self.doc);
+        if self.stroke_was_active && !self.stroke.active {
+            ops.push(PaintOp::EndStroke);
+        }
+        self.stroke_was_active = self.stroke.active;
         ops.splice(0..0, std::mem::take(&mut self.pending));
         let mut batches = vec![viewport::SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
         for (tile, op) in std::mem::take(&mut self.pending_tiles) {

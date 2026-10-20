@@ -350,6 +350,11 @@ impl Compositor {
         self.tile = tile;
     }
 
+    /// Drop the pooled working layers; they are allocated again on the next composite.
+    pub fn release_scratch(&mut self) {
+        self.pool.clear();
+    }
+
     pub fn set_size(&mut self, size: u32) {
         if size != self.size {
             self.size = size;

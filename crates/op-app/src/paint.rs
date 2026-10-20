@@ -19,6 +19,8 @@ pub const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Stamp capacity of the per-frame instance buffer.
 pub const MAX_STAMPS: usize = 4096;
 /// GPU memory we allow undo snapshots to use.
+/// How long a painter may sit unused before its working buffers are freed.
+const IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(2);
 const HISTORY_BUDGET_BYTES: u64 = 512 << 20;
 pub const DEFAULT_TEXTURE_SIZE: u32 = 2048;
 
@@ -121,6 +123,8 @@ pub enum PaintOp {
     Stamps2d { layer: NodeId, target: Target, stamps: Vec<Stamp> },
     /// Reset the target (content: transparent; mask: its initial value). Pair with BeginStroke.
     Clear { layer: NodeId, target: Target },
+    /// The stroke that began with `BeginStroke` is finished (the pointer was released).
+    EndStroke,
     UndoStroke,
     RedoStroke,
     /// A new edit invalidated every redo-able stroke.
@@ -294,18 +298,22 @@ pub struct NodeGpu {
 enum SnapTex {
     Content(Layer),
     Mask(wgpu::Texture),
+    /// A content snapshot reduced to the tiles its stroke changed (see `history.rs`).
+    Tiles(crate::history::TileSet),
 }
 
 struct StrokeSnap {
+    id: u64,
     layer: NodeId,
     tex: SnapTex,
 }
 
 impl StrokeSnap {
     fn bytes(&self, size: u32) -> u64 {
-        match self.tex {
+        match &self.tex {
             SnapTex::Content(_) => Layer::bytes(size),
             SnapTex::Mask(_) => size as u64 * size as u64,
+            SnapTex::Tiles(t) => t.bytes(),
         }
     }
 }
@@ -355,6 +363,8 @@ pub struct PaintGpu {
     pipeline_resolve_mask: wgpu::RenderPipeline,
     resolve_mask_layout: wgpu::BindGroupLayout,
     stroke_limit: Option<StrokeLimit>,
+    /// When this painter last had operations or composited; scratch memory is freed after a pause.
+    last_active: std::time::Instant,
     stroke_buf: Option<Layer>,
     stroke_mask_buf: Option<wgpu::Texture>,
     smudge_layout: wgpu::BindGroupLayout,
@@ -387,6 +397,11 @@ pub struct PaintGpu {
     compositor: Compositor,
     last_doc: Option<Document>,
     undo: Vec<StrokeSnap>,
+    next_snap_id: u64,
+    /// The snapshot of the stroke being painted: still a full copy until the stroke ends.
+    open_snap: Option<u64>,
+    diff: crate::history::TileDiff,
+    diff_jobs: Vec<crate::history::DiffJob>,
     redo: Vec<StrokeSnap>,
 }
 
@@ -837,6 +852,7 @@ impl PaintGpu {
             stroke_limit: None,
             stroke_buf: None,
             stroke_mask_buf: None,
+            last_active: std::time::Instant::now(),
             smudge_layout,
             scratch: None,
             images: None,
@@ -860,6 +876,10 @@ impl PaintGpu {
             compositor: Compositor::new(device, size),
             last_doc: None,
             undo: Vec::new(),
+            next_snap_id: 0,
+            open_snap: None,
+            diff: crate::history::TileDiff::new(device),
+            diff_jobs: Vec::new(),
             redo: Vec::new(),
         }
     }
@@ -963,7 +983,7 @@ impl PaintGpu {
         self.store.retain(|id, _| live.contains(id));
     }
 
-    fn snapshot_of(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, layer: NodeId, target: Target) -> Option<StrokeSnap> {
+    fn snapshot_of(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, layer: NodeId, target: Target) -> Option<StrokeSnap> {
         let g = self.store.get(&layer)?;
         let tex = match target {
             Target::Content => {
@@ -977,14 +997,22 @@ impl PaintGpu {
                 SnapTex::Mask(snap)
             }
         };
-        Some(StrokeSnap { layer, tex })
+        self.next_snap_id += 1;
+        Some(StrokeSnap { id: self.next_snap_id, layer, tex })
     }
 
     /// Write `snap` into the live texture and return a snapshot of what was there.
     fn swap_snapshot(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, snap: StrokeSnap) -> Option<StrokeSnap> {
+        if let SnapTex::Tiles(tiles) = &snap.tex {
+            let live = self.store.get(&snap.layer)?.content.as_ref()?;
+            let current = tiles.capture(device, encoder, live);
+            tiles.restore(encoder, live);
+            self.next_snap_id += 1;
+            return Some(StrokeSnap { id: self.next_snap_id, layer: snap.layer, tex: SnapTex::Tiles(current) });
+        }
         let target = match snap.tex {
             SnapTex::Content(_) => Target::Content,
-            SnapTex::Mask(_) => Target::Mask,
+            _ => Target::Mask,
         };
         let current = self.snapshot_of(device, encoder, snap.layer, target)?;
         let g = self.store.get(&snap.layer)?;
@@ -994,6 +1022,40 @@ impl PaintGpu {
             _ => return None,
         }
         Some(current)
+    }
+
+    /// The stroke being painted is over: have the GPU find which tiles it changed, so its full
+    /// snapshot can be shrunk to those once the answer is back (see [`PaintGpu::pump_history`]).
+    fn close_stroke(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        let Some(id) = self.open_snap.take() else { return };
+        if !crate::history::TileDiff::supports(self.size) {
+            return;
+        }
+        let Some(snap) = self.undo.iter().find(|s| s.id == id) else { return };
+        let (SnapTex::Content(before), Some(now)) = (&snap.tex, self.store.get(&snap.layer).and_then(|g| g.content.as_ref())) else { return };
+        let job = self.diff.start(device, encoder, id, before, now, self.size);
+        self.diff_jobs.push(job);
+    }
+
+    /// Finish the tile comparisons the GPU has answered: replace each full snapshot with the tiles
+    /// that changed (or keep it when most of the layer did). Call once per frame, before `apply`.
+    pub fn pump_history(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        let mut i = 0;
+        while i < self.diff_jobs.len() {
+            let Some(tiles) = self.diff_jobs[i].poll(device) else {
+                i += 1;
+                continue;
+            };
+            let job = self.diff_jobs.remove(i);
+            let total = (self.size / crate::history::TILE).pow(2) as usize;
+            let Some(snap) = self.undo.iter_mut().find(|s| s.id == job.id) else { continue };
+            if tiles.len() * 2 > total {
+                continue;
+            }
+            if let SnapTex::Content(before) = &snap.tex {
+                snap.tex = SnapTex::Tiles(crate::history::compact(device, encoder, before, tiles));
+            }
+        }
     }
 
     /// Resample `src` into a new texture of `size` (`kind`: 0 colour, 1 values, 2 mask).
@@ -1120,6 +1182,19 @@ impl PaintGpu {
         self.size
     }
 
+    /// Free the working buffers (the compositor's pool, the stroke and smudge copies) once nothing
+    /// has been painted or composited here for a moment. They are whole-texture layers, several times
+    /// the size of the visible output, and are simply allocated again when the next edit needs them.
+    pub fn release_idle(&mut self) {
+        if self.last_active.elapsed() < IDLE_RELEASE || self.stroke_limit.is_some() {
+            return;
+        }
+        self.compositor.release_scratch();
+        self.stroke_buf = None;
+        self.stroke_mask_buf = None;
+        self.scratch = None;
+    }
+
     /// Forget the last composite, so the next frame composites again (an image arrived, say).
     pub fn invalidate(&mut self) {
         self.last_doc = None;
@@ -1177,6 +1252,11 @@ impl PaintGpu {
             crate::gpu_io::read_texture(device, queue, &self.output.emissive, s, 8),
             crate::gpu_io::read_texture(device, queue, &self.output.opacity, s, 2),
         ]
+    }
+
+    /// Bytes of GPU memory the undo snapshots hold.
+    pub fn history_bytes(&self) -> u64 {
+        self.undo.iter().chain(&self.redo).map(|s| s.bytes(self.size)).sum()
     }
 
     fn trim_history(&mut self) {
@@ -1335,10 +1415,12 @@ impl PaintGpu {
         for op in ops {
             match op {
                 PaintOp::BeginStroke { layer, target } => {
+                    self.close_stroke(device, encoder);
                     self.stroke_limit = None;
                     let snap = self.snapshot_of(device, encoder, *layer, *target);
                     eprintln!("[undo] gpu: begin stroke, snapshot taken: {}", snap.is_some());
                     if let Some(s) = snap {
+                        self.open_snap = Some(s.id);
                         self.undo.push(s);
                         self.redo.clear();
                         self.trim_history();
@@ -1367,7 +1449,9 @@ impl PaintGpu {
                         dirty = true;
                     }
                 }
+                PaintOp::EndStroke => self.close_stroke(device, encoder),
                 PaintOp::UndoStroke => {
+                    self.open_snap = None;
                     eprintln!("[undo] gpu: {} snapshots", self.undo.len());
                     if let Some(snap) = self.undo.pop() {
                         if let Some(cur) = self.swap_snapshot(device, encoder, snap) {
@@ -1377,6 +1461,7 @@ impl PaintGpu {
                     }
                 }
                 PaintOp::RedoStroke => {
+                    self.close_stroke(device, encoder);
                     if let Some(snap) = self.redo.pop() {
                         if let Some(cur) = self.swap_snapshot(device, encoder, snap) {
                             self.undo.push(cur);
@@ -1817,7 +1902,15 @@ impl PaintGpu {
             }
         }
 
+        if ops.iter().any(|o| matches!(o, PaintOp::Fill { .. } | PaintOp::Clear { .. })) {
+            // These finish within the frame, with no stroke-end signal.
+            self.close_stroke(device, encoder);
+        }
+        if dirty || !ops.is_empty() {
+            self.last_active = std::time::Instant::now();
+        }
         if dirty || self.last_doc.as_ref() != Some(doc) {
+            self.last_active = std::time::Instant::now();
             self.compositor.render(device, encoder, doc, &self.store, &self.output);
             self.normal.run(device, encoder, &self.output.height, &self.output.normal, doc.height_strength);
             self.last_doc = Some(doc.clone());

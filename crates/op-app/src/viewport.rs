@@ -941,10 +941,21 @@ impl ViewportGpu {
             (Some(v), Some(i)) => Some((v, i)),
             _ => None,
         };
+        for set in &mut self.sets {
+            for tile in &mut set.tiles {
+                tile.pump_history(device, encoder);
+            }
+        }
         for b in queued.iter().chain(batches) {
             apply_batch(&mut self.sets, bufs, device, queue, encoder, b, &view);
         }
 
+        for set in &mut self.sets {
+            for tile in &mut set.tiles {
+                tile.release_idle();
+            }
+        }
+        let off = self.offscreen.as_ref().unwrap();
         let color_view = off.color.create_view(&Default::default());
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("viewport_pass"),
@@ -2231,6 +2242,35 @@ mod tests {
         assert_eq!(rig.gpu.paint().undo_depth(), (0, 1));
         rig.run(&doc, &[PaintOp::RedoStroke]);
         assert!(texel_rg(&rig.metal(), sphere_uv(front)).1 > 240, "redo did not restore the stroke");
+    }
+
+    /// After a stroke ends its snapshot shrinks to the tiles it changed, and undo and redo still
+    /// restore the picture exactly.
+    #[test]
+    fn finished_strokes_keep_only_changed_tiles_and_still_undo() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let before = rig.metal();
+        let stamp = dab(SIZE as f32 / 2.0, 20.0, 1.0, [0.0, 1.0, 0.0, 0.0]);
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, PaintOp::Stamps { layer, target: Target::Content, stamps: vec![stamp] }]);
+        let full = rig.gpu.paint().history_bytes();
+        let painted = rig.metal();
+        assert_ne!(before, painted);
+        rig.run(&doc, &[PaintOp::EndStroke]);
+        for _ in 0..20 {
+            rig.run(&doc, &[]);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let small = rig.gpu.paint().history_bytes();
+        assert!(small * 4 < full, "snapshot did not shrink: {full} -> {small}");
+        rig.run(&doc, &[PaintOp::UndoStroke]);
+        assert_eq!(rig.metal(), before, "undo from tiles did not restore the picture");
+        rig.run(&doc, &[PaintOp::RedoStroke]);
+        assert_eq!(rig.metal(), painted, "redo from tiles did not restore the stroke");
+        rig.run(&doc, &[PaintOp::UndoStroke]);
+        assert_eq!(rig.metal(), before, "second undo from tiles did not restore the picture");
     }
 
     /// With symmetry on, the stroke also paints the mirror image of the visible surface, even on
