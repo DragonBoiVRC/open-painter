@@ -107,11 +107,32 @@ impl Node {
         self
     }
 
+    /// Raises (above 0.5) or sinks (below) this fill's height where it shows.
+    fn with_height(mut self, h: f32) -> Self {
+        if let NodeKind::Fill(f) = &mut self.kind {
+            f.height = Some(h);
+        }
+        self
+    }
+
     fn blended(mut self, blend: BlendMode, opacity: f32) -> Self {
         self.blend = blend;
         self.opacity = opacity;
         self
     }
+}
+
+/// A layer that only sets some channels (height, roughness), masked by a generator.
+fn detail(name: &str, fill: FillParams, g: Generator) -> Node {
+    let mut n = layer(name, [0.0; 3], None, None);
+    n.kind = NodeKind::Fill(fill);
+    n.with_mask(g)
+}
+
+/// Surface relief: noise-driven height, from which the normal map is derived.
+fn relief(name: &str, height: f32, scale: f32) -> Node {
+    let noise = Generator::new(GeneratorKind::Noise).with("scale", scale).with("contrast", 0.7);
+    detail(name, FillParams { height: Some(height), ..Default::default() }, noise)
 }
 
 fn group(name: &str, children: Vec<Node>) -> Node {
@@ -141,6 +162,7 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                     layer("Bare metal", [0.62, 0.62, 0.64], Some(1.0), Some(0.35)),
                     // The paint chips away where the edge wear is strong.
                     layer("Paint", [0.70, 0.12, 0.10], Some(0.0), Some(0.5))
+                        .with_height(0.56)
                         .with_mask(Generator::new(EdgeWear).inverted()),
                     layer("Grime", [0.05, 0.045, 0.04], None, Some(0.9))
                         .blended(BlendMode::Multiply, 0.7)
@@ -155,8 +177,10 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 vec![
                     layer("Steel", [0.45, 0.45, 0.47], Some(1.0), Some(0.4)),
                     layer("Rust", [0.42, 0.17, 0.07], Some(0.0), Some(0.85))
+                        .with_height(0.4)
                         .with_mask(Generator::new(Noise).with("scale", 6.0).with("contrast", 0.75)),
                     layer("Rust (edges)", [0.25, 0.10, 0.05], Some(0.0), Some(0.9))
+                        .with_height(0.38)
                         .with_mask(Generator::new(EdgeWear).with("amount", 0.6)),
                 ],
             )],
@@ -167,7 +191,8 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 "Dusty stone",
                 vec![
                     layer("Stone", [0.45, 0.43, 0.40], Some(0.0), Some(0.9)),
-                    layer("Dust", [0.62, 0.57, 0.48], None, Some(1.0)).with_mask(Generator::new(TopDust)),
+                    relief("Stone relief", 0.68, 14.0),
+                    layer("Dust", [0.62, 0.57, 0.48], None, Some(1.0)).with_height(0.56).with_mask(Generator::new(TopDust)),
                     layer("Dark crevices", [0.12, 0.11, 0.10], None, None)
                         .blended(BlendMode::Multiply, 0.8)
                         .with_mask(Generator::new(CreviceDirt)),
@@ -196,6 +221,7 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 vec![
                     layer("Gold", [1.0, 0.77, 0.34], Some(1.0), Some(0.25)),
                     layer("Rubbed edges", [0.78, 0.60, 0.30], Some(1.0), Some(0.5))
+                        .with_height(0.46)
                         .with_mask(Generator::new(EdgeWear)),
                     layer("Tarnish", [0.20, 0.13, 0.05], None, Some(0.8))
                         .blended(BlendMode::Multiply, 0.7)
@@ -210,6 +236,7 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 vec![
                     layer("Copper", [0.95, 0.64, 0.54], Some(1.0), Some(0.3)),
                     layer("Patina", [0.28, 0.62, 0.52], Some(0.0), Some(0.7))
+                        .with_height(0.56)
                         .with_mask(Generator::new(CreviceDirt).with("amount", 0.7)),
                     layer("Patina (blotches)", [0.35, 0.68, 0.58], Some(0.0), Some(0.75))
                         .with_mask(Generator::new(Noise).with("scale", 7.0).with("contrast", 0.8)),
@@ -222,7 +249,9 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 "Chipped paint",
                 vec![
                     layer("Plaster", [0.55, 0.53, 0.50], Some(0.0), Some(0.95)),
+                    relief("Plaster relief", 0.62, 30.0),
                     layer("Paint", [0.80, 0.78, 0.70], Some(0.0), Some(0.6))
+                        .with_height(0.58)
                         .with_mask(Generator::new(EdgeWear).inverted()),
                     layer("Stains", [0.20, 0.17, 0.12], None, Some(0.9))
                         .blended(BlendMode::Multiply, 0.6)
@@ -236,6 +265,7 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 "Concrete",
                 vec![
                     layer("Concrete", [0.50, 0.49, 0.47], Some(0.0), Some(0.92)),
+                    relief("Concrete relief", 0.66, 22.0),
                     layer("Mottling", [0.34, 0.33, 0.32], None, Some(0.95))
                         .blended(BlendMode::Multiply, 0.7)
                         .with_mask(Generator::new(Noise).with("scale", 14.0).with("contrast", 0.5)),
@@ -251,7 +281,9 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 "Mossy stone",
                 vec![
                     layer("Stone", [0.36, 0.35, 0.33], Some(0.0), Some(0.9)),
+                    relief("Stone relief", 0.68, 14.0),
                     layer("Moss", [0.16, 0.30, 0.08], Some(0.0), Some(1.0))
+                        .with_height(0.6)
                         .with_mask(Generator::new(CreviceDirt).with("amount", 0.65)),
                     layer("Moss (top)", [0.20, 0.36, 0.10], Some(0.0), Some(1.0))
                         .with_mask(Generator::new(TopDust).with("amount", 0.4)),
@@ -264,9 +296,12 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 "Snow",
                 vec![
                     layer("Rock", [0.28, 0.27, 0.26], Some(0.0), Some(0.9)),
+                    relief("Rock relief", 0.7, 12.0),
                     layer("Snow", [0.93, 0.95, 0.98], Some(0.0), Some(0.55))
+                        .with_height(0.62)
                         .with_mask(Generator::new(TopDust).with("amount", 0.7)),
                     layer("Drifts", [0.97, 0.98, 1.0], Some(0.0), Some(0.5))
+                        .with_height(0.68)
                         .with_mask(Generator::new(Noise).with("scale", 6.0).with("contrast", 0.6)),
                 ],
             )],
@@ -278,6 +313,7 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 vec![
                     layer("Plastic", [0.10, 0.12, 0.45], Some(0.0), Some(0.35)),
                     layer("Scuffs", [0.35, 0.37, 0.65], Some(0.0), Some(0.7))
+                        .with_height(0.46)
                         .with_mask(Generator::new(EdgeWear).with("amount", 0.4)),
                     layer("Dirt", [0.08, 0.07, 0.06], None, Some(0.85))
                         .blended(BlendMode::Multiply, 0.6)
@@ -293,27 +329,42 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
 /// Plain single-layer PBR materials (metals, plastics, rubber and so on), as in the default
 /// material library of other painters. Values are common sRGB reference colours.
 pub fn builtin_base_materials() -> Vec<SmartMaterial> {
-    const TABLE: &[(&str, [f32; 3], f32, f32)] = &[
-        ("Aluminium", [0.96, 0.96, 0.97], 1.0, 0.35),
-        ("Brass", [0.96, 0.82, 0.55], 1.0, 0.3),
-        ("Bronze", [0.80, 0.55, 0.33], 1.0, 0.35),
-        ("Chromium", [0.55, 0.56, 0.55], 1.0, 0.05),
-        ("Copper", [0.97, 0.74, 0.63], 1.0, 0.25),
-        ("Gold", [1.0, 0.77, 0.34], 1.0, 0.2),
-        ("Iron", [0.77, 0.78, 0.78], 1.0, 0.45),
-        ("Silver", [0.98, 0.97, 0.95], 1.0, 0.15),
-        ("Steel", [0.75, 0.76, 0.77], 1.0, 0.3),
-        ("Titanium", [0.76, 0.73, 0.69], 1.0, 0.4),
-        ("Plastic (glossy white)", [0.90, 0.90, 0.90], 0.0, 0.2),
-        ("Plastic (matte black)", [0.03, 0.03, 0.03], 0.0, 0.6),
-        ("Rubber", [0.05, 0.05, 0.05], 0.0, 0.85),
-        ("Leather", [0.25, 0.14, 0.09], 0.0, 0.6),
-        ("Ceramic", [0.92, 0.91, 0.88], 0.0, 0.1),
-        ("Marble", [0.85, 0.84, 0.82], 0.0, 0.25),
-        ("Wood (oak)", [0.55, 0.38, 0.21], 0.0, 0.65),
-        ("Skin", [0.80, 0.58, 0.47], 0.0, 0.5),
+    // name, sRGB colour, metallic, roughness, then the surface: noise scale (0 = perfectly
+    // flat), height of the bumps and how much the roughness varies.
+    const TABLE: &[(&str, [f32; 3], f32, f32, f32, f32, f32)] = &[
+        ("Aluminium", [0.96, 0.96, 0.97], 1.0, 0.35, 50.0, 0.53, 0.15),
+        ("Brass", [0.96, 0.82, 0.55], 1.0, 0.3, 50.0, 0.53, 0.12),
+        ("Bronze", [0.80, 0.55, 0.33], 1.0, 0.35, 40.0, 0.54, 0.15),
+        ("Chromium", [0.55, 0.56, 0.55], 1.0, 0.05, 0.0, 0.5, 0.0),
+        ("Copper", [0.97, 0.74, 0.63], 1.0, 0.25, 45.0, 0.53, 0.12),
+        ("Gold", [1.0, 0.77, 0.34], 1.0, 0.2, 50.0, 0.52, 0.1),
+        ("Iron", [0.77, 0.78, 0.78], 1.0, 0.45, 30.0, 0.56, 0.2),
+        ("Silver", [0.98, 0.97, 0.95], 1.0, 0.15, 50.0, 0.52, 0.1),
+        ("Steel", [0.75, 0.76, 0.77], 1.0, 0.3, 50.0, 0.53, 0.15),
+        ("Titanium", [0.76, 0.73, 0.69], 1.0, 0.4, 45.0, 0.53, 0.12),
+        ("Plastic (glossy white)", [0.90, 0.90, 0.90], 0.0, 0.2, 0.0, 0.5, 0.0),
+        ("Plastic (matte black)", [0.03, 0.03, 0.03], 0.0, 0.6, 40.0, 0.54, 0.1),
+        ("Rubber", [0.05, 0.05, 0.05], 0.0, 0.85, 36.0, 0.6, 0.1),
+        ("Leather", [0.25, 0.14, 0.09], 0.0, 0.6, 44.0, 0.64, 0.15),
+        ("Ceramic", [0.92, 0.91, 0.88], 0.0, 0.1, 0.0, 0.5, 0.0),
+        ("Marble", [0.85, 0.84, 0.82], 0.0, 0.25, 12.0, 0.54, 0.15),
+        ("Wood (oak)", [0.55, 0.38, 0.21], 0.0, 0.65, 30.0, 0.6, 0.1),
+        ("Skin", [0.80, 0.58, 0.47], 0.0, 0.5, 56.0, 0.57, 0.1),
     ];
-    TABLE.iter().map(|&(n, c, m, r)| SmartMaterial { name: n.into(), nodes: vec![layer(n, c, Some(m), Some(r))] }).collect()
+    TABLE
+        .iter()
+        .map(|&(n, c, m, r, scale, bump, vary)| {
+            let base = layer(n, c, Some(m), Some(r));
+            let nodes = if scale == 0.0 {
+                vec![base]
+            } else {
+                let rough = FillParams { roughness: Some((r + vary).min(1.0)), ..Default::default() };
+                let breakup = Generator::new(GeneratorKind::Noise).with("scale", scale / 4.0).with("contrast", 0.5);
+                vec![group(n, vec![base, relief("Relief", bump, scale), detail("Roughness variation", rough, breakup)])]
+            };
+            SmartMaterial { name: n.into(), nodes }
+        })
+        .collect()
 }
 
 #[cfg(test)]
