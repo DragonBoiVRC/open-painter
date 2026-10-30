@@ -437,6 +437,7 @@ impl Mesh {
     pub fn load_obj(path: impl AsRef<Path>) -> Result<Self, MeshError> {
         let mut mesh = obj::load(path.as_ref())?;
         mesh.flip_v_per_tile();
+        mesh.sort_sets();
         Ok(mesh)
     }
 
@@ -446,6 +447,7 @@ impl Mesh {
     pub fn load_fbx(path: impl AsRef<Path>) -> Result<Self, MeshError> {
         let mut mesh = fbx::load(path.as_ref())?;
         mesh.flip_v_per_tile();
+        mesh.sort_sets();
         Ok(mesh)
     }
 
@@ -463,7 +465,60 @@ impl Mesh {
         if mesh.indices.is_empty() {
             return Err(MeshError::Empty);
         }
+        mesh.sort_sets();
         Ok(mesh)
+    }
+
+    /// Put the texture sets in alphabetical order (case-insensitive, numbers by value, so "mat2"
+    /// comes before "mat10"), reordering the index buffer to match.
+    pub fn sort_sets(&mut self) {
+        let mut order: Vec<&SetRange> = self.sets.iter().collect();
+        order.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+        if order.iter().zip(&self.sets).all(|(a, b)| **a == *b) {
+            return;
+        }
+        let mut indices = Vec::with_capacity(self.indices.len());
+        let mut sets = Vec::with_capacity(self.sets.len());
+        for r in order {
+            sets.push(SetRange { name: r.name.clone(), first_index: indices.len() as u32, index_count: r.index_count });
+            indices.extend_from_slice(&self.indices[r.first_index as usize..(r.first_index + r.index_count) as usize]);
+        }
+        self.indices = indices;
+        self.sets = sets;
+    }
+}
+
+/// Case-insensitive comparison that reads runs of digits as numbers.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, _) => return std::cmp::Ordering::Less,
+            (_, None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let mut num = |it: &mut std::iter::Peekable<std::str::Chars>| {
+                    let mut digits = String::new();
+                    while let Some(c) = it.next_if(|c| c.is_ascii_digit()) {
+                        digits.push(c);
+                    }
+                    digits.trim_start_matches('0').to_string()
+                };
+                let (x, y) = (num(&mut a), num(&mut b));
+                let ord = x.len().cmp(&y.len()).then_with(|| x.cmp(&y));
+                if ord.is_ne() {
+                    return ord;
+                }
+            }
+            (Some(x), Some(y)) => {
+                let ord = x.to_lowercase().cmp(y.to_lowercase());
+                if ord.is_ne() {
+                    return ord;
+                }
+                a.next();
+                b.next();
+            }
+        }
     }
 }
 
@@ -518,6 +573,25 @@ fn append_node(node: &gltf::Node, parent: Mat4, buffers: &[gltf::buffer::Data], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sets_sort_naturally_and_keep_their_triangles() {
+        let tri = |i: u32| [i, i, i];
+        let mut m = Mesh {
+            vertices: vec![],
+            indices: [tri(0), tri(1), tri(2)].concat(),
+            sets: vec![
+                SetRange { name: "mat10".into(), first_index: 0, index_count: 3 },
+                SetRange { name: "Body".into(), first_index: 3, index_count: 3 },
+                SetRange { name: "mat2".into(), first_index: 6, index_count: 3 },
+            ],
+        };
+        m.sort_sets();
+        let names: Vec<_> = m.sets.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Body", "mat2", "mat10"]);
+        assert_eq!(m.indices, [tri(1), tri(2), tri(0)].concat());
+        assert!(m.sets_are_valid());
+    }
 
     #[test]
     fn raycast_reports_the_uv_under_the_ray() {
