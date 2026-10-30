@@ -40,15 +40,17 @@ pub struct Scheduler {
     debounce: Duration,
 }
 
-fn generated_masks(nodes: &[Node], out: &mut Vec<(NodeId, Generator)>) {
+/// `density` is the product of the pattern scales of the groups around `nodes`.
+fn generated_masks(nodes: &[Node], density: f32, out: &mut Vec<(NodeId, Generator)>) {
     for n in nodes {
+        let density = density * n.pattern_scale;
         if let Some(m) = &n.mask {
             if let (true, Some(g)) = (m.enabled, &m.generator) {
-                out.push((n.id, g.clone()));
+                out.push((n.id, Generator { density: (g.density * density).clamp(op_core::MIN_PATTERN_SCALE, op_core::MAX_PATTERN_SCALE), ..g.clone() }));
             }
         }
         if let NodeKind::Group { children } = &n.kind {
-            generated_masks(children, out);
+            generated_masks(children, density, out);
         }
     }
 }
@@ -70,7 +72,7 @@ impl Scheduler {
     /// Look at the document; returns the jobs to start now.
     pub fn plan(&mut self, doc: &Document, bake_rev: u64, size: u32, now: Instant) -> Vec<JobRequest> {
         let mut wanted = Vec::new();
-        generated_masks(&doc.nodes, &mut wanted);
+        generated_masks(&doc.nodes, 1.0, &mut wanted);
         // Layers that no longer want a generated mask are forgotten (running jobs finish harmlessly).
         let ids: Vec<NodeId> = wanted.iter().map(|(id, _)| *id).collect();
         for (id, e) in self.entries.iter_mut() {

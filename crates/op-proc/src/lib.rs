@@ -439,4 +439,21 @@ mod tests {
         let mean = total(&e) / e.values.len() as f32;
         assert!(mean < 0.03, "a convex cube has no crevices, mean mask {mean}");
     }
+
+    #[test]
+    fn density_scales_weave_count_and_noise_scale() {
+        use op_core::graph::{GraphBuilder, Op, WeaveKind};
+        let mut b = GraphBuilder::new();
+        let w = b.add(Op::Weave { kind: WeaveKind::Plain, count: 8.0 }, &[]);
+        let mut g = Generator::new(GeneratorKind::Custom { name: "w".into(), graph: b.finish(w) });
+        g.density = 2.0;
+        assert!(matches!(build_graph(&g).unwrap().nodes[0].op, Op::Weave { count, .. } if count == 16.0));
+        g.density = 1000.0;
+        assert!(matches!(build_graph(&g).unwrap().nodes[0].op, Op::Weave { count, .. } if count == 512.0), "clamped");
+        let mut n = Generator::new(GeneratorKind::Noise).with("scale", 4.0);
+        let scale_of = |g: &Generator| build_graph(g).unwrap().nodes.iter().find_map(|n| if let Op::Noise { scale, .. } = n.op { Some(scale) } else { None }).unwrap();
+        let base = scale_of(&n);
+        n.density = 2.0;
+        assert_eq!(scale_of(&n), base * 2.0);
+    }
 }

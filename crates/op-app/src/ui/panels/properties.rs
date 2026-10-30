@@ -24,6 +24,10 @@ impl App {
                 }
             });
             changed |= ui.add(egui::Slider::new(&mut node.opacity, 0.0..=1.0).text("Opacity")).changed();
+            changed |= ui
+                .add(egui::Slider::new(&mut node.pattern_scale, 0.1..=10.0).logarithmic(true).text("Pattern scale"))
+                .on_hover_text("Density of generated patterns (weave, noise) in this layer's mask and everything inside it. Higher is finer.")
+                .changed();
 
             egui::CollapsingHeader::new("Colour adjustment").id_salt("colour_adjust").default_open(!node.adjust.is_identity()).show(ui, |ui| {
                 changed |= super::slider_row(ui, "Hue", &mut node.adjust.hue, -180.0..=180.0).changed();

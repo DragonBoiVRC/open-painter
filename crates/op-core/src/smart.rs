@@ -31,6 +31,9 @@ fn check_node(n: &Node, depth: usize, count: &mut usize) -> Result<(), String> {
     if !(n.opacity.is_finite() && (0.0..=1.0).contains(&n.opacity)) {
         return Err(format!("layer '{}' has an opacity outside 0..=1", n.name));
     }
+    if !(n.pattern_scale.is_finite() && (crate::MIN_PATTERN_SCALE..=crate::MAX_PATTERN_SCALE).contains(&n.pattern_scale)) {
+        return Err(format!("layer '{}' has a pattern scale out of range", n.name));
+    }
     if let Some(m) = &n.mask {
         if let Some(g) = &m.generator {
             g.validate().map_err(|e| format!("layer '{}': {e}", n.name))?;
@@ -98,6 +101,7 @@ fn layer(name: &str, base: [f32; 3], metallic: Option<f32>, roughness: Option<f3
         adjust: Default::default(),
         filters: Vec::new(),
         channels: Default::default(),
+        pattern_scale: 1.0,
         kind: NodeKind::Fill(FillParams { base: Some(base), metallic, roughness, ..Default::default() }),
     }
 }
@@ -192,6 +196,7 @@ fn group(name: &str, children: Vec<Node>) -> Node {
         adjust: Default::default(),
         filters: Vec::new(),
         channels: Default::default(),
+        pattern_scale: 1.0,
         kind: NodeKind::Group { children },
     }
 }
@@ -575,5 +580,27 @@ mod tests {
         let m: Mask = serde_json::from_str(json).unwrap();
         assert_eq!(m, Mask::new(false));
         assert!(m.generator.is_none());
+    }
+
+    #[test]
+    fn pattern_scale_defaults_for_old_files_and_is_validated() {
+        let m = &builtin_fabrics()[0];
+        let mut json: serde_json::Value = serde_json::from_str(&m.to_json().unwrap()).unwrap();
+        fn strip(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    o.remove("pattern_scale");
+                    o.remove("density");
+                    o.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        strip(&mut json);
+        assert_eq!(&SmartMaterial::from_json(&json.to_string()).unwrap(), m);
+        let mut bad = m.clone();
+        bad.nodes[0].pattern_scale = 0.0;
+        assert!(bad.validate().unwrap_err().contains("pattern scale"));
     }
 }

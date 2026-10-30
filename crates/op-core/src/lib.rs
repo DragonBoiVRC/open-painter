@@ -492,11 +492,19 @@ pub struct Generator {
     pub kind: GeneratorKind,
     pub params: BTreeMap<String, f32>,
     pub invert: bool,
+    /// Multiplies the density of the pattern (weave count, noise scale). Not edited on the mask:
+    /// it is filled in when the mask is generated, from the pattern scale of the layer and its groups.
+    #[serde(default = "one")]
+    pub density: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 impl Generator {
     pub fn new(kind: GeneratorKind) -> Self {
-        Self { kind, params: BTreeMap::new(), invert: false }
+        Self { kind, params: BTreeMap::new(), invert: false, density: 1.0 }
     }
 
     pub fn with(mut self, key: &str, value: f32) -> Self {
@@ -513,6 +521,9 @@ impl Generator {
     pub fn validate(&self) -> Result<(), String> {
         if self.params.len() > 32 {
             return Err("too many generator parameters".into());
+        }
+        if !(self.density.is_finite() && (MIN_PATTERN_SCALE..=MAX_PATTERN_SCALE * MAX_PATTERN_SCALE).contains(&self.density)) {
+            return Err("generator density is out of range".into());
         }
         for (k, v) in &self.params {
             if k.is_empty() || k.len() > 32 {
@@ -811,7 +822,14 @@ pub struct Node {
     /// Per-channel blend mode, opacity and on/off.
     #[serde(default)]
     pub channels: ChannelMixes,
+    /// Multiplies the density of generated patterns (weave, noise) in this layer's mask and in
+    /// everything inside it, if it is a group.
+    #[serde(default = "one")]
+    pub pattern_scale: f32,
 }
+
+pub const MIN_PATTERN_SCALE: f32 = 0.01;
+pub const MAX_PATTERN_SCALE: f32 = 100.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
@@ -986,6 +1004,7 @@ impl Document {
             adjust: ColorAdjust::default(),
             filters: Vec::new(),
             channels: ChannelMixes::default(),
+            pattern_scale: 1.0,
         };
         let list = match parent.and_then(|p| self.find_mut(p)) {
             Some(Node { kind: NodeKind::Group { children }, .. }) => children,

@@ -139,10 +139,19 @@ fn breakup(b: &mut GraphBuilder, base: GraphNodeId, strength: f32, scale: f32, s
 pub fn build_graph(gen: &Generator) -> Result<Graph, String> {
     gen.validate()?;
     let mut b = GraphBuilder::new();
-    let v = |key: &str| value(gen, key);
+    let density = gen.density;
+    // Noise scale is a density: more means finer.
+    let v = |key: &str| if key == "scale" { (value(gen, key) * density).clamp(0.1, 1000.0) } else { value(gen, key) };
     let out = match &gen.kind {
         GeneratorKind::Custom { graph, .. } => {
             let mut g = graph.clone();
+            for n in &mut g.nodes {
+                match &mut n.op {
+                    Op::Weave { count, .. } => *count = (*count * density).clamp(1.0, 512.0),
+                    Op::Noise { scale, .. } => *scale = (*scale * density).clamp(0.1, 1000.0),
+                    _ => {}
+                }
+            }
             if gen.invert {
                 let id = g.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
                 g.nodes.push(op_core::graph::GraphNode { id, op: Op::Invert, inputs: vec![g.output] });
