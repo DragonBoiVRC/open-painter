@@ -1599,6 +1599,38 @@ mod tests {
         assert!((value as i32 - 128).abs() <= 6, "metallic through a half-revealed mask: {value}");
     }
 
+    /// Hiding with a stroke on a reveal-all mask removes the layer there, for fill and paint layers.
+    #[test]
+    fn a_hiding_stroke_on_a_reveal_all_mask_removes_the_layer() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        for paint_layer in [false, true] {
+            let mut doc = Document::default();
+            let layer = doc.add(None, None, "l", if paint_layer { NodeKind::Paint } else { fill(None, Some(1.0), None) });
+            doc.find_mut(layer).unwrap().mask = Some(Mask::new(true));
+            rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+            let c = SIZE as f32 / 2.0;
+            let mut ops = vec![];
+            if paint_layer {
+                ops.push(PaintOp::BeginStroke { layer, target: Target::Content });
+                ops.push(PaintOp::Stamps { layer, target: Target::Content, stamps: vec![dab(c, 400.0, 1.0, [0.0, 1.0, 0.0, 0.0])] });
+                ops.push(PaintOp::EndStroke);
+            }
+            rig.run(&doc, &ops);
+            let (before, _) = texel_rg(&rig.metal(), sphere_uv(rig.front));
+            assert!(before > 200, "layer shows before hiding (paint_layer={paint_layer}): {before}");
+            let mut hide = dab(c, 30.0, 1.0, [0.0; 4]);
+            hide.values[0] = 0.0;
+            // Like the app: the stroke spans frames and ends later.
+            rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Mask }, PaintOp::Stamps { layer, target: Target::Mask, stamps: vec![hide] }]);
+            rig.run(&doc, &[PaintOp::Stamps { layer, target: Target::Mask, stamps: vec![hide] }]);
+            rig.run(&doc, &[]);
+            rig.run(&doc, &[PaintOp::EndStroke]);
+            rig.run(&doc, &[]);
+            let (after, _) = texel_rg(&rig.metal(), sphere_uv(rig.front));
+            assert!(after < 60, "hidden after the mask stroke (paint_layer={paint_layer}): {after}");
+        }
+    }
+
     /// A geometry fill paints exactly the given triangles (and a hair more, so island edges are
     /// covered), on content and on masks, and undoes like a stroke.
     #[test]

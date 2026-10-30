@@ -480,6 +480,8 @@ struct App {
     /// Layer being renamed in place, with its draft name.
     renaming: Option<(NodeId, String)>,
     target: Target,
+    /// What mask strokes write (1 reveals, 0 hides), when set by hand; otherwise see `auto_mask_value`.
+    mask_value: Option<f32>,
     tool: Tool,
     brush: Brush,
     rng: std::cell::Cell<u32>,
@@ -682,6 +684,7 @@ impl App {
             collapsed: Default::default(),
             renaming: None,
             target: Target::Content,
+            mask_value: None,
             tool: Tool::Paint,
             brush: Brush::default(),
             rng: std::cell::Cell::new(0x9e37_79b9),
@@ -1651,6 +1654,24 @@ impl App {
         }
     }
 
+    /// Painting changes a mask away from how it started: a white mask is painted black to hide
+    /// parts of the layer, a black one white to reveal them.
+    fn auto_mask_value(&self) -> f32 {
+        1.0 - self.mask_start_value()
+    }
+
+    /// What the selected layer's mask held before any painting (white if there is none).
+    fn mask_start_value(&self) -> f32 {
+        let white = self.selected.and_then(|id| self.doc.find(id)).and_then(|n| n.mask.as_ref()).is_none_or(|m| m.init_white);
+        if white { 1.0 } else { 0.0 }
+    }
+
+    /// The value a mask stroke writes: the mask value setting, or with the Erase tool the mask's
+    /// starting value, which undoes painting.
+    fn mask_paint_value(&self, erase: bool) -> f32 {
+        if erase { self.mask_start_value() } else { self.mask_value.unwrap_or_else(|| self.auto_mask_value()).clamp(0.0, 1.0) }
+    }
+
     fn make_stamp(&self, px: [f32; 2], ppp: f32, target: Target, dir: [f32; 2]) -> Stamp {
         self.make_stamp_raw([px[0], px[1], self.brush.radius_pts * ppp, self.brush.hardness], target, dir)
     }
@@ -1718,12 +1739,12 @@ impl App {
             };
         }
         match target {
-            // Masks: paint white to reveal, erase to black to hide.
+            // Masks: the mask value setting is what gets written (1 reveals, 0 hides); erase hides.
             Target::Mask => Stamp {
                 brush,
                 color: [0.0, 0.0, 0.0, plane],
                 // A capped stroke records coverage by painting 1; the real value goes with the cap.
-                values: [if erase && !self.stroke_limited { 0.0 } else { 1.0 }, 0.0, opacity, 0.0],
+                values: [if self.stroke_limited { 1.0 } else { self.mask_paint_value(erase) }, 0.0, opacity, 0.0],
                 enables: [0.0; 4],
                 shape,
                 emissive: [0.0; 4],
@@ -1774,7 +1795,7 @@ impl App {
         let tool_ok = matches!(self.tool, Tool::Paint | Tool::Project) || (self.tool == Tool::Erase && target == Target::Mask);
         self.stroke_limited = k < 0.999 && tool_ok;
         if self.stroke_limited {
-            let mask_value = if self.tool == Tool::Erase { 0.0 } else { 1.0 };
+            let mask_value = self.mask_paint_value(self.tool == Tool::Erase);
             self.pending.push(PaintOp::StrokeOpacity { layer, target, opacity: k, mask_value });
         }
     }

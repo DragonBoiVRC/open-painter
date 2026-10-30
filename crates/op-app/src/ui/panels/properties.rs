@@ -241,6 +241,21 @@ impl App {
             ui.radio_value(&mut self.target, Target::Content, "Layer content");
             ui.radio_value(&mut self.target, Target::Mask, "Mask");
         });
+        if self.target == Target::Mask {
+            let mut v = self.mask_paint_value(false);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Slider::new(&mut v, 0.0..=1.0).text("Mask value"))
+                    .on_hover_text("What mask strokes write: 1 reveals the layer, 0 hides it. The Erase tool puts the mask back to how it started.")
+                    .changed()
+                {
+                    self.mask_value = Some(v);
+                }
+                if ui.add_enabled(self.mask_value.is_some(), egui::Button::new("Auto")).on_hover_text("Hide on a white mask, reveal on a black one").clicked() {
+                    self.mask_value = None;
+                }
+            });
+        }
         if let Err(msg) = self.paint_target() {
             ui.small(msg);
         }
