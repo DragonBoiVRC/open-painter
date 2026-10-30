@@ -132,7 +132,7 @@ fn group(name: &str, children: Vec<Node>) -> Node {
 /// The smart materials that ship with the application.
 pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
     use GeneratorKind::*;
-    vec![
+    let mut all = vec![
         SmartMaterial {
             name: "Worn painted metal".into(),
             nodes: vec![group(
@@ -174,7 +174,146 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 ],
             )],
         },
-    ]
+        SmartMaterial {
+            name: "Dirty steel".into(),
+            nodes: vec![group(
+                "Dirty steel",
+                vec![
+                    layer("Steel", [0.56, 0.57, 0.58], Some(1.0), Some(0.3)),
+                    layer("Smudges", [0.30, 0.30, 0.31], None, Some(0.65))
+                        .blended(BlendMode::Multiply, 0.6)
+                        .with_mask(Generator::new(Noise).with("scale", 10.0).with("contrast", 0.6)),
+                    layer("Grime", [0.06, 0.055, 0.05], None, Some(0.9))
+                        .blended(BlendMode::Multiply, 0.8)
+                        .with_mask(Generator::new(CreviceDirt)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Worn gold".into(),
+            nodes: vec![group(
+                "Worn gold",
+                vec![
+                    layer("Gold", [1.0, 0.77, 0.34], Some(1.0), Some(0.25)),
+                    layer("Rubbed edges", [0.78, 0.60, 0.30], Some(1.0), Some(0.5))
+                        .with_mask(Generator::new(EdgeWear)),
+                    layer("Tarnish", [0.20, 0.13, 0.05], None, Some(0.8))
+                        .blended(BlendMode::Multiply, 0.7)
+                        .with_mask(Generator::new(CreviceDirt)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Weathered copper".into(),
+            nodes: vec![group(
+                "Weathered copper",
+                vec![
+                    layer("Copper", [0.95, 0.64, 0.54], Some(1.0), Some(0.3)),
+                    layer("Patina", [0.28, 0.62, 0.52], Some(0.0), Some(0.7))
+                        .with_mask(Generator::new(CreviceDirt).with("amount", 0.7)),
+                    layer("Patina (blotches)", [0.35, 0.68, 0.58], Some(0.0), Some(0.75))
+                        .with_mask(Generator::new(Noise).with("scale", 7.0).with("contrast", 0.8)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Chipped paint".into(),
+            nodes: vec![group(
+                "Chipped paint",
+                vec![
+                    layer("Plaster", [0.55, 0.53, 0.50], Some(0.0), Some(0.95)),
+                    layer("Paint", [0.80, 0.78, 0.70], Some(0.0), Some(0.6))
+                        .with_mask(Generator::new(EdgeWear).inverted()),
+                    layer("Stains", [0.20, 0.17, 0.12], None, Some(0.9))
+                        .blended(BlendMode::Multiply, 0.6)
+                        .with_mask(Generator::new(Noise).with("scale", 5.0).with("contrast", 0.7)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Concrete".into(),
+            nodes: vec![group(
+                "Concrete",
+                vec![
+                    layer("Concrete", [0.50, 0.49, 0.47], Some(0.0), Some(0.92)),
+                    layer("Mottling", [0.34, 0.33, 0.32], None, Some(0.95))
+                        .blended(BlendMode::Multiply, 0.7)
+                        .with_mask(Generator::new(Noise).with("scale", 14.0).with("contrast", 0.5)),
+                    layer("Damp stains", [0.12, 0.12, 0.11], None, Some(0.8))
+                        .blended(BlendMode::Multiply, 0.8)
+                        .with_mask(Generator::new(CreviceDirt)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Mossy stone".into(),
+            nodes: vec![group(
+                "Mossy stone",
+                vec![
+                    layer("Stone", [0.36, 0.35, 0.33], Some(0.0), Some(0.9)),
+                    layer("Moss", [0.16, 0.30, 0.08], Some(0.0), Some(1.0))
+                        .with_mask(Generator::new(CreviceDirt).with("amount", 0.65)),
+                    layer("Moss (top)", [0.20, 0.36, 0.10], Some(0.0), Some(1.0))
+                        .with_mask(Generator::new(TopDust).with("amount", 0.4)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Snow".into(),
+            nodes: vec![group(
+                "Snow",
+                vec![
+                    layer("Rock", [0.28, 0.27, 0.26], Some(0.0), Some(0.9)),
+                    layer("Snow", [0.93, 0.95, 0.98], Some(0.0), Some(0.55))
+                        .with_mask(Generator::new(TopDust).with("amount", 0.7)),
+                    layer("Drifts", [0.97, 0.98, 1.0], Some(0.0), Some(0.5))
+                        .with_mask(Generator::new(Noise).with("scale", 6.0).with("contrast", 0.6)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Scuffed plastic".into(),
+            nodes: vec![group(
+                "Scuffed plastic",
+                vec![
+                    layer("Plastic", [0.10, 0.12, 0.45], Some(0.0), Some(0.35)),
+                    layer("Scuffs", [0.35, 0.37, 0.65], Some(0.0), Some(0.7))
+                        .with_mask(Generator::new(EdgeWear).with("amount", 0.4)),
+                    layer("Dirt", [0.08, 0.07, 0.06], None, Some(0.85))
+                        .blended(BlendMode::Multiply, 0.6)
+                        .with_mask(Generator::new(CreviceDirt)),
+                ],
+            )],
+        },
+    ];
+    all.extend(builtin_base_materials());
+    all
+}
+
+/// Plain single-layer PBR materials (metals, plastics, rubber and so on), as in the default
+/// material library of other painters. Values are common sRGB reference colours.
+pub fn builtin_base_materials() -> Vec<SmartMaterial> {
+    const TABLE: &[(&str, [f32; 3], f32, f32)] = &[
+        ("Aluminium", [0.96, 0.96, 0.97], 1.0, 0.35),
+        ("Brass", [0.96, 0.82, 0.55], 1.0, 0.3),
+        ("Bronze", [0.80, 0.55, 0.33], 1.0, 0.35),
+        ("Chromium", [0.55, 0.56, 0.55], 1.0, 0.05),
+        ("Copper", [0.97, 0.74, 0.63], 1.0, 0.25),
+        ("Gold", [1.0, 0.77, 0.34], 1.0, 0.2),
+        ("Iron", [0.77, 0.78, 0.78], 1.0, 0.45),
+        ("Silver", [0.98, 0.97, 0.95], 1.0, 0.15),
+        ("Steel", [0.75, 0.76, 0.77], 1.0, 0.3),
+        ("Titanium", [0.76, 0.73, 0.69], 1.0, 0.4),
+        ("Plastic (glossy white)", [0.90, 0.90, 0.90], 0.0, 0.2),
+        ("Plastic (matte black)", [0.03, 0.03, 0.03], 0.0, 0.6),
+        ("Rubber", [0.05, 0.05, 0.05], 0.0, 0.85),
+        ("Leather", [0.25, 0.14, 0.09], 0.0, 0.6),
+        ("Ceramic", [0.92, 0.91, 0.88], 0.0, 0.1),
+        ("Marble", [0.85, 0.84, 0.82], 0.0, 0.25),
+        ("Wood (oak)", [0.55, 0.38, 0.21], 0.0, 0.65),
+        ("Skin", [0.80, 0.58, 0.47], 0.0, 0.5),
+    ];
+    TABLE.iter().map(|&(n, c, m, r)| SmartMaterial { name: n.into(), nodes: vec![layer(n, c, Some(m), Some(r))] }).collect()
 }
 
 #[cfg(test)]
@@ -208,6 +347,9 @@ mod tests {
     #[test]
     fn every_builtin_uses_generated_masks_so_no_paint_data_is_needed() {
         for m in builtin_smart_materials() {
+            if matches!(m.nodes[..], [Node { kind: NodeKind::Fill(_), .. }]) {
+                continue; // plain single-layer materials have nothing to generate
+            }
             let mut stack: Vec<&Node> = m.nodes.iter().collect();
             let mut generated = 0;
             while let Some(n) = stack.pop() {
