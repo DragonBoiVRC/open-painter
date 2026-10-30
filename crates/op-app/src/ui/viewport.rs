@@ -171,6 +171,37 @@ impl App {
                 self.fill_at(near, (far - near).normalize_or_zero(), mods.shift);
             }
         }
+        // Fill dragged across the model: every region the pointer passes over, as one undo step.
+        let dragging_fill = self.tool == Tool::Fill && !alt && !modal_open && !mods.command && !picking_id && resp.dragged_by(egui::PointerButton::Primary);
+        if dragging_fill {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                if self.fill_drag.is_none() {
+                    let start = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+                    self.begin_fill_drag(start);
+                }
+                if let Some(prev) = self.fill_drag.as_ref().map(|d| d.last) {
+                    let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+                    let inv = self.camera.view_proj(w / h).inverse();
+                    // Cast along the way, so a fast drag does not skip regions.
+                    let steps = ((pos - prev).length() / 4.0).ceil().clamp(1.0, 40.0) as u32;
+                    for i in 0..=steps {
+                        let p = prev + (pos - prev) * (i as f32 / steps as f32);
+                        let ndc = glam::Vec2::new((p.x - rect.min.x) / w * 2.0 - 1.0, 1.0 - (p.y - rect.min.y) / h * 2.0);
+                        let near = inv.project_point3(ndc.extend(0.0));
+                        let far = inv.project_point3(ndc.extend(1.0));
+                        self.fill_drag_at(near, (far - near).normalize_or_zero(), mods.shift);
+                    }
+                    if let Some(d) = self.fill_drag.as_mut() {
+                        d.last = pos;
+                    }
+                    self.pending.push(PaintOp::HoldStroke);
+                    ui.ctx().request_repaint();
+                }
+            }
+        } else if let Some(d) = self.fill_drag.take() {
+            self.pending.push(PaintOp::EndStroke);
+            self.status = format!("Filled {} region(s).", d.done.len());
+        }
         let placing = self.place_stencil && self.brush_pics.stencil.is_some();
         if placing {
             let place = &mut self.brush_pics.stencil_place;

@@ -44,7 +44,7 @@ impl App {
                         }
                     }
                 });
-                hint(ui, "Click the model to fill with the paint colour and channels below (flow sets the opacity). On a mask it reveals; Shift+click hides.");
+                hint(ui, "Click the model to fill with the paint colour and channels below (flow sets the opacity), or drag across it to fill every region you pass over; Triangle is the finest, for polygon-by-polygon fills. On a mask it writes the Mask value (hides on a white mask, reveals on a black one); Shift writes the opposite.");
             }
             if self.tool == Tool::Project {
                 hint(ui, "Paints the stencil picture onto the model from the camera's point of view. Set the stencil below, line it up, then paint over it.");

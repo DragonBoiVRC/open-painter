@@ -247,7 +247,7 @@ impl App {
                     if tool_button(ui, ph::HAND_POINTING, "Smudge (S)", self.tool == Tool::Smudge).clicked() {
                         self.tool = Tool::Smudge;
                     }
-                    if tool_button(ui, ph::PAINT_BUCKET, "Fill (G): click a face, UV island, mesh part or texture set. Shift+click hides on a mask", self.tool == Tool::Fill).clicked() {
+                    if tool_button(ui, ph::PAINT_BUCKET, "Fill (G): click or drag over faces, UV islands, mesh parts or texture sets. Shift writes the opposite on a mask", self.tool == Tool::Fill).clicked() {
                         self.tool = Tool::Fill;
                     }
                     if tool_button(ui, ph::EYE_SLASH, "Hide parts (7): click a face, island or part to hide it; Shift+click shows it", self.tool == Tool::Hide).clicked() {

@@ -1670,6 +1670,32 @@ mod tests {
         assert_eq!(texel_rg(&m, (0.1, 0.1)).0, 0, "hidden outside");
     }
 
+    /// A fill dragged over several frames is one stroke: it stays open between frames and one undo
+    /// takes back all of it, including what a closed-early snapshot would have missed.
+    #[test]
+    fn a_fill_dragged_over_several_frames_undoes_in_one_step() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let square = |u: f32| {
+            let (a, b, c, d) = ([u, 0.25], [u + 0.1, 0.25], [u + 0.1, 0.35], [u, 0.35]);
+            vec![a, b, c, a, c, d]
+        };
+        let fill_op = |uvs| PaintOp::Fill { layer, target: Target::Content, uvs, color: [1.0, 0.0, 0.0], values: [0.7, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0], emissive: [0.0; 4], opacity: [0.0; 2] };
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, fill_op(square(0.1)), PaintOp::HoldStroke]);
+        rig.run(&doc, &[fill_op(square(0.5)), PaintOp::HoldStroke]);
+        rig.run(&doc, &[PaintOp::EndStroke]);
+        rig.run(&doc, &[]);
+        let m = rig.metal();
+        assert!(texel_rg(&m, (0.15, 0.3)).1 > 250 && texel_rg(&m, (0.55, 0.3)).1 > 250, "both regions filled");
+        assert_eq!(rig.gpu.paint().undo_depth().0, 1, "one undo step");
+        rig.run(&doc, &[PaintOp::UndoStroke]);
+        let m = rig.metal();
+        assert_eq!(texel_rg(&m, (0.15, 0.3)).1, 0, "first region undone");
+        assert_eq!(texel_rg(&m, (0.55, 0.3)).1, 0, "second region undone");
+    }
+
     /// Channel mixes (blend mode, opacity, on/off per channel) composite like the CPU reference.
     #[test]
     fn channel_mixes_match_the_cpu_reference() {

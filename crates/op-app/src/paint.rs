@@ -125,6 +125,9 @@ pub enum PaintOp {
     Clear { layer: NodeId, target: Target },
     /// The stroke that began with `BeginStroke` is finished (the pointer was released).
     EndStroke,
+    /// Fills in this batch belong to a stroke that goes on in later frames: do not close it yet.
+    /// (Fills and clears normally finish within their frame.)
+    HoldStroke,
     UndoStroke,
     RedoStroke,
     /// A new edit invalidated every redo-able stroke.
@@ -1450,6 +1453,7 @@ impl PaintGpu {
                     }
                 }
                 PaintOp::EndStroke => self.close_stroke(device, encoder),
+                PaintOp::HoldStroke => {}
                 PaintOp::UndoStroke => {
                     self.open_snap = None;
                     eprintln!("[undo] gpu: {} snapshots", self.undo.len());
@@ -1902,7 +1906,7 @@ impl PaintGpu {
             }
         }
 
-        if ops.iter().any(|o| matches!(o, PaintOp::Fill { .. } | PaintOp::Clear { .. })) {
+        if ops.iter().any(|o| matches!(o, PaintOp::Fill { .. } | PaintOp::Clear { .. })) && !ops.iter().any(|o| matches!(o, PaintOp::HoldStroke)) {
             // These finish within the frame, with no stroke-end signal.
             self.close_stroke(device, encoder);
         }

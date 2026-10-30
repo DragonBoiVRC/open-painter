@@ -257,6 +257,8 @@ enum Tool {
 /// What a click with the fill tool covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FillScope {
+    /// A single triangle of the mesh (half of a quad). The finest scope: drag to fill polygon by polygon.
+    Triangle,
     /// One flat face of the mesh (a quad, or a run of coplanar triangles).
     Face,
     UvIsland,
@@ -265,16 +267,25 @@ enum FillScope {
 }
 
 impl FillScope {
-    const ALL: [FillScope; 4] = [FillScope::Face, FillScope::UvIsland, FillScope::MeshPart, FillScope::TextureSet];
+    const ALL: [FillScope; 5] = [FillScope::Triangle, FillScope::Face, FillScope::UvIsland, FillScope::MeshPart, FillScope::TextureSet];
 
     fn label(self) -> &'static str {
         match self {
+            FillScope::Triangle => "Triangle",
             FillScope::Face => "Face",
             FillScope::UvIsland => "UV island",
             FillScope::MeshPart => "Mesh part",
             FillScope::TextureSet => "Texture set",
         }
     }
+}
+
+struct FillDrag {
+    layer: NodeId,
+    target: Target,
+    /// The lowest triangle of every region already filled, so a region is filled once per drag.
+    done: std::collections::HashSet<usize>,
+    last: egui::Pos2,
 }
 
 #[derive(Default)]
@@ -511,6 +522,9 @@ struct App {
     pending: Vec<PaintOp>,
     /// Whether a stroke was in progress at the last frame, to notice when it ends.
     stroke_was_active: bool,
+    /// A drag with the Fill tool in progress: what it fills into, which regions it has done, and
+    /// where the pointer was last.
+    fill_drag: Option<FillDrag>,
     undo: Vec<Hist>,
     redo: Vec<Hist>,
     /// Which texture set each undo entry belongs to, oldest first, so undo follows the order edits were made in.
@@ -718,6 +732,7 @@ impl App {
             tex_size: DEFAULT_TEXTURE_SIZE,
             pending: Vec::new(),
             stroke_was_active: false,
+            fill_drag: None,
             undo: Vec::new(),
             redo: Vec::new(),
             hist_order: Vec::new(),
@@ -1896,6 +1911,7 @@ impl App {
             return None;
         };
         let firsts: Vec<usize> = match self.fill_scope {
+            FillScope::Triangle => vec![first],
             FillScope::Face => self.mesh.connected_triangles(first, op_mesh::Connect::FlatFace(8.0)),
             FillScope::UvIsland => self.mesh.connected_triangles(first, op_mesh::Connect::UvIsland),
             FillScope::MeshPart => self.mesh.connected_triangles(first, op_mesh::Connect::MeshPart),
@@ -1941,6 +1957,69 @@ impl App {
         self.pending.push(PaintOp::Hide { uvs, hidden: !show });
     }
 
+    /// A fill of `uvs` (three per triangle) with the paint colour and channels, or on a mask with
+    /// white (black if `hide`).
+    fn fill_op(&self, layer: NodeId, target: Target, uvs: Vec<[f32; 2]>, hide: bool) -> PaintOp {
+        let c = &self.channels;
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        match target {
+            Target::Mask => {
+                // The same value as a mask stroke would write; shift writes the opposite.
+                let v = self.mask_paint_value(false);
+                PaintOp::Fill { layer, target, uvs, color: [0.0; 3], values: [if hide { 1.0 - v } else { v }, 0.0, self.brush.opacity, 0.0], enables: [0.0; 4], emissive: [0.0; 4], opacity: [0.0; 2] }
+            }
+            Target::Content => PaintOp::Fill {
+                layer,
+                target,
+                uvs,
+                color: c.base_color.map(srgb_to_linear),
+                values: [c.metallic, c.roughness, self.brush.opacity, c.height_value],
+                enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
+                emissive: {
+                    let e = c.emissive_color.map(srgb_to_linear);
+                    [e[0], e[1], e[2], flag(c.emissive)]
+                },
+                opacity: [c.opacity_value, flag(c.opacity)],
+            },
+        }
+    }
+
+    /// Dragging the Fill tool: fill what the pointer passes over, each region once, as one undo step.
+    /// `hide` makes mask fills black.
+    fn fill_drag_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, hide: bool) {
+        let (layer, target) = match self.paint_target() {
+            Ok(t) => t,
+            Err(msg) => {
+                self.status = msg.to_string();
+                return;
+            }
+        };
+        let Some((firsts, uvs)) = self.picked_triangles(origin, dir) else { return };
+        let Some(key) = firsts.iter().min().copied() else { return };
+        let Some(drag) = self.fill_drag.as_mut() else { return };
+        if drag.layer != layer || drag.target != target || !drag.done.insert(key) {
+            return;
+        }
+        let op = self.fill_op(layer, target, uvs, hide);
+        self.pending.push(op);
+        self.thumbs_dirty();
+    }
+
+    /// Start a Fill drag at `at`: one undo step for everything it fills.
+    fn begin_fill_drag(&mut self, at: egui::Pos2) -> bool {
+        let (layer, target) = match self.paint_target() {
+            Ok(t) => t,
+            Err(msg) => {
+                self.status = msg.to_string();
+                return false;
+            }
+        };
+        self.pending.push(PaintOp::BeginStroke { layer, target });
+        self.push_hist(Hist::Stroke);
+        self.fill_drag = Some(FillDrag { layer, target, done: Default::default(), last: at });
+        true
+    }
+
     /// Fill what the click at `ray` (origin, direction) lands on with the paint colour and channels
     /// (or, on a mask, with white; `hide` makes it black).
     fn fill_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, hide: bool) {
@@ -1953,25 +2032,7 @@ impl App {
         };
         let Some((_, uvs)) = self.picked_triangles(origin, dir) else { return };
         let triangles = uvs.len() / 3;
-        let c = &self.channels;
-        let flag = |on: bool| if on { 1.0 } else { 0.0 };
-        let lin = c.base_color.map(srgb_to_linear);
-        let op = match target {
-            Target::Mask => PaintOp::Fill { layer, target, uvs, color: [0.0; 3], values: [if hide { 0.0 } else { 1.0 }, 0.0, self.brush.opacity, 0.0], enables: [0.0; 4], emissive: [0.0; 4], opacity: [0.0; 2] },
-            Target::Content => PaintOp::Fill {
-                layer,
-                target,
-                uvs,
-                color: lin,
-                values: [c.metallic, c.roughness, self.brush.opacity, c.height_value],
-                enables: [flag(c.base), flag(c.metal), flag(c.rough), flag(c.height)],
-                emissive: {
-                    let e = c.emissive_color.map(srgb_to_linear);
-                    [e[0], e[1], e[2], flag(c.emissive)]
-                },
-                opacity: [c.opacity_value, flag(c.opacity)],
-            },
-        };
+        let op = self.fill_op(layer, target, uvs, hide);
         self.stroke.active = false;
         self.pending.push(PaintOp::BeginStroke { layer, target });
         self.pending.push(op);
