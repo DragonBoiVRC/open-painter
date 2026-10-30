@@ -538,6 +538,12 @@ impl App {
                     p.text(art.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(size * 0.4), theme::TEXT_DIM);
                 }
             }
+            // Textures that live only in this project.
+            if self.texture(id).is_some_and(|a| !a.global) {
+                let badge = egui::Rect::from_min_size(art.right_bottom() + egui::vec2(-24.0, -17.0), egui::vec2(21.0, 14.0));
+                p.rect_filled(badge, 3.0, egui::Color32::from_black_alpha(190));
+                p.text(badge.center(), egui::Align2::CENTER_CENTER, "PRJ", egui::FontId::proportional(9.5), theme::ACCENT);
+            }
             // The channel its name suggests.
             if let Some(g) = self.texture(id).and_then(|a| a.guess()) {
                 let badge = egui::Rect::from_min_size(art.left_bottom() + egui::vec2(3.0, -17.0), egui::vec2(18.0, 14.0));
@@ -591,7 +597,17 @@ impl App {
                     }
                 }
                 ui.separator();
-                if ui.button("Remove from the library").clicked() {
+                let global = self.texture(id).is_some_and(|a| a.global);
+                if global {
+                    if ui.button("Move to this project only").clicked() {
+                        self.make_local(id);
+                        ui.close();
+                    }
+                } else if ui.button("Move to the shared library").clicked() {
+                    self.make_global(id);
+                    ui.close();
+                }
+                if ui.button(if global { "Remove from the library" } else { "Remove from the project" }).clicked() {
                     self.remove_texture(id);
                     ui.close();
                 }

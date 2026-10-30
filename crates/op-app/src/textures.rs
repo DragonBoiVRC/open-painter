@@ -33,18 +33,22 @@ pub struct ImportItem {
 pub struct TextureImport {
     pub items: Vec<ImportItem>,
     pub into_selected: bool,
+    /// Keep the files in the shared library (every project) instead of only in this project.
+    pub global: bool,
 }
 
 pub struct TextureAsset {
     pub id: String,
     pub name: String,
     pub bytes: Arc<Vec<u8>>,
+    /// In the shared library folder (every project sees it) rather than saved inside this project only.
+    pub global: bool,
     image: OnceLock<Option<Arc<Decoded>>>,
 }
 
 impl TextureAsset {
     pub fn new(id: String, name: String, bytes: Vec<u8>) -> Self {
-        Self { id, name, bytes: Arc::new(bytes), image: OnceLock::new() }
+        Self { id, name, bytes: Arc::new(bytes), global: false, image: OnceLock::new() }
     }
 
     /// The decoded pixels, decoding on first use. `None` if the bytes are not a usable image.
@@ -99,7 +103,7 @@ impl App {
         Ok(id)
     }
 
-    /// Import an image file: add it to the library and keep a copy in the user's library folder.
+    /// Import an image file into this project. `make_global` moves it to the shared library afterwards.
     pub(crate) fn import_texture_file(&mut self, path: &Path) -> Result<String, String> {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "texture".into());
         let meta = std::fs::metadata(path).map_err(|e| format!("{name}: {e}"))?;
@@ -107,15 +111,32 @@ impl App {
             return Err(format!("{name}: the file is larger than {} MB", op_image::MAX_FILE_BYTES >> 20));
         }
         let bytes = std::fs::read(path).map_err(|e| format!("{name}: {e}"))?;
-        let id = self.add_texture(&name, bytes)?;
-        if let Some(a) = self.texture(&id) {
-            let dir = files::textures_dir();
-            let target = dir.join(library_file_name(&a.id, &a.name));
-            if !target.exists() && std::fs::create_dir_all(&dir).is_ok() {
-                let _ = std::fs::write(&target, &*a.bytes);
-            }
+        self.add_texture(&name, bytes)
+    }
+
+    /// Move a texture into the shared library: a copy in the user's library folder, visible to every project.
+    pub(crate) fn make_global(&mut self, id: &str) {
+        let Some(a) = self.assets.iter_mut().find(|a| a.id == id) else { return };
+        let dir = files::textures_dir();
+        let target = dir.join(library_file_name(&a.id, &a.name));
+        if !target.exists() && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&target, &*a.bytes).is_err()) {
+            self.status = format!("Could not save {} to the library folder; it stays in this project.", a.name);
+            return;
         }
-        Ok(id)
+        a.global = true;
+    }
+
+    /// Move a texture out of the shared library into this project only (it is saved inside the project file).
+    pub(crate) fn make_local(&mut self, id: &str) {
+        let Some(a) = self.assets.iter_mut().find(|a| a.id == id) else { return };
+        let _ = std::fs::remove_file(files::textures_dir().join(library_file_name(&a.id, &a.name)));
+        a.global = false;
+        self.modified = true;
+    }
+
+    /// Forget the previous project's own textures; the shared library stays.
+    pub(crate) fn drop_project_textures(&mut self) {
+        self.assets.retain(|a| a.global);
     }
 
     /// Put a texture on a brand new fill layer, in the slot its name suggests.
@@ -162,7 +183,7 @@ impl App {
             Ok(files) => {
                 self.import_rx = None;
                 if !files.is_empty() {
-                    self.import_texture_files(&files);
+                    self.begin_texture_drop(&files, false);
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(150)),
@@ -195,19 +216,21 @@ impl App {
         ids
     }
 
-    /// Files dropped on the window: add them to the library, then ask where each one goes.
-    pub(crate) fn begin_texture_drop(&mut self, paths: &[std::path::PathBuf]) {
+    /// Files dropped on the window or picked with Import: read them, then ask where each one goes.
+    /// `guess` pre-selects the channel each file name suggests.
+    pub(crate) fn begin_texture_drop(&mut self, paths: &[std::path::PathBuf], guess: bool) {
         let ids = self.import_texture_files(paths);
         let items: Vec<ImportItem> = ids
             .into_iter()
             .filter_map(|id| {
-                let guess = self.texture(&id)?.guess();
-                Some(ImportItem { id, slot: Some(guess.map_or(Slot::BaseColor, |g| g.slot)), flip_green: guess.is_some_and(|g| g.directx) })
+                let g = self.texture(&id)?.guess();
+                let slot = guess.then(|| g.map_or(Slot::BaseColor, |g| g.slot));
+                Some(ImportItem { id, slot, flip_green: g.is_some_and(|g| g.directx) })
             })
             .collect();
         if !items.is_empty() {
             let into_selected = self.selected_fill().is_some();
-            self.texture_import = Some(TextureImport { items, into_selected });
+            self.texture_import = Some(TextureImport { items, into_selected, global: self.import_global });
         }
     }
 
@@ -285,14 +308,19 @@ impl App {
                 ui.radio_value(&mut imp.into_selected, false, "New fill layer");
                 ui.add_enabled_ui(has_selected, |ui| ui.radio_value(&mut imp.into_selected, true, "Selected fill layer"));
             });
+            ui.horizontal(|ui| {
+                ui.label("Import to:");
+                ui.radio_value(&mut imp.global, false, "This project").on_hover_text("Saved inside the project file; other projects do not see it.");
+                ui.radio_value(&mut imp.global, true, "Shared library").on_hover_text("Kept in your library folder and available in every project.");
+            });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let any = imp.items.iter().any(|i| i.slot.is_some());
-                if ui.add_enabled(any, egui::Button::new("Import")).clicked() {
+                if ui.button("Import").clicked() {
                     apply = true;
                     keep = false;
                 }
-                if ui.button(if any { "Library only" } else { "Close" }).clicked() {
+                if any && ui.button("Add without applying").clicked() {
                     keep = false;
                 }
             });
@@ -302,6 +330,16 @@ impl App {
         }
         if apply {
             self.apply_texture_import(&imp);
+        }
+        if !keep {
+            self.import_global = imp.global;
+            for item in &imp.items {
+                if imp.global {
+                    self.make_global(&item.id);
+                } else if self.texture(&item.id).is_some_and(|a| !a.global) {
+                    self.modified = true;
+                }
+            }
         }
         if keep {
             self.texture_import = Some(imp);
@@ -340,7 +378,9 @@ impl App {
             if let Ok(bytes) = std::fs::read(entry.path()) {
                 // The file name claims an id; only trust it if the content agrees.
                 if op_image::content_id(&bytes) == id {
-                    self.assets.push(TextureAsset::new(id, name, bytes));
+                    let mut asset = TextureAsset::new(id, name, bytes);
+                    asset.global = true;
+                    self.assets.push(asset);
                 }
             }
         }
@@ -351,7 +391,11 @@ impl App {
     pub(crate) fn remove_texture(&mut self, id: &str) {
         if let Some(i) = self.assets.iter().position(|a| a.id == id) {
             let a = self.assets.remove(i);
-            let _ = std::fs::remove_file(files::textures_dir().join(library_file_name(&a.id, &a.name)));
+            if a.global {
+                let _ = std::fs::remove_file(files::textures_dir().join(library_file_name(&a.id, &a.name)));
+            } else {
+                self.modified = true;
+            }
             self.tex_thumbs.remove(id);
         }
     }

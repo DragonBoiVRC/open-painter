@@ -592,6 +592,8 @@ struct App {
     layout_check: Instant,
     show_shortcuts: bool,
     texture_import: Option<textures::TextureImport>,
+    /// Where the last texture import went: the shared library (true) or just the project.
+    import_global: bool,
     /// Messages about the GPU running short of memory, raised while uploading pictures (which only
     /// has `&self`) and shown in the status bar by `housekeeping`.
     gpu_notices: std::cell::RefCell<Vec<String>>,
@@ -796,6 +798,7 @@ impl App {
             layout_check: Instant::now(),
             show_shortcuts: false,
             texture_import: None,
+            import_global: false,
             gpu_notices: Default::default(),
         };
         let saved_export = export_ui::SavedExport::load();
@@ -864,6 +867,7 @@ impl App {
     }
 
     fn new_project(&mut self) {
+        self.drop_project_textures();
         self.init_sets();
         self.set_view(View::Shaded);
         self.project_path = None;
@@ -901,6 +905,7 @@ impl App {
     }
 
     fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {
+        self.drop_project_textures();
         self.udim = p.udim;
         // The project's textures join the library (the id is the content hash, so a mismatch is ignored).
         for img in p.images {
@@ -1018,9 +1023,11 @@ impl App {
                 }
             }
         }
-        let images = used
+        // ...and every texture imported into this project, used or not.
+        let images = self
+            .assets
             .iter()
-            .filter_map(|id| self.texture(id))
+            .filter(|a| !a.global || used.contains(&a.id))
             .map(|a| op_project::ImageData { id: a.id.clone(), name: a.name.clone(), bytes: (*a.bytes).clone() })
             .collect();
         Ok(Project { mesh_name: self.mesh_name.clone(), mesh: self.mesh.clone(), sets, active: self.active, udim: self.udim, hidden_sets, images })
@@ -2585,7 +2592,7 @@ impl eframe::App for App {
         // Image files go to the texture library; the first other file is a model or project to open.
         let (images, others): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(|p| textures::is_image_path(p));
         if !images.is_empty() {
-            self.begin_texture_drop(&images);
+            self.begin_texture_drop(&images, true);
         }
         if let Some(p) = others.into_iter().next() {
             let action = if is_project(&p) { Pending::Open(p) } else { Pending::Mesh(p) };
