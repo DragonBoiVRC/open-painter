@@ -218,6 +218,9 @@ impl App {
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {
+                    if !self.stroke.active {
+                        self.stroke_in_uv = false;
+                    }
                     let local = [(pos.x - rect.min.x) * ppp, (pos.y - rect.min.y) * ppp];
                     let cam = self.camera;
                     let camera = [cam.target.x, cam.target.y, cam.target.z, cam.distance, cam.yaw, cam.pitch];
@@ -260,7 +263,8 @@ impl App {
                     self.stroke.active = false;
                 }
             },
-            _ => self.stroke.active = false,
+            _ if !self.stroke_in_uv => self.stroke.active = false,
+            _ => {}
         }
 
         let mut ops = Vec::new();

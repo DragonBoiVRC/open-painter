@@ -522,6 +522,9 @@ struct App {
     pending: Vec<PaintOp>,
     /// Whether a stroke was in progress at the last frame, to notice when it ends.
     stroke_was_active: bool,
+    /// The stroke in progress started in the UV view, so only that view may end it (the 3D view
+    /// sees no pointer button down while you paint in the UV view, and must not cancel the stroke).
+    stroke_in_uv: bool,
     /// A drag with the Fill tool in progress: what it fills into, which regions it has done, and
     /// where the pointer was last.
     fill_drag: Option<FillDrag>,
@@ -732,6 +735,7 @@ impl App {
             tex_size: DEFAULT_TEXTURE_SIZE,
             pending: Vec::new(),
             stroke_was_active: false,
+            stroke_in_uv: false,
             fill_drag: None,
             undo: Vec::new(),
             redo: Vec::new(),
