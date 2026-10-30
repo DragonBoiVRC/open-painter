@@ -36,11 +36,43 @@ impl App {
         let mut stamps = Vec::new();
         let mut stamp_target = None;
         let modal_open = self.dialog.is_some() || self.confirm.is_some();
-        let copies = matches!(self.tool, crate::Tool::Smudge | crate::Tool::Clone | crate::Tool::Project | crate::Tool::Fill | crate::Tool::Hide);
+        let copies = matches!(self.tool, crate::Tool::Smudge | crate::Tool::Clone | crate::Tool::Project | crate::Tool::Hide);
         if copies && resp.is_pointer_button_down_on() && primary_down {
-            self.status = "Smudge, clone, projection and fill work in the 3D view".into();
+            self.status = "Smudge, clone, projection and hide work in the 3D view".into();
         }
-        let painting = resp.is_pointer_button_down_on() && primary_down && !mods.alt && !mods.command && !modal_open && !copies;
+        // Fill: click a polygon (or drag over several) in the UV layout.
+        let at_uv = |p: Pos2| cam.uv_at(from_center(p));
+        if self.tool == crate::Tool::Fill && !mods.alt && !mods.command && !modal_open {
+            if let (true, Some(pos)) = (resp.clicked(), resp.interact_pointer_pos()) {
+                let picked = self.picked_triangles_uv(at_uv(pos));
+                self.fill_picked(picked, mods.shift);
+            }
+            if let (true, Some(pos)) = (resp.dragged_by(egui::PointerButton::Primary), resp.interact_pointer_pos()) {
+                if self.fill_drag.is_none() {
+                    let start = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+                    self.begin_fill_drag(start, true);
+                }
+                if let Some(prev) = self.fill_drag.as_ref().filter(|d| d.in_uv).map(|d| d.last) {
+                    let steps = ((pos - prev).length() / 4.0).ceil().clamp(1.0, 40.0) as u32;
+                    for i in 0..=steps {
+                        let picked = self.picked_triangles_uv(at_uv(prev + (pos - prev) * (i as f32 / steps as f32)));
+                        self.fill_drag_picked(picked, mods.shift);
+                    }
+                    if let Some(d) = self.fill_drag.as_mut() {
+                        d.last = pos;
+                    }
+                    self.pending.push(PaintOp::HoldStroke);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        if !(resp.dragged_by(egui::PointerButton::Primary) && self.tool == crate::Tool::Fill) && self.fill_drag.as_ref().is_some_and(|d| d.in_uv) {
+            if let Some(d) = self.fill_drag.take() {
+                self.pending.push(PaintOp::EndStroke);
+                self.status = format!("Filled {} region(s).", d.done.len());
+            }
+        }
+        let painting = resp.is_pointer_button_down_on() && primary_down && !mods.alt && !mods.command && !modal_open && !copies && self.tool != crate::Tool::Fill;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {

@@ -177,7 +177,7 @@ impl App {
             if let Some(pos) = resp.interact_pointer_pos() {
                 if self.fill_drag.is_none() {
                     let start = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
-                    self.begin_fill_drag(start);
+                    self.begin_fill_drag(start, false);
                 }
                 if let Some(prev) = self.fill_drag.as_ref().map(|d| d.last) {
                     let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
@@ -198,9 +198,11 @@ impl App {
                     ui.ctx().request_repaint();
                 }
             }
-        } else if let Some(d) = self.fill_drag.take() {
-            self.pending.push(PaintOp::EndStroke);
-            self.status = format!("Filled {} region(s).", d.done.len());
+        } else if self.fill_drag.as_ref().is_some_and(|d| !d.in_uv) {
+            if let Some(d) = self.fill_drag.take() {
+                self.pending.push(PaintOp::EndStroke);
+                self.status = format!("Filled {} region(s).", d.done.len());
+            }
         }
         let placing = self.place_stencil && self.brush_pics.stencil.is_some();
         if placing {

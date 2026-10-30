@@ -280,12 +280,21 @@ impl FillScope {
     }
 }
 
+/// Whether `p` lies inside (or on the edge of) the triangle `a`, `b`, `c`, whichever way it winds.
+fn uv_in_triangle(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> bool {
+    let side = |s: [f32; 2], e: [f32; 2]| (e[0] - s[0]) * (p[1] - s[1]) - (e[1] - s[1]) * (p[0] - s[0]);
+    let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+    !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+}
+
 struct FillDrag {
     layer: NodeId,
     target: Target,
     /// The lowest triangle of every region already filled, so a region is filled once per drag.
     done: std::collections::HashSet<usize>,
     last: egui::Pos2,
+    /// Started in the UV view: only that view ends it.
+    in_uv: bool,
 }
 
 #[derive(Default)]
@@ -1914,6 +1923,24 @@ impl App {
             self.status = "No model under the cursor.".into();
             return None;
         };
+        self.region_of(set, first)
+    }
+
+    /// Like [`App::picked_triangles`] for a point in UV space (the UV view), in the active set.
+    pub(crate) fn picked_triangles_uv(&mut self, uv: [f32; 2]) -> Option<(Vec<usize>, Vec<[f32; 2]>)> {
+        let r = self.mesh.set_ranges().get(self.active).cloned()?;
+        let corner = |i: usize| self.mesh.vertices[self.mesh.indices[i] as usize].uv;
+        let inside = |t: usize| uv_in_triangle(uv, corner(t), corner(t + 1), corner(t + 2));
+        let first = (r.first_index as usize..(r.first_index + r.index_count) as usize).step_by(3).find(|&t| inside(t));
+        let Some(first) = first else {
+            self.status = "No polygon under the cursor.".into();
+            return None;
+        };
+        self.region_of(self.active, first)
+    }
+
+    /// The triangles of the fill scope around the triangle at `first`, with their UVs.
+    fn region_of(&mut self, set: usize, first: usize) -> Option<(Vec<usize>, Vec<[f32; 2]>)> {
         let firsts: Vec<usize> = match self.fill_scope {
             FillScope::Triangle => vec![first],
             FillScope::Face => self.mesh.connected_triangles(first, op_mesh::Connect::FlatFace(8.0)),
@@ -1991,6 +2018,12 @@ impl App {
     /// Dragging the Fill tool: fill what the pointer passes over, each region once, as one undo step.
     /// `hide` makes mask fills black.
     fn fill_drag_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, hide: bool) {
+        let picked = self.picked_triangles(origin, dir);
+        self.fill_drag_picked(picked, hide);
+    }
+
+    /// One step of a Fill drag: fill what the pointer picked, unless it is already done.
+    pub(crate) fn fill_drag_picked(&mut self, picked: Option<(Vec<usize>, Vec<[f32; 2]>)>, hide: bool) {
         let (layer, target) = match self.paint_target() {
             Ok(t) => t,
             Err(msg) => {
@@ -1998,7 +2031,7 @@ impl App {
                 return;
             }
         };
-        let Some((firsts, uvs)) = self.picked_triangles(origin, dir) else { return };
+        let Some((firsts, uvs)) = picked else { return };
         let Some(key) = firsts.iter().min().copied() else { return };
         let Some(drag) = self.fill_drag.as_mut() else { return };
         if drag.layer != layer || drag.target != target || !drag.done.insert(key) {
@@ -2010,7 +2043,7 @@ impl App {
     }
 
     /// Start a Fill drag at `at`: one undo step for everything it fills.
-    fn begin_fill_drag(&mut self, at: egui::Pos2) -> bool {
+    pub(crate) fn begin_fill_drag(&mut self, at: egui::Pos2, in_uv: bool) -> bool {
         let (layer, target) = match self.paint_target() {
             Ok(t) => t,
             Err(msg) => {
@@ -2020,13 +2053,19 @@ impl App {
         };
         self.pending.push(PaintOp::BeginStroke { layer, target });
         self.push_hist(Hist::Stroke);
-        self.fill_drag = Some(FillDrag { layer, target, done: Default::default(), last: at });
+        self.fill_drag = Some(FillDrag { layer, target, done: Default::default(), last: at, in_uv });
         true
     }
 
     /// Fill what the click at `ray` (origin, direction) lands on with the paint colour and channels
     /// (or, on a mask, with white; `hide` makes it black).
     fn fill_at(&mut self, origin: glam::Vec3, dir: glam::Vec3, hide: bool) {
+        let picked = self.picked_triangles(origin, dir);
+        self.fill_picked(picked, hide);
+    }
+
+    /// Fill what a click picked (see [`App::fill_at`]).
+    pub(crate) fn fill_picked(&mut self, picked: Option<(Vec<usize>, Vec<[f32; 2]>)>, hide: bool) {
         let (layer, target) = match self.paint_target() {
             Ok(t) => t,
             Err(msg) => {
@@ -2034,7 +2073,7 @@ impl App {
                 return;
             }
         };
-        let Some((_, uvs)) = self.picked_triangles(origin, dir) else { return };
+        let Some((_, uvs)) = picked else { return };
         let triangles = uvs.len() / 3;
         let op = self.fill_op(layer, target, uvs, hide);
         self.stroke.active = false;
@@ -2720,7 +2759,18 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod lazy_tests {
-    use super::{hit_is_visible, lazy_step, push_recent, DisplaySettings};
+    use super::{hit_is_visible, lazy_step, push_recent, uv_in_triangle, DisplaySettings};
+
+    #[test]
+    fn a_point_is_in_a_triangle_whichever_way_it_winds() {
+        let (a, b, c) = ([0.0, 0.0], [1.0, 0.0], [0.0, 1.0]);
+        for (p, q, r) in [(a, b, c), (a, c, b)] {
+            assert!(uv_in_triangle([0.25, 0.25], p, q, r));
+            assert!(uv_in_triangle([0.5, 0.5], p, q, r), "on the edge counts");
+            assert!(!uv_in_triangle([0.6, 0.6], p, q, r));
+            assert!(!uv_in_triangle([-0.1, 0.2], p, q, r));
+        }
+    }
 
     #[test]
     fn display_settings_survive_a_round_trip_and_bad_files_give_defaults() {
