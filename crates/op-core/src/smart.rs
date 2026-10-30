@@ -3,6 +3,7 @@
 //!
 //! The built-in ones below are original; users can add their own as JSON files.
 
+use crate::graph::{BlendOp, GraphBuilder, NoiseKind, Op, WeaveKind};
 use crate::{BlendMode, FillParams, Generator, GeneratorKind, Mask, Node, NodeKind};
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +134,51 @@ fn detail(name: &str, fill: FillParams, g: Generator) -> Node {
 fn relief(name: &str, height: f32, scale: f32) -> Node {
     let noise = Generator::new(GeneratorKind::Noise).with("scale", scale).with("contrast", 0.7);
     detail(name, FillParams { height: Some(height), ..Default::default() }, noise)
+}
+
+/// A fabric: dyed base, woven height, darker gaps between the threads, and some mottling.
+/// `count` is how many threads fit across the UV layout; edit the material's JSON to change it.
+fn fabric(name: &str, colour: [f32; 3], roughness: f32, kind: WeaveKind, count: f32, bump: f32, fuzz: f32) -> SmartMaterial {
+    // Irregular thread thickness: a little UV-space noise added to the pattern.
+    let weave = || {
+        let mut b = GraphBuilder::new();
+        let w = b.add(Op::Weave { kind, count }, &[]);
+        let out = if fuzz > 0.0 {
+            let n = b.add(Op::Noise { kind: NoiseKind::Perlin, scale: count / 2.0, octaves: 3, persistence: 0.5, seed: 7, uv_space: true }, &[]);
+            b.add(Op::Blend { op: BlendOp::Add, opacity: fuzz }, &[w, n])
+        } else {
+            w
+        };
+        Generator::new(GeneratorKind::Custom { name: "Weave".into(), graph: b.finish(out) })
+    };
+    let dark = colour.map(|c| c * 0.35);
+    SmartMaterial {
+        name: name.into(),
+        nodes: vec![group(
+            name,
+            vec![
+                layer("Fabric", colour, Some(0.0), Some(roughness)),
+                detail("Weave height", FillParams { height: Some(bump), ..Default::default() }, weave()),
+                layer("Gaps", dark, None, None).blended(BlendMode::Multiply, 0.8).with_mask(weave().inverted()),
+                layer("Mottling", dark, None, None)
+                    .blended(BlendMode::Multiply, 0.3)
+                    .with_mask(Generator::new(GeneratorKind::Noise).with("scale", 20.0)),
+            ],
+        )],
+    }
+}
+
+/// Fabrics, built on the weave pattern op.
+pub fn builtin_fabrics() -> Vec<SmartMaterial> {
+    use WeaveKind::*;
+    vec![
+        fabric("Canvas", [0.78, 0.72, 0.58], 0.9, Plain, 70.0, 0.72, 0.2),
+        fabric("Linen", [0.82, 0.76, 0.64], 0.85, Plain, 60.0, 0.68, 0.5),
+        fabric("Denim", [0.12, 0.20, 0.40], 0.9, Twill, 80.0, 0.72, 0.25),
+        fabric("Burlap", [0.55, 0.42, 0.25], 0.95, Basket, 40.0, 0.8, 0.4),
+        fabric("Wool knit", [0.62, 0.55, 0.45], 0.95, Knit, 36.0, 0.8, 0.25),
+        fabric("Corduroy", [0.40, 0.22, 0.14], 0.9, Ribs, 40.0, 0.75, 0.1),
+    ]
 }
 
 fn group(name: &str, children: Vec<Node>) -> Node {
@@ -322,6 +368,7 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
             )],
         },
     ];
+    all.extend(builtin_fabrics());
     all.extend(builtin_base_materials());
     all
 }

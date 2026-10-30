@@ -199,6 +199,13 @@ fn apply(ev: &mut Eval, op: &Op, inputs: &[&[f32]]) -> Image {
                 })
                 .collect()
         }
+        Op::Weave { kind, count } => (0..n * n)
+            .into_par_iter()
+            .map(|i| {
+                let (u, v) = (((i % n) as f32 + 0.5) / n as f32, ((i / n) as f32 + 0.5) / n as f32);
+                crate::weave::height(*kind, u * count, v * count)
+            })
+            .collect(),
         Op::Invert => map1(inputs[0], |v| 1.0 - v),
         Op::Levels { in_lo, in_hi, gamma, out_lo, out_hi } => {
             // A zero-width input range would divide by zero; treat it as a tiny one.

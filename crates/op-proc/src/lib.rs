@@ -7,6 +7,7 @@
 mod eval;
 mod noise;
 mod templates;
+mod weave;
 
 pub use eval::{evaluate, Evaluation, ProcError, MAX_SIZE};
 pub use templates::{build_graph, label, param_specs, required_maps, value, ParamSpec};

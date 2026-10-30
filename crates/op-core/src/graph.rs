@@ -23,6 +23,21 @@ pub enum NoiseKind {
     Cellular,
 }
 
+/// A repeating textile pattern; see [`Op::Weave`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WeaveKind {
+    /// Over one, under one.
+    Plain,
+    /// Diagonal ribs: threads float over three, under one.
+    Twill,
+    /// Threads woven in pairs.
+    Basket,
+    /// Rows of interlocking V-shaped stitches (an approximation of jersey knit).
+    Knit,
+    /// Straight vertical ridges, as in corduroy.
+    Ribs,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlendOp {
     Add,
@@ -46,6 +61,8 @@ pub enum Op {
     Noise { kind: NoiseKind, scale: f32, octaves: u32, persistence: f32, seed: u32, uv_space: bool },
     /// The u (axis 0) or v (axis 1) texture coordinate.
     Uv { axis: u8 },
+    /// A textile pattern in UV space, `count` repeats across the texture; 1 where a thread is on top.
+    Weave { kind: WeaveKind, count: f32 },
     // --- one input
     Invert,
     Levels { in_lo: f32, in_hi: f32, gamma: f32, out_lo: f32, out_hi: f32 },
@@ -66,7 +83,7 @@ pub enum Op {
 impl Op {
     pub fn arity(&self) -> usize {
         match self {
-            Op::Const { .. } | Op::Baked { .. } | Op::Noise { .. } | Op::Uv { .. } => 0,
+            Op::Const { .. } | Op::Baked { .. } | Op::Noise { .. } | Op::Uv { .. } | Op::Weave { .. } => 0,
             Op::Invert | Op::Levels { .. } | Op::Contrast { .. } | Op::Threshold { .. } | Op::Blur { .. } => 1,
             Op::Blend { .. } => 2,
             Op::Lerp => 3,
@@ -94,6 +111,10 @@ impl Op {
                 Ok(())
             }
             Op::Uv { axis } if *axis > 1 => Err("uv axis must be 0 or 1".into()),
+            Op::Weave { count, .. } => {
+                finite(*count, "weave count")?;
+                if (1.0..=512.0).contains(count) { Ok(()) } else { Err("weave count must be in 1..=512".into()) }
+            }
             Op::Uv { .. } | Op::Invert | Op::Lerp => Ok(()),
             Op::Levels { in_lo, in_hi, gamma, out_lo, out_hi } => {
                 for (v, n) in [(in_lo, "in_lo"), (in_hi, "in_hi"), (out_lo, "out_lo"), (out_hi, "out_hi")] {
