@@ -324,6 +324,13 @@ struct PathDialog {
     path: String,
 }
 
+/// The "New project" window: pick a mesh, a resolution and the UV tile workflow, then create.
+struct NewProject {
+    mesh: String,
+    size: u32,
+    udim: bool,
+}
+
 /// One texture set's pixels, read back and ready for the export thread.
 struct ExportJob {
     name: String,
@@ -516,6 +523,7 @@ struct App {
     modified: bool,
     todo: Vec<Todo>,
     dialog: Option<PathDialog>,
+    new_project_dialog: Option<NewProject>,
     picker: Option<picker::Picker>,
     /// A Browse click waiting for the next frame, which has the window to parent the dialog to.
     browse_req: Option<(picker::Field, String)>,
@@ -716,6 +724,7 @@ impl App {
             modified: false,
             todo: Vec::new(),
             dialog: None,
+            new_project_dialog: None,
             picker: None,
             browse_req: None,
             thumbs: HashMap::new(),
@@ -862,7 +871,7 @@ impl App {
         self.status = "New project.".into();
     }
 
-    fn load_mesh_file(&mut self, path: &Path) {
+    fn load_mesh_file(&mut self, path: &Path) -> bool {
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let loaded = match ext.as_str() {
             "fbx" => Mesh::load_fbx(path),
@@ -882,8 +891,12 @@ impl App {
                 } else {
                     format!("Loaded {} ({tris} tris)", path.display())
                 };
+                true
             }
-            Err(e) => self.status = format!("Failed to load {}: {e}", path.display()),
+            Err(e) => {
+                self.status = format!("Failed to load {}: {e}", path.display());
+                false
+            }
         }
     }
 
@@ -958,10 +971,10 @@ impl App {
 
     fn perform(&mut self, action: Pending, ctx: &egui::Context) {
         match action {
-            Pending::New => self.new_project(),
+            Pending::New => self.new_project_dialog = Some(NewProject { mesh: String::new(), size: self.tex_size, udim: self.udim }),
             Pending::Open(p) if is_project(&p) => self.open_path(&p),
-            Pending::Open(p) => self.load_mesh_file(&p),
-            Pending::Mesh(p) => self.load_mesh_file(&p),
+            Pending::Open(p) => drop(self.load_mesh_file(&p)),
+            Pending::Mesh(p) => drop(self.load_mesh_file(&p)),
             Pending::Udim(on) => self.set_udim(on),
             Pending::Quit => {
                 self.allow_close = true;
@@ -2268,6 +2281,65 @@ impl App {
                 self.dialog = Some(d);
             } else if !keep {
                 self.after_save = None;
+            }
+        }
+
+        if let Some(mut d) = self.new_project_dialog.take() {
+            let (mut create, mut cancel, mut browse) = (false, false, false);
+            let busy = self.picker.is_some();
+            egui::Window::new("New project").collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.set_width(520.0);
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("BASIC SETTINGS").strong().size(14.0).color(ui::theme::TEXT_STRONG));
+                ui.add_space(6.0);
+                egui::Grid::new("new_project_basic").num_columns(2).min_col_width(180.0).spacing([16.0, 10.0]).show(ui, |ui| {
+                    ui.label("3D mesh");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        browse = picker::browse_button(ui, busy);
+                        let name = Path::new(&d.mesh).file_name().map(|n| n.to_string_lossy().into_owned());
+                        ui.label(egui::RichText::new(name.as_deref().unwrap_or("No file selected")).italics().strong());
+                    });
+                    ui.end_row();
+                    ui.label("Document resolution (px)");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        egui::ComboBox::from_id_salt("new_project_size").width(150.0).selected_text(format!("{0} x {0}", d.size)).show_ui(ui, |ui| {
+                            for s in TEXTURE_SIZES {
+                                ui.selectable_value(&mut d.size, s, format!("{s} x {s}"));
+                            }
+                        });
+                    });
+                    ui.end_row();
+                });
+                ui.add_space(12.0);
+                egui::CollapsingHeader::new(egui::RichText::new("ADVANCED SETTINGS").strong().size(14.0).color(ui::theme::TEXT_STRONG))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("UV Tile settings (UDIMs)").strong());
+                        ui.checkbox(&mut d.udim, "Use UV Tile workflow");
+                    });
+                ui.add_space(14.0);
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let size = egui::vec2(96.0, 28.0);
+                    let ready = !d.mesh.trim().is_empty();
+                    let button = egui::Button::new(egui::RichText::new("Create").strong()).min_size(size).fill(if ready { ui::theme::ACCENT_DIM } else { ui::theme::CONTROL });
+                    create = ui.add_enabled(ready, button).clicked();
+                    cancel = ui.add(egui::Button::new("Cancel").min_size(size)).clicked();
+                });
+                ui.add_space(4.0);
+            });
+            if browse {
+                self.browse(picker::Field::NewMesh, &d.mesh);
+            }
+            if create {
+                let old_udim = std::mem::replace(&mut self.udim, d.udim);
+                self.tex_size = d.size;
+                if !self.load_mesh_file(Path::new(d.mesh.trim())) {
+                    self.udim = old_udim;
+                    self.new_project_dialog = Some(d);
+                }
+            } else if !cancel {
+                self.new_project_dialog = Some(d);
             }
         }
 

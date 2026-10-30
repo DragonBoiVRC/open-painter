@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     OpenPath,
+    NewMesh,
     SavePath,
     ExportDir,
     PresetImport,
@@ -23,6 +24,7 @@ pub struct Picker {
 fn filters(field: Field) -> (&'static str, &'static [&'static str]) {
     match field {
         Field::OpenPath => ("Projects and models", &["opproj", "fbx", "obj", "glb", "gltf"]),
+        Field::NewMesh => ("Models", &["fbx", "obj", "glb", "gltf"]),
         Field::SavePath => ("Project", &["opproj"]),
         Field::PresetImport => ("Substance Painter export preset", &["spexp"]),
         Field::HighPoly => ("Model", &["glb", "gltf"]),
@@ -82,6 +84,11 @@ impl App {
                         Field::OpenPath | Field::SavePath => {
                             if let Some(d) = &mut self.dialog {
                                 d.path = text;
+                            }
+                        }
+                        Field::NewMesh => {
+                            if let Some(d) = &mut self.new_project_dialog {
+                                d.mesh = text;
                             }
                         }
                         Field::ExportDir => self.export.dir = text,
