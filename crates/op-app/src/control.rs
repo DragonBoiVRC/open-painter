@@ -49,6 +49,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("add_decal", "{image, origin: [x,y,z], dir: [x,y,z], width?, height?, name?}: a fill layer with the image projected onto the model where the ray from origin along dir hits it (world units). Needs the Position and World space normal maps baked (`bake`)."),
     ("text_image", "{text, size?: px per line (default 128), font?: path to a .ttf/.otf}: render text as white letters on transparent and add it to the library; returns the image id (use it with add_decal or set_texture)."),
     ("reimport_mesh", "{path?}: read the model file again (default: the one it came from) keeping all paint and layers; the texture sets must match."),
+    ("set_display", "{bloom?, sharpen?, vignette?, grain?: 0..1, exposure?: -3..3, fxaa?: bool}: the 3D view's look (not exported)."),
+    ("camera", "{view?: front|back|left|right|top|bottom, yaw?, pitch?, distance? (radians / model units), frame?: true}: move the 3D camera, then use `screenshot`."),
     ("undo", "Undo the last edit or stroke."),
     ("redo", "Redo."),
     ("bake", "{maps?: [ao, curvature, thickness, normal, position, id, world_normal, height, bent_normals, opacity], samples?, size?}: bake the active set; poll `status`."),
@@ -428,6 +430,40 @@ impl App {
                     None => self.mesh_source.clone().ok_or("this model was not loaded from a file: pass 'path'")?,
                 };
                 self.reimport_mesh(&path).map(|s| json!(s))
+            }
+            "set_display" => {
+                let e = &mut self.env;
+                for (key, slot) in [("bloom", &mut e.bloom), ("sharpen", &mut e.sharpen), ("vignette", &mut e.vignette), ("grain", &mut e.grain)] {
+                    if let Some(v) = f32_param(p, key) {
+                        *slot = v.clamp(0.0, 1.0);
+                    }
+                }
+                if let Some(v) = f32_param(p, "exposure") {
+                    e.exposure = v.clamp(-3.0, 3.0);
+                }
+                if let Some(b) = p.get("fxaa").and_then(Value::as_bool) {
+                    e.fxaa = b;
+                }
+                Ok(json!(true))
+            }
+            "camera" => {
+                if let Some(v) = p.get("view").and_then(Value::as_str) {
+                    let preset = crate::camera::ViewPreset::ALL.into_iter().find(|x| x.label().eq_ignore_ascii_case(v)).ok_or("view must be front, back, left, right, top or bottom")?;
+                    self.camera.set_view(preset);
+                }
+                if p.get("frame").and_then(Value::as_bool) == Some(true) {
+                    self.frame_model();
+                }
+                if let Some(v) = f32_param(p, "yaw") {
+                    self.camera.yaw = v;
+                }
+                if let Some(v) = f32_param(p, "pitch") {
+                    self.camera.pitch = v.clamp(-1.55, 1.55);
+                }
+                if let Some(v) = f32_param(p, "distance") {
+                    self.camera.distance = v.clamp(1e-3, 1e6);
+                }
+                Ok(json!({"yaw": self.camera.yaw, "pitch": self.camera.pitch, "distance": self.camera.distance}))
             }
             "paint_uv" => self.control_paint_uv(p),
             "undo" => {

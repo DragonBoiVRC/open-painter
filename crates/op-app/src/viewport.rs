@@ -199,6 +199,9 @@ pub struct ViewportGpu {
     /// Smooth the edges of the finished picture (FXAA).
     pub fxaa: bool,
     blit_layout: wgpu::BindGroupLayout,
+    /// Final-picture effects: vignette, grain, bloom, sharpen (each 0..1).
+    pub post: [f32; 4],
+    post_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
@@ -533,8 +536,15 @@ impl ViewportGpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
             ],
         });
+        let post_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("post_params"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let blit_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/blit.wgsl"));
         let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blit_pl"),
@@ -605,6 +615,8 @@ impl ViewportGpu {
             target_format,
             fxaa: false,
             blit_layout,
+            post: [0.0; 4],
+            post_buf,
             sampler,
             globals_buf,
             globals_bind,
@@ -889,6 +901,7 @@ impl ViewportGpu {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&color_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.post_buf.as_entire_binding() },
             ],
         });
         self.offscreen =
@@ -1135,6 +1148,8 @@ pub struct ViewportCallback {
     pub wireframe: bool,
     /// Smooth the edges of the picture.
     pub fxaa: bool,
+    /// Vignette, grain, bloom and sharpen amounts.
+    pub post: [f32; 4],
     /// Show this layer's mask on the model.
     pub mask_view: Option<u64>,
     /// Keep the UV buffer up to date (smudge and clone need it).
@@ -1159,6 +1174,8 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             gpu.mask_view = self.mask_view;
             gpu.uv_buffer = self.uv_buffer;
             gpu.fxaa = self.fxaa;
+            gpu.post = self.post;
+            queue.write_buffer(&gpu.post_buf, 0, bytemuck::cast_slice(&self.post));
             gpu.paint_through = self.paint_through;
             gpu.render_sets(device, queue, encoder, &self.globals, self.size_px, &self.batches);
         }
@@ -1183,7 +1200,7 @@ impl ViewportGpu {
         let [w, h] = off.size;
         // With anti-aliasing on, run the same final pass the screen gets, so the file matches what is seen.
         let plain_rgba = matches!(self.target_format, wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm);
-        if self.fxaa && plain_rgba {
+        if (self.fxaa || self.post.iter().any(|p| *p > 0.0)) && plain_rgba {
             let tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("screenshot"),
                 size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -1227,7 +1244,7 @@ impl ViewportGpu {
     /// Copy the finished frame into `pass`, smoothed if FXAA is on.
     fn blit_into(&self, pass: &mut wgpu::RenderPass<'_>) {
         let Some(off) = &self.offscreen else { return };
-        pass.set_pipeline(if self.fxaa { &self.blit_fxaa } else { &self.blit });
+        pass.set_pipeline(if self.fxaa || self.post.iter().any(|p| *p > 0.0) { &self.blit_fxaa } else { &self.blit });
         pass.set_bind_group(0, &off.blit_bind, &[]);
         pass.draw(0..3, 0..1);
     }

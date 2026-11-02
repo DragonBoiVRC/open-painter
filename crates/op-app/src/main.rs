@@ -134,6 +134,11 @@ struct Environment {
     ssao_strength: f32,
     /// Its reach in screen points.
     ssao_radius: f32,
+    /// Final-picture effects (0 is off): darker rim, film grain, glow around bright areas, sharpening.
+    vignette: f32,
+    grain: f32,
+    bloom: f32,
+    sharpen: f32,
 }
 
 /// The display settings that are kept between sessions: the lighting and the HDRI in use.
@@ -146,11 +151,13 @@ struct DisplaySettings {
     /// Orthographic camera, and the field of view in degrees (0 means the default).
     ortho: bool,
     fov_degrees: f32,
+    /// Camera positions kept per model name.
+    cameras: HashMap<String, Vec<camera::SavedCamera>>,
 }
 
 impl Default for DisplaySettings {
     fn default() -> Self {
-        Self { env: Environment::default(), hdri: None, ortho: false, fov_degrees: 45.0 }
+        Self { env: Environment::default(), hdri: None, ortho: false, fov_degrees: 45.0, cameras: HashMap::new() }
     }
 }
 
@@ -170,6 +177,9 @@ impl DisplaySettings {
         e.tonemap = e.tonemap.min(2);
         e.ssao_strength = fin(e.ssao_strength, 0.8, 0.0, 1.0);
         e.ssao_radius = fin(e.ssao_radius, 12.0, 2.0, 40.0);
+        for v in [&mut e.vignette, &mut e.grain, &mut e.bloom, &mut e.sharpen] {
+            *v = fin(*v, 0.0, 0.0, 1.0);
+        }
         me.fov_degrees = if me.fov_degrees.is_finite() && me.fov_degrees > 0.0 { me.fov_degrees.clamp(10.0, 110.0) } else { 45.0 };
         me
     }
@@ -177,7 +187,7 @@ impl DisplaySettings {
 
 impl Default for Environment {
     fn default() -> Self {
-        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true, two_sided: true, fxaa: true, ssao: false, ssao_strength: 0.8, ssao_radius: 12.0 }
+        Self { preset: 0, rotation: 0.0, exposure: 0.0, light: 1.0, show_background: false, background_blur: 0.3, tonemap: 0, show_transparency: true, two_sided: true, fxaa: true, ssao: false, ssao_strength: 0.8, ssao_radius: 12.0, vignette: 0.0, grain: 0.0, bloom: 0.0, sharpen: 0.0 }
     }
 }
 
@@ -578,6 +588,8 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    /// Saved camera positions by model name (kept between sessions with the display settings).
+    saved_cameras: HashMap<String, Vec<camera::SavedCamera>>,
     /// The model file the mesh was loaded from, for Reimport.
     mesh_source: Option<PathBuf>,
     text_ui: text::TextUi,
@@ -800,6 +812,7 @@ impl App {
             pick_id_for: None,
             hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
+            saved_cameras: display.cameras.clone(),
             mesh_source: None,
             text_ui: Default::default(),
             fonts: None,
@@ -1611,7 +1624,7 @@ impl App {
         if self.hdri_rx.is_some() {
             return;
         }
-        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone(), ortho: self.camera.ortho, fov_degrees: self.camera.fov_y.to_degrees() };
+        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone(), ortho: self.camera.ortho, fov_degrees: self.camera.fov_y.to_degrees(), cameras: self.saved_cameras.clone() };
         if self.display_saved.as_ref() == Some(&now) {
             return;
         }

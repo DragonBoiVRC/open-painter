@@ -19,6 +19,38 @@ impl Default for OrbitCamera {
     }
 }
 
+/// A camera position kept under a name.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SavedCamera {
+    pub name: String,
+    pub target: [f32; 3],
+    pub distance: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub fov_y: f32,
+    pub ortho: bool,
+}
+
+impl SavedCamera {
+    pub fn from(name: &str, c: &OrbitCamera) -> Self {
+        Self { name: name.to_string(), target: c.target.to_array(), distance: c.distance, yaw: c.yaw, pitch: c.pitch, fov_y: c.fov_y, ortho: c.ortho }
+    }
+
+    /// The camera, with anything unusable replaced by the default's value.
+    pub fn camera(&self) -> OrbitCamera {
+        let d = OrbitCamera::default();
+        let ok = |v: f32, fallback: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { fallback };
+        OrbitCamera {
+            target: if self.target.iter().all(|c| c.is_finite()) { Vec3::from(self.target) } else { d.target },
+            distance: ok(self.distance, d.distance, 1e-3, 1e6),
+            yaw: ok(self.yaw, d.yaw, -1e4, 1e4),
+            pitch: ok(self.pitch, d.pitch, -1.55, 1.55),
+            fov_y: ok(self.fov_y, d.fov_y, 0.17, 1.92),
+            ortho: self.ortho,
+        }
+    }
+}
+
 /// Looking at the model along one of its axes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewPreset {
@@ -198,5 +230,18 @@ mod tests {
         // At yaw 0 the camera sits on +X looking back at the origin.
         let (_, _, f) = OrbitCamera { yaw: 0.0, pitch: 0.0, ..Default::default() }.basis();
         assert!((f + Vec3::X).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_saved_camera_round_trips_and_bad_values_fall_back() {
+        let cam = OrbitCamera { yaw: 1.2, distance: 7.0, ..Default::default() };
+        let saved = SavedCamera::from("a", &cam);
+        let back: SavedCamera = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(back, saved);
+        assert!((back.camera().yaw - 1.2).abs() < 1e-6);
+        let bad = SavedCamera { distance: f32::NAN, pitch: 99.0, target: [f32::INFINITY; 3], ..saved };
+        let c = bad.camera();
+        assert_eq!(c.distance, OrbitCamera::default().distance);
+        assert!(c.pitch <= 1.55 && c.target == Vec3::ZERO);
     }
 }

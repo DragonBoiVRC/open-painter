@@ -57,6 +57,13 @@ impl App {
                 super::slider_row(ui, "AO strength", &mut self.env.ssao_strength, 0.0..=1.0);
                 super::slider_row(ui, "AO radius", &mut self.env.ssao_radius, 2.0..=40.0);
             }
+            egui::CollapsingHeader::new("Look (post effects)").id_salt("post_fx").default_open(self.env.vignette + self.env.grain + self.env.bloom + self.env.sharpen > 0.0).show(ui, |ui| {
+                super::slider_row(ui, "Bloom", &mut self.env.bloom, 0.0..=1.0).on_hover_text("A glow around the brightest areas");
+                super::slider_row(ui, "Sharpen", &mut self.env.sharpen, 0.0..=1.0);
+                super::slider_row(ui, "Vignette", &mut self.env.vignette, 0.0..=1.0);
+                super::slider_row(ui, "Grain", &mut self.env.grain, 0.0..=1.0);
+                hint(ui, "Effects on the finished 3D picture only (also in saved view images); they are not painted or exported. They use the same pass as anti-aliasing, so edges are smoothed while any is on.");
+            });
             super::slider_row(ui, "Rotation", &mut self.env.rotation, 0.0..=360.0);
             super::slider_row(ui, "Exposure", &mut self.env.exposure, -3.0..=3.0);
             super::slider_row(ui, "Key light", &mut self.env.light, 0.0..=3.0);
@@ -83,6 +90,37 @@ impl App {
                 }
             });
             hint(ui, "Orbit with Alt + left drag. The buttons look along an axis; F frames the model.");
+            ui.separator();
+            let model = self.mesh_name.clone();
+            let mut remove = None;
+            let mut apply = None;
+            for (i, cam) in self.saved_cameras.get(&model).into_iter().flatten().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.button(&cam.name).on_hover_text("Go to this view").clicked() {
+                        apply = Some(i);
+                    }
+                    if ui.small_button("x").on_hover_text("Forget this view").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if ui.button("Save this view").clicked() {
+                let list = self.saved_cameras.entry(model.clone()).or_default();
+                if list.len() < 32 {
+                    let name = format!("View {}", list.len() + 1);
+                    list.push(crate::camera::SavedCamera::from(&name, &self.camera));
+                }
+            }
+            if let Some(i) = apply {
+                if let Some(cam) = self.saved_cameras.get(&model).and_then(|l| l.get(i)) {
+                    self.camera = cam.camera();
+                }
+            }
+            if let Some(i) = remove {
+                if let Some(l) = self.saved_cameras.get_mut(&model) {
+                    l.remove(i);
+                }
+            }
         });
         section(ui, "Section plane", |ui| {
             ui.horizontal(|ui| {
