@@ -957,10 +957,16 @@ impl App {
         let loaded = match ext.as_str() {
             "fbx" => Mesh::load_fbx(path),
             "obj" => Mesh::load_obj(path),
+            "ply" => Mesh::load_ply(path),
+            "stl" => Mesh::load_stl(path),
             _ => Mesh::load_gltf(path),
         };
         match loaded {
-            Ok(mesh) => {
+            Ok(mut mesh) => {
+                let generated = !mesh.has_uvs();
+                if generated {
+                    mesh.generate_uvs();
+                }
                 let tris = mesh.indices.len() / 3;
                 let sets = mesh.set_ranges().len();
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "mesh".into());
@@ -972,6 +978,9 @@ impl App {
                 } else {
                     format!("Loaded {} ({tris} tris)", path.display())
                 };
+                if generated {
+                    self.status += ". It had no UVs, so a rough box layout was generated: unwrap it in a modelling tool for a better one.";
+                }
                 true
             }
             Err(e) => {

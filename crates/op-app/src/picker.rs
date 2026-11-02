@@ -23,8 +23,8 @@ pub struct Picker {
 /// File types offered for each kind of path.
 fn filters(field: Field) -> (&'static str, &'static [&'static str]) {
     match field {
-        Field::OpenPath => ("Projects and models", &["opproj", "fbx", "obj", "glb", "gltf"]),
-        Field::NewMesh => ("Models", &["fbx", "obj", "glb", "gltf"]),
+        Field::OpenPath => ("Projects and models", &["opproj", "fbx", "obj", "glb", "gltf", "ply", "stl"]),
+        Field::NewMesh => ("Models", &["fbx", "obj", "glb", "gltf", "ply", "stl"]),
         Field::SavePath => ("Project", &["opproj"]),
         Field::PresetImport => ("Substance Painter export preset", &["spexp"]),
         Field::HighPoly => ("Model", &["glb", "gltf"]),

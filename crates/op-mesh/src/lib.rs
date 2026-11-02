@@ -17,6 +17,8 @@ pub enum MeshError {
 
 mod fbx;
 mod obj;
+mod ply;
+mod stl;
 mod tiles;
 pub use tiles::{Tile, TileRange, MAX_TILE_U, MAX_TILE_V};
 mod triangulate;
@@ -441,6 +443,68 @@ impl Mesh {
         Ok(mesh)
     }
 
+    /// Load a PLY file (ASCII or binary), one texture set.
+    pub fn load_ply(path: impl AsRef<Path>) -> Result<Self, MeshError> {
+        ply::load(path.as_ref())
+    }
+
+    /// Load an STL file (binary or ASCII), flat-shaded, one texture set. It has no UVs: see
+    /// [`Mesh::generate_uvs`].
+    pub fn load_stl(path: impl AsRef<Path>) -> Result<Self, MeshError> {
+        stl::load(path.as_ref())
+    }
+
+    /// Whether the mesh carries any texture coordinates (all-zero UVs mean it has none).
+    pub fn has_uvs(&self) -> bool {
+        self.vertices.iter().any(|v| v.uv != [0.0, 0.0])
+    }
+
+    /// Give a mesh without UVs a layout to paint on: each triangle is projected along the axis its
+    /// normal points along most, and the six projections sit in a 3 x 2 grid. Triangle corners are
+    /// copied per projection, so shared vertices split at the seams. All sizes share one scale, so
+    /// texel density is even. Rough, but paintable; unwrap in a modelling tool for better.
+    pub fn generate_uvs(&mut self) {
+        let (lo, hi) = self.bounds();
+        let size = hi - lo;
+        let s = 0.31 / size.max_element().max(1e-6);
+        let pos = |i: u32| Vec3::from(self.vertices[i as usize].position);
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut sets = Vec::new();
+        for r in &self.sets {
+            let first = indices.len() as u32;
+            let mut made: std::collections::HashMap<(usize, u32), u32> = Default::default();
+            for t in self.indices[r.first_index as usize..(r.first_index + r.index_count) as usize].chunks_exact(3) {
+                let n = (pos(t[1]) - pos(t[0])).cross(pos(t[2]) - pos(t[0]));
+                let axis = if n.x.abs() >= n.y.abs() && n.x.abs() >= n.z.abs() { 0 } else if n.y.abs() >= n.z.abs() { 1 } else { 2 };
+                let back = n[axis] < 0.0;
+                let chart = axis * 2 + back as usize;
+                for &i in t {
+                    let at = *made.entry((chart, i)).or_insert_with(|| {
+                        let (p, mut v) = (pos(i) - lo, self.vertices[i as usize]);
+                        // The two in-plane axes, u first; u runs the other way on the far side so letters read right.
+                        let (mut u, w, (du, dw)) = match axis {
+                            0 => (p.z, p.y, (size.z, size.y)),
+                            1 => (p.x, p.z, (size.x, size.z)),
+                            _ => (p.x, p.y, (size.x, size.y)),
+                        };
+                        if back {
+                            u = du - u;
+                        }
+                        v.uv = [(chart % 3) as f32 / 3.0 + 0.01 + u * s, (chart / 3) as f32 / 2.0 + 0.01 + (dw - w) * s];
+                        vertices.push(v);
+                        (vertices.len() - 1) as u32
+                    });
+                    indices.push(at);
+                }
+            }
+            sets.push(SetRange { name: r.name.clone(), first_index: first, index_count: indices.len() as u32 - first });
+        }
+        self.vertices = vertices;
+        self.indices = indices;
+        self.sets = sets;
+    }
+
     /// Load every mesh in an FBX file (binary, version 7.x), with its node transforms applied and
     /// converted to Y-up. Triangles are grouped by material into [`SetRange`]s; materials with the
     /// same name on different objects share one set.
@@ -855,5 +919,22 @@ mod tests {
         assert_eq!(m.raycast_triangle_with(o, d, |_| true, |first, _| first != 3), Some((0, 0)), "refusing it reveals the one behind");
         assert_eq!(m.raycast_triangle_with(o, d, |_| true, |_, hit| hit.z < 0.5), Some((0, 0)), "refusing by position too");
         assert!(m.raycast_uv_with(o, d, |_| true, |_, _| false).is_none(), "refusing everything hits nothing");
+    }
+
+    #[test]
+    fn generated_uvs_fill_distinct_cells_without_overlap_between_faces() {
+        // A unit cube's twelve triangles, welded (8 vertices).
+        let p = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]];
+        let idx = [0u32, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 6, 2, 3, 7, 6, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5];
+        let mut m = Mesh { vertices: p.iter().map(|&position| Vertex { position, normal: [0.0; 3], uv: [0.0; 2] }).collect(), indices: idx.to_vec(), ..Default::default() };
+        m.sets.push(SetRange { name: "m".into(), first_index: 0, index_count: 36 });
+        assert!(!m.has_uvs());
+        m.generate_uvs();
+        assert!(m.has_uvs());
+        assert!(m.vertices.iter().all(|v| (0.0..=1.0).contains(&v.uv[0]) && (0.0..=1.0).contains(&v.uv[1])));
+        assert_eq!(m.sets[0].index_count, 36);
+        // Each face of a cube is one chart: its UVs stay inside its own cell.
+        let cells: std::collections::HashSet<(u32, u32)> = m.vertices.iter().map(|v| ((v.uv[0] * 3.0) as u32, (v.uv[1] * 2.0) as u32)).collect();
+        assert_eq!(cells.len(), 6);
     }
 }
