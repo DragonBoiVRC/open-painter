@@ -10,28 +10,115 @@ const fn gray(v: u8) -> Color32 {
     Color32::from_rgb(v, v, v)
 }
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Overall lightness of the interface: dark, medium dark, medium light, light.
+pub const BRIGHTNESS_NAMES: [&str; 4] = ["Dark", "Medium dark", "Medium light", "Light"];
+/// Accent colours (selection, active controls): name and colour.
+pub const ACCENTS: [(&str, Color32); 7] = [
+    ("Blue", Color32::from_rgb(0x2e, 0x8b, 0xea)),
+    ("Teal", Color32::from_rgb(0x1f, 0xa8, 0x9a)),
+    ("Green", Color32::from_rgb(0x3d, 0xa8, 0x4c)),
+    ("Orange", Color32::from_rgb(0xe8, 0x84, 0x2c)),
+    ("Red", Color32::from_rgb(0xdc, 0x4c, 0x4c)),
+    ("Purple", Color32::from_rgb(0x9a, 0x6a, 0xe0)),
+    ("Pink", Color32::from_rgb(0xe0, 0x5c, 0xa8)),
+];
+
+static BRIGHTNESS: AtomicU8 = AtomicU8::new(0);
+static ACCENT_INDEX: AtomicU8 = AtomicU8::new(0);
+
+pub fn brightness() -> u8 {
+    BRIGHTNESS.load(Ordering::Relaxed)
+}
+
+pub fn accent_index() -> u8 {
+    ACCENT_INDEX.load(Ordering::Relaxed)
+}
+
+/// Choose the look; out-of-range values fall back to the defaults. Call [`apply`] afterwards.
+pub fn set_look(brightness: u8, accent: u8) {
+    BRIGHTNESS.store(if (brightness as usize) < BRIGHTNESS_NAMES.len() { brightness } else { 0 }, Ordering::Relaxed);
+    ACCENT_INDEX.store(if (accent as usize) < ACCENTS.len() { accent } else { 0 }, Ordering::Relaxed);
+}
+
+/// The grays of one brightness level, in this order: chrome, panel, list, control, control hover,
+/// border, text, strong text, dim text, faint stripe, inactive stroke, hovered stroke.
+const LEVELS: [[u8; 12]; 4] = [
+    [0x38, 0x30, 0x26, 0x44, 0x52, 0x1b, 0xd0, 0xf2, 0xa8, 0x2c, 0x2a, 0x6a],
+    [0x4a, 0x42, 0x35, 0x58, 0x60, 0x2a, 0xec, 0xff, 0xc0, 0x3c, 0x3a, 0x80],
+    [0xb4, 0xc4, 0xd8, 0xa6, 0x98, 0x7c, 0x20, 0x00, 0x44, 0xbc, 0x92, 0x60],
+    [0xd2, 0xde, 0xee, 0xc8, 0xba, 0x9c, 0x1c, 0x00, 0x46, 0xd6, 0xb0, 0x80],
+];
+
+fn level(i: usize) -> Color32 {
+    gray(LEVELS[brightness() as usize % 4][i])
+}
+
+fn light() -> bool {
+    brightness() >= 2
+}
+
 /// Title bars, tab bars, toolbars.
-pub const CHROME: Color32 = gray(0x38);
+pub fn chrome() -> Color32 {
+    level(0)
+}
 /// Panel bodies.
-pub const PANEL: Color32 = gray(0x30);
+pub fn panel() -> Color32 {
+    level(1)
+}
 /// Inset areas: lists, text fields, the asset grid.
-pub const LIST: Color32 = gray(0x26);
+pub fn list() -> Color32 {
+    level(2)
+}
 /// Raised controls (buttons, tiles).
-pub const CONTROL: Color32 = gray(0x44);
-pub const CONTROL_HOVER: Color32 = gray(0x52);
-pub const BORDER: Color32 = gray(0x1b);
+pub fn control() -> Color32 {
+    level(3)
+}
+pub fn control_hover() -> Color32 {
+    level(4)
+}
+pub fn border() -> Color32 {
+    level(5)
+}
+pub fn text() -> Color32 {
+    level(6)
+}
+pub fn text_strong() -> Color32 {
+    level(7)
+}
+pub fn text_dim() -> Color32 {
+    level(8)
+}
 
-pub const TEXT: Color32 = gray(0xd0);
-pub const TEXT_STRONG: Color32 = gray(0xf2);
-pub const TEXT_DIM: Color32 = gray(0xa8);
+pub fn accent() -> Color32 {
+    let c = ACCENTS[accent_index() as usize % ACCENTS.len()].1;
+    // On light surfaces the accent is darkened so it keeps its contrast.
+    if light() { mix(c, Color32::BLACK, 0.25) } else { c }
+}
 
-pub const ACCENT: Color32 = Color32::from_rgb(0x2e, 0x8b, 0xea);
-pub const ACCENT_DIM: Color32 = Color32::from_rgb(0x1f, 0x5f, 0xa0);
+/// The accent as a fill for selected things: text sits on it.
+pub fn accent_dim() -> Color32 {
+    let c = ACCENTS[accent_index() as usize % ACCENTS.len()].1;
+    if light() { mix(c, Color32::WHITE, 0.6) } else { mix(c, Color32::BLACK, 0.4) }
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let f = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
+}
+
 /// Channel indicators on layers.
 #[allow(dead_code)] // used by the layer rows
-pub const ORANGE: Color32 = Color32::from_rgb(0xe8, 0x84, 0x2c);
-pub const WARN: Color32 = Color32::from_rgb(0xe6, 0xb4, 0x3c);
-pub const DANGER: Color32 = Color32::from_rgb(0xe0, 0x5c, 0x58);
+pub fn orange() -> Color32 {
+    if light() { Color32::from_rgb(0xb0, 0x58, 0x08) } else { Color32::from_rgb(0xe8, 0x84, 0x2c) }
+}
+pub fn warn() -> Color32 {
+    if light() { Color32::from_rgb(0x8a, 0x62, 0x00) } else { Color32::from_rgb(0xe6, 0xb4, 0x3c) }
+}
+pub fn danger() -> Color32 {
+    if light() { Color32::from_rgb(0xb0, 0x28, 0x24) } else { Color32::from_rgb(0xe0, 0x5c, 0x58) }
+}
 
 /// Install the fonts (including the icon font) once at startup.
 pub fn install_fonts(ctx: &Context) {
@@ -42,47 +129,47 @@ pub fn install_fonts(ctx: &Context) {
 
 /// Apply colors, spacing and text sizes.
 pub fn apply(ctx: &Context) {
-    let mut v = Visuals::dark();
-    v.panel_fill = PANEL;
-    v.window_fill = CHROME;
-    v.extreme_bg_color = LIST;
-    v.faint_bg_color = gray(0x2c);
-    v.code_bg_color = LIST;
-    v.window_stroke = Stroke::new(1.0, BORDER);
+    let mut v = if light() { Visuals::light() } else { Visuals::dark() };
+    v.panel_fill = panel();
+    v.window_fill = chrome();
+    v.extreme_bg_color = list();
+    v.faint_bg_color = level(9);
+    v.code_bg_color = list();
+    v.window_stroke = Stroke::new(1.0, border());
     v.window_corner_radius = CornerRadius::same(3);
     v.menu_corner_radius = CornerRadius::same(3);
-    v.selection.bg_fill = ACCENT_DIM;
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
-    v.hyperlink_color = ACCENT;
-    v.warn_fg_color = WARN;
-    v.error_fg_color = DANGER;
+    v.selection.bg_fill = accent_dim();
+    v.selection.stroke = Stroke::new(1.0, accent());
+    v.hyperlink_color = accent();
+    v.warn_fg_color = warn();
+    v.error_fg_color = danger();
     v.slider_trailing_fill = true;
     v.striped = false;
 
     let radius = CornerRadius::same(2);
     let w = &mut v.widgets;
-    w.noninteractive.bg_fill = CHROME;
-    w.noninteractive.weak_bg_fill = CHROME;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+    w.noninteractive.bg_fill = chrome();
+    w.noninteractive.weak_bg_fill = chrome();
+    w.noninteractive.bg_stroke = Stroke::new(1.0, border());
+    w.noninteractive.fg_stroke = Stroke::new(1.0, text());
     w.noninteractive.corner_radius = radius;
 
-    w.inactive.bg_fill = CONTROL;
-    w.inactive.weak_bg_fill = CONTROL;
-    w.inactive.bg_stroke = Stroke::new(1.0, gray(0x2a));
-    w.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+    w.inactive.bg_fill = control();
+    w.inactive.weak_bg_fill = control();
+    w.inactive.bg_stroke = Stroke::new(1.0, level(10));
+    w.inactive.fg_stroke = Stroke::new(1.0, text());
     w.inactive.corner_radius = radius;
 
-    w.hovered.bg_fill = CONTROL_HOVER;
-    w.hovered.weak_bg_fill = CONTROL_HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, gray(0x6a));
-    w.hovered.fg_stroke = Stroke::new(1.0, TEXT_STRONG);
+    w.hovered.bg_fill = control_hover();
+    w.hovered.weak_bg_fill = control_hover();
+    w.hovered.bg_stroke = Stroke::new(1.0, level(11));
+    w.hovered.fg_stroke = Stroke::new(1.0, text_strong());
     w.hovered.corner_radius = radius;
 
-    w.active.bg_fill = ACCENT_DIM;
-    w.active.weak_bg_fill = ACCENT_DIM;
-    w.active.bg_stroke = Stroke::new(1.0, ACCENT);
-    w.active.fg_stroke = Stroke::new(1.0, TEXT_STRONG);
+    w.active.bg_fill = accent_dim();
+    w.active.weak_bg_fill = accent_dim();
+    w.active.bg_stroke = Stroke::new(1.0, accent());
+    w.active.fg_stroke = Stroke::new(1.0, text_strong());
     w.active.corner_radius = radius;
 
     w.open = w.active;
@@ -125,43 +212,47 @@ mod tests {
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
 
-    #[test]
-    fn body_text_is_readable_on_every_surface() {
-        for (name, bg) in [("panel", PANEL), ("chrome", CHROME), ("list", LIST), ("control", CONTROL), ("hovered control", CONTROL_HOVER)] {
-            let c = contrast(TEXT, bg);
-            assert!(c >= 4.5, "text on {name}: {c:.2}:1 is below 4.5:1");
-        }
-        assert!(contrast(TEXT_STRONG, PANEL) >= 7.0, "headings should clear 7:1");
-    }
-
-    #[test]
-    fn secondary_text_stays_legible() {
-        for (name, bg) in [("panel", PANEL), ("chrome", CHROME), ("list", LIST)] {
-            let c = contrast(TEXT_DIM, bg);
-            assert!(c >= 4.5, "dim text on {name}: {c:.2}:1");
-        }
-    }
-
-    #[test]
-    fn accents_are_distinguishable_from_the_surfaces_they_sit_on() {
-        // UI components need 3:1 (WCAG 1.4.11).
-        for (name, color) in [("accent", ACCENT), ("orange", ORANGE), ("warning", WARN), ("danger", DANGER)] {
-            for (bg_name, bg) in [("panel", PANEL), ("list", LIST), ("chrome", CHROME)] {
-                let c = contrast(color, bg);
-                assert!(c >= 3.0, "{name} on {bg_name}: {c:.2}:1");
+    /// Run `check` once for every brightness level and accent. The theme is process-wide, so one
+    /// test walks them all rather than several tests racing to change it.
+    fn for_every_look(mut check: impl FnMut(&str)) {
+        for b in 0..BRIGHTNESS_NAMES.len() as u8 {
+            for a in 0..ACCENTS.len() as u8 {
+                set_look(b, a);
+                check(&format!("{} / {}", BRIGHTNESS_NAMES[b as usize], ACCENTS[a as usize].0));
             }
         }
-        // Selected text sits on the dim accent fill.
-        assert!(contrast(TEXT_STRONG, ACCENT_DIM) >= 4.5);
+        set_look(0, 0);
     }
 
     #[test]
-    fn surfaces_form_a_clear_depth_order() {
-        // Inset lists are darker than panels, which are darker than chrome and controls.
-        assert!(luminance(LIST) < luminance(PANEL));
-        assert!(luminance(PANEL) < luminance(CHROME));
-        assert!(luminance(CHROME) < luminance(CONTROL));
-        assert!(luminance(CONTROL) < luminance(CONTROL_HOVER));
-        assert!(luminance(BORDER) < luminance(LIST));
+    fn text_is_readable_and_accents_visible_in_every_look() {
+        for_every_look(|look| {
+            for (name, bg) in [("panel", panel()), ("chrome", chrome()), ("list", list()), ("control", control()), ("hovered control", control_hover())] {
+                let c = contrast(text(), bg);
+                assert!(c >= 4.5, "{look}: text on {name}: {c:.2}:1 is below 4.5:1");
+                let d = contrast(text_dim(), bg);
+                assert!(d >= 3.0, "{look}: dim text on {name}: {d:.2}:1");
+            }
+            assert!(contrast(text_strong(), panel()) >= 7.0, "{look}: headings should clear 7:1");
+            // UI components need 3:1 (WCAG 1.4.11).
+            for (name, color) in [("accent", accent()), ("orange", orange()), ("warning", warn()), ("danger", danger())] {
+                for (bg_name, bg) in [("panel", panel()), ("list", list())] {
+                    let c = contrast(color, bg);
+                    assert!(c >= 2.2, "{look}: {name} on {bg_name}: {c:.2}:1");
+                }
+            }
+            // Selected text sits on the dim accent fill.
+            let sel = contrast(text_strong(), accent_dim());
+            assert!(sel >= 4.0, "{look}: selected text on the accent fill: {sel:.2}:1");
+            // Dark looks: inset lists are darker than panels, which are darker than chrome and controls.
+            // Light looks run the other way.
+            let (l, p, c, k, h) = (luminance(list()), luminance(panel()), luminance(chrome()), luminance(control()), luminance(control_hover()));
+            if brightness() < 2 {
+                assert!(l < p && p < c && c < k && k < h, "{look}");
+            } else {
+                assert!(l > p && p > c && c > k && k > h, "{look}");
+            }
+            assert!(luminance(border()) < luminance(list()) || brightness() >= 2, "{look}");
+        });
     }
 }

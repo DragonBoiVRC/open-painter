@@ -11,7 +11,7 @@ impl App {
 
         section(ui, "Target", |ui| {
             if self.set_ranges_len() > 1 {
-                ui.label(egui::RichText::new(format!("Texture set: {}", self.set_name(self.active))).color(theme::TEXT_STRONG));
+                ui.label(egui::RichText::new(format!("Texture set: {}", self.set_name(self.active))).color(theme::text_strong()));
             }
             if self.bakes.len() > 1 {
                 hint(ui, &format!("{} UV tiles, baked one after the other", self.bakes.len()));
@@ -86,7 +86,7 @@ impl App {
             Some(job) => {
                 ui.add(egui::ProgressBar::new(job.fraction()).show_percentage());
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("{:.0} s elapsed", job.started.elapsed().as_secs_f32())).color(theme::TEXT_DIM));
+                    ui.label(egui::RichText::new(format!("{:.0} s elapsed", job.started.elapsed().as_secs_f32())).color(theme::text_dim()));
                     if ui.button("Cancel").clicked() {
                         job.progress.cancel();
                     }
@@ -95,8 +95,8 @@ impl App {
             None => {
                 let ready = !self.bake.maps.is_empty();
                 let n = self.bake.maps.len();
-                let button = egui::Button::new(egui::RichText::new(format!("Bake {n} map(s)")).strong().color(theme::TEXT_STRONG))
-                    .fill(if ready { theme::ACCENT_DIM } else { theme::CONTROL })
+                let button = egui::Button::new(egui::RichText::new(format!("Bake {n} map(s)")).strong().color(theme::text_strong()))
+                    .fill(if ready { theme::accent_dim() } else { theme::control() })
                     .min_size(egui::vec2(ui.available_width(), 26.0));
                 if ui.add_enabled(ready, button).on_hover_text("Bake the selected maps for the active texture set").clicked() {
                     self.start_bake();

@@ -236,7 +236,7 @@ impl crate::App {
         if self.fonts.is_none() {
             self.fonts = Some(system_fonts());
         }
-        ui.label(egui::RichText::new("TEXT").size(11.0).strong().color(crate::ui::theme::TEXT_DIM));
+        ui.label(egui::RichText::new("TEXT").size(11.0).strong().color(crate::ui::theme::text_dim()));
         ui.add(egui::TextEdit::multiline(&mut self.text_ui.text).desired_rows(2).hint_text("Type text to make a picture of"));
         let fonts = self.fonts.clone().unwrap_or_default();
         ui.horizontal(|ui| {

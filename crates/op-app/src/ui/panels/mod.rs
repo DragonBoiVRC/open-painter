@@ -22,7 +22,7 @@ use std::ops::RangeInclusive;
 
 /// A titled group of controls, collapsible like the property groups in professional tools.
 pub fn section<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> R) -> Option<R> {
-    let header = egui::RichText::new(title.to_uppercase()).size(11.0).strong().color(theme::TEXT_DIM);
+    let header = egui::RichText::new(title.to_uppercase()).size(11.0).strong().color(theme::text_dim());
     egui::CollapsingHeader::new(header)
         .default_open(true)
         .show_unindented(ui, |ui| {
@@ -38,7 +38,7 @@ pub fn section<R>(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::U
 pub fn slider_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeInclusive<f32>) -> egui::Response {
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(egui::vec2(86.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(label).color(theme::TEXT)).truncate());
+            ui.add(egui::Label::new(egui::RichText::new(label).color(theme::text())).truncate());
         });
         ui.spacing_mut().slider_width = (ui.available_width() - 62.0).max(40.0);
         ui.add(egui::Slider::new(value, range))
@@ -48,5 +48,5 @@ pub fn slider_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeI
 
 /// A dim one-line note.
 pub fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).color(theme::TEXT_DIM).size(11.0));
+    ui.label(egui::RichText::new(text).color(theme::text_dim()).size(11.0));
 }

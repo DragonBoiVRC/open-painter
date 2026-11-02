@@ -51,6 +51,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("reimport_mesh", "{path?}: read the model file again (default: the one it came from) keeping all paint and layers; the texture sets must match."),
     ("set_display", "{bloom?, sharpen?, vignette?, grain?: 0..1, exposure?: -3..3, fxaa?: bool}: the 3D view's look (not exported)."),
     ("camera", "{view?: front|back|left|right|top|bottom, yaw?, pitch?, distance? (radians / model units), frame?: true}: move the 3D camera, then use `screenshot`."),
+    ("appearance", "{brightness?: 0 dark, 1 medium dark, 2 medium light, 3 light, accent?: 0 blue, 1 teal, 2 green, 3 orange, 4 red, 5 purple, 6 pink}: the interface's look."),
     ("undo", "Undo the last edit or stroke."),
     ("redo", "Redo."),
     ("bake", "{maps?: [ao, curvature, thickness, normal, position, id, world_normal, height, bent_normals, opacity], samples?, size?}: bake the active set; poll `status`."),
@@ -467,6 +468,13 @@ impl App {
                     self.camera.distance = v.clamp(1e-3, 1e6);
                 }
                 Ok(json!({"yaw": self.camera.yaw, "pitch": self.camera.pitch, "distance": self.camera.distance}))
+            }
+            "appearance" => {
+                let b = p.get("brightness").and_then(Value::as_u64).map_or(crate::ui::theme::brightness(), |v| v as u8);
+                let a = p.get("accent").and_then(Value::as_u64).map_or(crate::ui::theme::accent_index(), |v| v as u8);
+                crate::ui::theme::set_look(b, a);
+                crate::ui::theme::apply(ctx);
+                Ok(json!({"brightness": crate::ui::theme::brightness(), "accent": crate::ui::theme::accent_index()}))
             }
             "paint_uv" => self.control_paint_uv(p),
             "undo" => {

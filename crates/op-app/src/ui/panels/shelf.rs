@@ -396,11 +396,11 @@ impl App {
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
                         let p = ui.painter();
                         if on {
-                            p.rect_filled(rect, 2.0, theme::ACCENT_DIM);
+                            p.rect_filled(rect, 2.0, theme::accent_dim());
                         } else if resp.hovered() {
-                            p.rect_filled(rect, 2.0, theme::CONTROL);
+                            p.rect_filled(rect, 2.0, theme::control());
                         }
-                        let col = if on { theme::TEXT_STRONG } else { theme::TEXT };
+                        let col = if on { theme::text_strong() } else { theme::text() };
                         p.text(
                             rect.left_center() + egui::vec2(8.0, 0.0),
                             egui::Align2::LEFT_CENTER,
@@ -420,7 +420,7 @@ impl App {
                             egui::Align2::RIGHT_CENTER,
                             count.to_string(),
                             egui::FontId::proportional(10.5),
-                            theme::TEXT_DIM,
+                            theme::text_dim(),
                         );
                         if resp.clicked() {
                             self.shelf.category = c;
@@ -433,7 +433,7 @@ impl App {
 
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(ph::MAGNIFYING_GLASS).color(theme::TEXT_DIM));
+                    ui.label(egui::RichText::new(ph::MAGNIFYING_GLASS).color(theme::text_dim()));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.shelf.query)
                             .hint_text("Search all assets")
@@ -466,8 +466,8 @@ impl App {
                     0.0
                 };
                 egui::Frame::NONE
-                    .fill(theme::LIST)
-                    .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                    .fill(theme::list())
+                    .stroke(egui::Stroke::new(1.0, theme::border()))
                     .inner_margin(6.0)
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -489,7 +489,7 @@ impl App {
                             });
                     });
                 for w in &self.definition_warnings {
-                    ui.colored_label(theme::WARN, format!("Skipped: {w}"));
+                    ui.colored_label(theme::warn(), format!("Skipped: {w}"));
                 }
                 if footer > 0.0 && self.shelf.category == Category::Brushes {
                     ui.horizontal(|ui| {
@@ -538,7 +538,7 @@ impl App {
         let art = egui::Rect::from_min_size(rect.min, egui::vec2(size, size));
         let p = ui.painter();
         if selected || resp.hovered() {
-            p.rect_filled(rect.expand(2.0), 3.0, if selected { theme::ACCENT_DIM } else { theme::CONTROL });
+            p.rect_filled(rect.expand(2.0), 3.0, if selected { theme::accent_dim() } else { theme::control() });
         }
         let base = match e.swatch {
             Some([r, g, b]) => egui::Color32::from_rgb(r, g, b),
@@ -579,26 +579,26 @@ impl App {
                     p.image(h.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
                 }
                 None => {
-                    p.text(art.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(size * 0.4), theme::TEXT_DIM);
+                    p.text(art.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(size * 0.4), theme::text_dim());
                 }
             }
             // Textures that live only in this project.
             if self.texture(id).is_some_and(|a| !a.global) {
                 let badge = egui::Rect::from_min_size(art.right_bottom() + egui::vec2(-24.0, -17.0), egui::vec2(21.0, 14.0));
                 p.rect_filled(badge, 3.0, egui::Color32::from_black_alpha(190));
-                p.text(badge.center(), egui::Align2::CENTER_CENTER, "PRJ", egui::FontId::proportional(9.5), theme::ACCENT);
+                p.text(badge.center(), egui::Align2::CENTER_CENTER, "PRJ", egui::FontId::proportional(9.5), theme::accent());
             }
             // The channel its name suggests.
             if let Some(g) = self.texture(id).and_then(|a| a.guess()) {
                 let badge = egui::Rect::from_min_size(art.left_bottom() + egui::vec2(3.0, -17.0), egui::vec2(18.0, 14.0));
                 p.rect_filled(badge, 3.0, egui::Color32::from_black_alpha(190));
-                p.text(badge.center(), egui::Align2::CENTER_CENTER, slot_badge(g.slot), egui::FontId::proportional(9.5), theme::ORANGE);
+                p.text(badge.center(), egui::Align2::CENTER_CENTER, slot_badge(g.slot), egui::FontId::proportional(9.5), theme::orange());
             }
         } else {
             let tint = if e.swatch.is_some() {
                 egui::Color32::from_white_alpha(120)
             } else {
-                theme::TEXT_DIM
+                theme::text_dim()
             };
             p.text(
                 art.center(),
@@ -608,15 +608,15 @@ impl App {
                 tint,
             );
         }
-        p.rect_stroke(art, 2.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Outside);
+        p.rect_stroke(art, 2.0, egui::Stroke::new(1.0, theme::border()), egui::StrokeKind::Outside);
         let text_rect = egui::Rect::from_min_size(rect.min + egui::vec2(0.0, size + 3.0), egui::vec2(size, label_h - 3.0));
         let galley = ui.painter().layout(
             e.name.clone(),
             egui::FontId::proportional(11.0),
-            if selected { theme::TEXT_STRONG } else { theme::TEXT },
+            if selected { theme::text_strong() } else { theme::text() },
             size,
         );
-        ui.painter().with_clip_rect(text_rect).galley(text_rect.min, galley, theme::TEXT);
+        ui.painter().with_clip_rect(text_rect).galley(text_rect.min, galley, theme::text());
 
         if resp.clicked() {
             self.shelf.selected = Some(key);

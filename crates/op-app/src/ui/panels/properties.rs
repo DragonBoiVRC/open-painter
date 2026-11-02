@@ -6,7 +6,7 @@ use op_core::{AnchorChannel, AnchorSource, BlendMode, Filter, Generator, Mask, N
 impl App {
     pub(crate) fn properties_panel(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.selected.filter(|id| self.doc.find(*id).is_some()) else {
-            ui.label(egui::RichText::new("Select a layer to edit its properties.").color(crate::ui::theme::TEXT_DIM));
+            ui.label(egui::RichText::new("Select a layer to edit its properties.").color(crate::ui::theme::text_dim()));
             return;
         };
         // Property widgets edit the document in place; the gesture is committed to
@@ -100,7 +100,7 @@ impl App {
                 changed |= super::fill::fill_controls(ui, f, &self.assets, &self.tex_thumbs);
                 if f.projection == op_core::Projection::Decal {
                     ui.add_space(2.0);
-                    ui.label(egui::RichText::new("DECAL").size(11.0).strong().color(crate::ui::theme::TEXT_DIM));
+                    ui.label(egui::RichText::new("DECAL").size(11.0).strong().color(crate::ui::theme::text_dim()));
                     changed |= crate::decal::decal_controls(ui, &mut f.decal);
                     let armed = self.decal_place == Some(node.id);
                     if ui.selectable_label(armed, "Place on model: click the surface").clicked() {

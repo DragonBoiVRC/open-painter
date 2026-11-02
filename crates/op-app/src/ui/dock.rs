@@ -167,16 +167,16 @@ pub fn style(ctx: &egui::Context) -> Style {
     let mut s = Style::from_egui(&ctx.global_style());
     s.dock_area_padding = None;
     s.main_surface_border_stroke = egui::Stroke::NONE;
-    s.separator.color_idle = theme::BORDER;
-    s.separator.color_hovered = theme::ACCENT;
-    s.separator.color_dragged = theme::ACCENT;
+    s.separator.color_idle = theme::border();
+    s.separator.color_hovered = theme::accent();
+    s.separator.color_dragged = theme::accent();
     s.separator.width = 3.0;
-    s.tab_bar.bg_fill = theme::CHROME;
+    s.tab_bar.bg_fill = theme::chrome();
     s.tab_bar.height = 24.0;
-    s.tab_bar.hline_color = theme::BORDER;
+    s.tab_bar.hline_color = theme::border();
     s.tab_bar.corner_radius = egui::CornerRadius::ZERO;
     s.tab.hline_below_active_tab_name = false;
-    s.tab.tab_body.bg_fill = theme::PANEL;
+    s.tab.tab_body.bg_fill = theme::panel();
     s.tab.tab_body.stroke = egui::Stroke::NONE;
     s.tab.tab_body.inner_margin = egui::Margin::same(6);
     s.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
@@ -186,15 +186,15 @@ pub fn style(ctx: &egui::Context) -> Style {
         bg_fill: bg,
         text_color: text,
     };
-    s.tab.inactive = tab(theme::TEXT_DIM, theme::CHROME, egui::Color32::TRANSPARENT);
-    s.tab.hovered = tab(theme::TEXT_STRONG, theme::CONTROL, egui::Color32::TRANSPARENT);
-    s.tab.active = tab(theme::TEXT_STRONG, theme::PANEL, theme::BORDER);
-    s.tab.focused = tab(theme::TEXT_STRONG, theme::PANEL, theme::ACCENT);
+    s.tab.inactive = tab(theme::text_dim(), theme::chrome(), egui::Color32::TRANSPARENT);
+    s.tab.hovered = tab(theme::text_strong(), theme::control(), egui::Color32::TRANSPARENT);
+    s.tab.active = tab(theme::text_strong(), theme::panel(), theme::border());
+    s.tab.focused = tab(theme::text_strong(), theme::panel(), theme::accent());
     s.tab.inactive_with_kb_focus = s.tab.inactive.clone();
     s.tab.active_with_kb_focus = s.tab.active.clone();
     s.tab.focused_with_kb_focus = s.tab.focused.clone();
-    s.buttons.close_tab_color = theme::TEXT_DIM;
-    s.buttons.close_tab_active_color = theme::TEXT_STRONG;
+    s.buttons.close_tab_color = theme::text_dim();
+    s.buttons.close_tab_active_color = theme::text_strong();
     s.overlay.selection_color = egui::Color32::from_rgba_unmultiplied(0x2e, 0x8b, 0xea, 90);
     s
 }

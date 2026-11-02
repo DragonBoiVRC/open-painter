@@ -53,7 +53,7 @@ impl App {
         self.commit_gesture(ui);
         self.dialogs(&ctx);
 
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme::BORDER)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme::border())).show(ui, |ui| {
             DockArea::new(&mut dock)
                 .style(dock::style(&ctx))
                 .show_add_buttons(false)
@@ -83,7 +83,7 @@ impl App {
 
     fn menu_bar(&mut self, ui: &mut egui::Ui, dock: &mut DockState<Tab>) {
         let ctx = ui.ctx().clone();
-        egui::Panel::top("menu_bar").frame(egui::Frame::NONE.fill(theme::CHROME).inner_margin(egui::Margin::symmetric(6, 2))).show(ui, |ui| {
+        egui::Panel::top("menu_bar").frame(egui::Frame::NONE.fill(theme::chrome()).inner_margin(egui::Margin::symmetric(6, 2))).show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.add(egui::Button::new("New").shortcut_text("Ctrl+N")).clicked() {
@@ -173,7 +173,7 @@ impl App {
                         ui.close();
                     }
                     ui.separator();
-                    ui.label(egui::RichText::new("Shading").color(theme::TEXT_DIM).small());
+                    ui.label(egui::RichText::new("Shading").color(theme::text_dim()).small());
                     let current = self.view;
                     let mut view = current;
                     ui.selectable_value(&mut view, crate::View::Shaded, "Shaded");
@@ -194,6 +194,23 @@ impl App {
                     }
                 });
                 ui.menu_button("Window", |ui| {
+                    ui.menu_button("Appearance", |ui| {
+                        let (mut b, mut a) = (theme::brightness(), theme::accent_index());
+                        ui.label(egui::RichText::new("Brightness").color(theme::text_dim()));
+                        for (i, name) in theme::BRIGHTNESS_NAMES.iter().enumerate() {
+                            ui.selectable_value(&mut b, i as u8, *name);
+                        }
+                        ui.separator();
+                        ui.label(egui::RichText::new("Accent colour").color(theme::text_dim()));
+                        for (i, (name, color)) in theme::ACCENTS.iter().enumerate() {
+                            ui.selectable_value(&mut a, i as u8, egui::RichText::new(*name).color(*color));
+                        }
+                        if (b, a) != (theme::brightness(), theme::accent_index()) {
+                            theme::set_look(b, a);
+                            theme::apply(&ctx);
+                        }
+                    });
+                    ui.separator();
                     for tab in Tab::ALL {
                         let open = dock::is_open(dock, tab);
                         let label = format!("{}  {}", tab.icon(), tab.title());
@@ -221,16 +238,16 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("status_bar")
             .exact_size(22.0)
-            .frame(egui::Frame::NONE.fill(theme::CHROME).inner_margin(egui::Margin::symmetric(8, 2)))
+            .frame(egui::Frame::NONE.fill(theme::chrome()).inner_margin(egui::Margin::symmetric(8, 2)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(egui::RichText::new(self.status.lines().next().unwrap_or("")).color(theme::TEXT_DIM).size(11.5));
+                    ui.label(egui::RichText::new(self.status.lines().next().unwrap_or("")).color(theme::text_dim()).size(11.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let baked = if self.baked0().is_empty() { String::new() } else { format!("{} baked  |  ", self.baked0().len()) };
                         let tris = self.mesh.indices.len() / 3;
                         ui.label(
                             egui::RichText::new(format!("{baked}{tris} tris  |  {0}x{0}", self.tex_size))
-                                .color(theme::TEXT_DIM)
+                                .color(theme::text_dim())
                                 .size(11.5),
                         );
                     });
@@ -243,7 +260,7 @@ impl App {
         egui::Panel::left("tool_strip")
             .exact_size(38.0)
             .resizable(false)
-            .frame(egui::Frame::NONE.fill(theme::CHROME).inner_margin(egui::Margin::symmetric(4, 6)))
+            .frame(egui::Frame::NONE.fill(theme::chrome()).inner_margin(egui::Margin::symmetric(4, 6)))
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
@@ -305,23 +322,23 @@ pub fn tool_button(ui: &mut egui::Ui, icon: &str, tip: &str, active: bool) -> eg
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let hovered = resp.hovered();
     let fill = if active {
-        theme::ACCENT_DIM
+        theme::accent_dim()
     } else if hovered {
-        theme::CONTROL_HOVER
+        theme::control_hover()
     } else {
         egui::Color32::TRANSPARENT
     };
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, fill);
     if active {
-        painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+        painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, theme::accent()), egui::StrokeKind::Inside);
     }
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         icon,
         egui::FontId::proportional(17.0),
-        if active || hovered { theme::TEXT_STRONG } else { theme::TEXT },
+        if active || hovered { theme::text_strong() } else { theme::text() },
     );
     resp.on_hover_text(tip)
 }

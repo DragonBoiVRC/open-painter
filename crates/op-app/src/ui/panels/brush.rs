@@ -228,7 +228,7 @@ impl App {
                     ("Tab", "hide panels"),
                     ("F", "frame the model"),
                 ] {
-                    ui.label(egui::RichText::new(keys).color(theme::TEXT));
+                    ui.label(egui::RichText::new(keys).color(theme::text()));
                     hint(ui, what);
                     ui.end_row();
                 }

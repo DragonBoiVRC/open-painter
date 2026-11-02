@@ -181,7 +181,7 @@ impl App {
                         } else {
                             (text, fits)
                         };
-                        let color = if fits { theme::TEXT_DIM } else { theme::WARN };
+                        let color = if fits { theme::text_dim() } else { theme::warn() };
                         ui.label(egui::RichText::new(text).color(color).size(11.0));
                     }
                 });

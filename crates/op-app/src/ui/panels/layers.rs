@@ -62,8 +62,8 @@ impl App {
         let asset: Option<Asset> = egui::DragAndDrop::payload::<Asset>(ui.ctx()).map(|a| (*a).clone());
 
         egui::Frame::NONE
-            .fill(theme::LIST)
-            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+            .fill(theme::list())
+            .stroke(egui::Stroke::new(1.0, theme::border()))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 egui::ScrollArea::vertical()
@@ -118,7 +118,7 @@ impl App {
             let over = pointer.and_then(|p| rects.iter().find(|(_, r)| r.contains(p)).map(|(id, r)| (*id, *r)));
             if let Some((_, r)) = over {
                 ui.painter()
-                    .rect_stroke(r.shrink(1.0), 2.0, egui::Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
+                    .rect_stroke(r.shrink(1.0), 2.0, egui::Stroke::new(2.0, theme::accent()), egui::StrokeKind::Inside);
             }
             if ui.ctx().input(|i| i.pointer.any_released()) {
                 let in_list = pointer.is_some_and(|p| ui.min_rect().contains(p));
@@ -293,23 +293,23 @@ fn layer_row(
     let p = ui.painter_at(rect);
 
     let fill = if selected {
-        theme::ACCENT_DIM
+        theme::accent_dim()
     } else if resp.hovered() {
-        theme::CONTROL
+        theme::control()
     } else {
-        theme::PANEL
+        theme::panel()
     };
     p.rect_filled(rect.shrink2(egui::vec2(0.0, 0.5)), 0.0, fill);
     if selected {
         p.rect_stroke(
             rect.shrink(0.5),
             0.0,
-            egui::Stroke::new(1.0, theme::ACCENT),
+            egui::Stroke::new(1.0, theme::accent()),
             egui::StrokeKind::Inside,
         );
     }
     let dim = !node.visible;
-    let text = if dim { theme::TEXT_DIM } else { theme::TEXT_STRONG };
+    let text = if dim { theme::text_dim() } else { theme::text_strong() };
 
     // Visibility eye.
     let eye = egui::Rect::from_center_size(egui::pos2(rect.left() + 14.0, rect.center().y), egui::vec2(22.0, 22.0));
@@ -319,7 +319,7 @@ fn layer_row(
         egui::Align2::CENTER_CENTER,
         if node.visible { ph::EYE } else { ph::EYE_SLASH },
         egui::FontId::proportional(15.0),
-        if node.visible { theme::TEXT } else { theme::TEXT_DIM },
+        if node.visible { theme::text() } else { theme::text_dim() },
     );
     if eye_resp.on_hover_text("Show or hide").clicked() {
         acts.push(LayerAct::Visible(node.id, !node.visible));
@@ -335,7 +335,7 @@ fn layer_row(
             egui::Align2::CENTER_CENTER,
             if row.expanded { ph::CARET_DOWN } else { ph::CARET_RIGHT },
             egui::FontId::proportional(12.0),
-            theme::TEXT,
+            theme::text(),
         );
         if caret_resp.clicked() {
             acts.push(LayerAct::ToggleFold(node.id));
@@ -391,7 +391,7 @@ fn layer_row(
             egui::Align2::LEFT_BOTTOM,
             summary,
             egui::FontId::proportional(10.5),
-            theme::TEXT_DIM,
+            theme::text_dim(),
         );
     }
     paint_channel_bars(&p, rect, node);
@@ -421,7 +421,7 @@ fn layer_row(
     match target {
         Some(t) => {
             let inset = |depth: usize| rect.left() + 8.0 + depth as f32 * INDENT;
-            let stroke = egui::Stroke::new(2.0, theme::ACCENT);
+            let stroke = egui::Stroke::new(2.0, theme::accent());
             match t.indicator {
                 Indicator::Above(d) => {
                     overlay.hline(inset(d)..=rect.right() - 4.0, rect.top() + 1.0, stroke);
@@ -470,14 +470,14 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str, enabled: bool) -> egui:
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
     let hot = enabled && resp.hovered();
     if hot {
-        ui.painter().rect_filled(rect, 3.0, theme::CONTROL_HOVER);
+        ui.painter().rect_filled(rect, 3.0, theme::control_hover());
     }
     let color = if !enabled {
         egui::Color32::from_gray(0x6e)
     } else if hot {
-        theme::TEXT_STRONG
+        theme::text_strong()
     } else {
-        theme::TEXT
+        theme::text()
     };
     ui.painter().text(
         rect.center(),
@@ -524,13 +524,13 @@ fn paint_channel_bars(p: &egui::Painter, rect: egui::Rect, node: &Node) {
         let x = rect.right() - 36.0 + col as f32 * 17.0;
         let y = rect.top() + 5.0 + row as f32 * 9.5;
         let bar = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(5.0, 7.0));
-        p.rect_filled(bar, 1.0, if on { theme::ORANGE } else { egui::Color32::from_gray(0x44) });
+        p.rect_filled(bar, 1.0, if on { theme::orange() } else { egui::Color32::from_gray(0x44) });
         p.text(
             egui::pos2(x + 8.0, y + 3.5),
             egui::Align2::LEFT_CENTER,
             label,
             egui::FontId::proportional(8.5),
-            if on { theme::TEXT } else { egui::Color32::from_gray(0x7a) },
+            if on { theme::text() } else { egui::Color32::from_gray(0x7a) },
         );
     }
 }
@@ -573,17 +573,17 @@ fn paint_thumb(
                 p.image(h.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
             } else if f.maps.base.is_none() && !f.maps.is_empty() {
                 // Textured, but not the colour: a small mark says there are textures.
-                p.text(rect.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(14.0), fade(theme::TEXT));
+                p.text(rect.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(14.0), fade(theme::text()));
             }
         }
         NodeKind::Group { .. } => {
-            p.rect_filled(rect, 2.0, fade(theme::CONTROL));
+            p.rect_filled(rect, 2.0, fade(theme::control()));
             p.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 ph::FOLDER_SIMPLE,
                 egui::FontId::proportional(18.0),
-                fade(theme::TEXT),
+                fade(theme::text()),
             );
         }
         NodeKind::Paint if image.is_some() => {
@@ -598,11 +598,11 @@ fn paint_thumb(
                 egui::Align2::CENTER_CENTER,
                 ph::PAINT_BRUSH,
                 egui::FontId::proportional(16.0),
-                fade(theme::TEXT),
+                fade(theme::text()),
             );
         }
     }
-    p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Outside);
+    p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, theme::border()), egui::StrokeKind::Outside);
 }
 
 fn paint_mask_thumb(p: &egui::Painter, rect: egui::Rect, mask: &Mask, dim: bool, image: Option<&egui::TextureHandle>) {
@@ -610,7 +610,7 @@ fn paint_mask_thumb(p: &egui::Painter, rect: egui::Rect, mask: &Mask, dim: bool,
     if let Some(img) = image {
         let tint = if dim { egui::Color32::WHITE.gamma_multiply(0.45) } else { egui::Color32::WHITE };
         p.image(img.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
-        p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, if mask.enabled { theme::BORDER } else { theme::DANGER }), egui::StrokeKind::Outside);
+        p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, if mask.enabled { theme::border() } else { theme::danger() }), egui::StrokeKind::Outside);
         return;
     }
     let base = if mask.init_white {
@@ -633,13 +633,13 @@ fn paint_mask_thumb(p: &egui::Painter, rect: egui::Rect, mask: &Mask, dim: bool,
             egui::Align2::CENTER_CENTER,
             ph::SPARKLE,
             egui::FontId::proportional(13.0),
-            fade(theme::ORANGE),
+            fade(theme::orange()),
         );
     }
     p.rect_stroke(
         rect,
         2.0,
-        egui::Stroke::new(1.0, if mask.enabled { theme::BORDER } else { theme::DANGER }),
+        egui::Stroke::new(1.0, if mask.enabled { theme::border() } else { theme::danger() }),
         egui::StrokeKind::Outside,
     );
 }

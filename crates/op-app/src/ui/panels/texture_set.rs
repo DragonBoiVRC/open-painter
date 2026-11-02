@@ -71,7 +71,7 @@ impl App {
                     let tiles: Vec<String> = self.mesh.set_tiles(self.active).iter().map(|t| t.udim().to_string()).collect();
                     hint(ui, &format!("This set has {} tile(s): {}", tiles.len(), tiles.join(", ")));
                 } else if !fits {
-                    ui.colored_label(crate::ui::theme::WARN, format!("{text}. Turn on UV tiles to paint each tile separately."));
+                    ui.colored_label(crate::ui::theme::warn(), format!("{text}. Turn on UV tiles to paint each tile separately."));
                 } else {
                     hint(ui, &text);
                 }

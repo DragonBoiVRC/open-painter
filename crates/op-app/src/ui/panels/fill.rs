@@ -19,7 +19,7 @@ pub fn fill_controls(ui: &mut egui::Ui, f: &mut FillParams, assets: &[TextureAss
     }
     if !f.maps.is_empty() {
         ui.add_space(2.0);
-        ui.label(egui::RichText::new("TEXTURE PLACEMENT").size(11.0).strong().color(theme::TEXT_DIM));
+        ui.label(egui::RichText::new("TEXTURE PLACEMENT").size(11.0).strong().color(theme::text_dim()));
         changed |= placement_controls(ui, f);
     }
     changed
@@ -125,24 +125,24 @@ fn channel_row(ui: &mut egui::Ui, f: &mut FillParams, slot: Slot, assets: &[Text
         });
         let over = dragging.is_some() && resp.contains_pointer();
         let painter = ui.painter();
-        painter.rect_filled(rect, 3.0, theme::LIST);
+        painter.rect_filled(rect, 3.0, theme::list());
         match current.as_ref().and_then(|t| thumbs.get(&t.id)) {
             Some(h) => {
                 painter.image(h.id(), rect.shrink(1.0), egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
             None if current.is_some() => {
-                painter.text(rect.center(), egui::Align2::CENTER_CENTER, ph::IMAGE_BROKEN, egui::FontId::proportional(18.0), theme::WARN);
+                painter.text(rect.center(), egui::Align2::CENTER_CENTER, ph::IMAGE_BROKEN, egui::FontId::proportional(18.0), theme::warn());
             }
             None => {
-                painter.text(rect.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(18.0), theme::TEXT_DIM);
+                painter.text(rect.center(), egui::Align2::CENTER_CENTER, ph::IMAGE, egui::FontId::proportional(18.0), theme::text_dim());
             }
         }
         let stroke = if over {
-            egui::Stroke::new(2.0, theme::ACCENT)
+            egui::Stroke::new(2.0, theme::accent())
         } else if dragging.is_some() {
-            egui::Stroke::new(1.0, theme::ACCENT_DIM)
+            egui::Stroke::new(1.0, theme::accent_dim())
         } else {
-            egui::Stroke::new(1.0, theme::BORDER)
+            egui::Stroke::new(1.0, theme::border())
         };
         painter.rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Outside);
         let tip = if current.is_some() { "Drop another texture here to replace it" } else { "Drag a texture here from the shelf" };
@@ -155,12 +155,12 @@ fn channel_row(ui: &mut egui::Ui, f: &mut FillParams, slot: Slot, assets: &[Text
         }
 
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new(slot.label()).color(theme::TEXT_STRONG));
+            ui.label(egui::RichText::new(slot.label()).color(theme::text_strong()));
             match f.maps.get(slot).cloned() {
                 Some(tex) => {
                     let name = assets.iter().find(|a| a.id == tex.id).map_or("(missing from the library)", |a| a.name.as_str());
                     ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(name).size(11.0).color(theme::TEXT_DIM)).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(name).size(11.0).color(theme::text_dim())).truncate());
                         if ui.small_button(ph::X).on_hover_text("Remove the texture").clicked() {
                             f.maps.set(slot, None);
                             changed = true;
@@ -186,7 +186,7 @@ fn channel_row(ui: &mut egui::Ui, f: &mut FillParams, slot: Slot, assets: &[Text
                 None => {
                     ui.horizontal(|ui| changed |= constant_controls(ui, f, slot));
                     if slot == Slot::Normal {
-                        ui.label(egui::RichText::new("Drop a normal map here").size(11.0).color(theme::TEXT_DIM));
+                        ui.label(egui::RichText::new("Drop a normal map here").size(11.0).color(theme::text_dim()));
                     }
                 }
             }

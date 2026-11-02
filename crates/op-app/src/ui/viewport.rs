@@ -433,7 +433,7 @@ impl App {
                 .inner_margin(egui::Margin::symmetric(6, 2))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(ph::CUBE).color(theme::TEXT_DIM));
+                        ui.label(egui::RichText::new(ph::CUBE).color(theme::text_dim()));
                         self.view_combo(ui);
                         if ui.button(ph::FRAME_CORNERS).on_hover_text("Frame model (F)").clicked() {
                             self.frame_model();

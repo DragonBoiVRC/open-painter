@@ -153,11 +153,14 @@ struct DisplaySettings {
     fov_degrees: f32,
     /// Camera positions kept per model name.
     cameras: HashMap<String, Vec<camera::SavedCamera>>,
+    /// Interface look: brightness level and accent colour (indexes into `ui::theme`'s lists).
+    brightness: u8,
+    accent: u8,
 }
 
 impl Default for DisplaySettings {
     fn default() -> Self {
-        Self { env: Environment::default(), hdri: None, ortho: false, fov_degrees: 45.0, cameras: HashMap::new() }
+        Self { env: Environment::default(), hdri: None, ortho: false, fov_degrees: 45.0, cameras: HashMap::new(), brightness: 0, accent: 0 }
     }
 }
 
@@ -180,6 +183,8 @@ impl DisplaySettings {
         for v in [&mut e.vignette, &mut e.grain, &mut e.bloom, &mut e.sharpen] {
             *v = fin(*v, 0.0, 0.0, 1.0);
         }
+        me.brightness = if (me.brightness as usize) < ui::theme::BRIGHTNESS_NAMES.len() { me.brightness } else { 0 };
+        me.accent = if (me.accent as usize) < ui::theme::ACCENTS.len() { me.accent } else { 0 };
         me.fov_degrees = if me.fov_degrees.is_finite() && me.fov_degrees > 0.0 { me.fov_degrees.clamp(10.0, 110.0) } else { 45.0 };
         me
     }
@@ -700,6 +705,8 @@ impl App {
             .unwrap_or(DEFAULT_AUTOSAVE_SECS);
 
         ui::theme::install_fonts(&cc.egui_ctx);
+        let display_early = DisplaySettings::load(&files::display_path());
+        ui::theme::set_look(display_early.brightness, display_early.accent);
         ui::theme::apply(&cc.egui_ctx);
         let dock_state = dock::load(&files::layout_path()).unwrap_or_else(dock::default_layout);
 
@@ -1624,7 +1631,7 @@ impl App {
         if self.hdri_rx.is_some() {
             return;
         }
-        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone(), ortho: self.camera.ortho, fov_degrees: self.camera.fov_y.to_degrees(), cameras: self.saved_cameras.clone() };
+        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone(), ortho: self.camera.ortho, fov_degrees: self.camera.fov_y.to_degrees(), cameras: self.saved_cameras.clone(), brightness: ui::theme::brightness(), accent: ui::theme::accent_index() };
         if self.display_saved.as_ref() == Some(&now) {
             return;
         }
@@ -2564,7 +2571,7 @@ impl App {
             egui::Window::new("New project").collapsible(false).resizable(false).show(ctx, |ui| {
                 ui.set_width(520.0);
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("BASIC SETTINGS").strong().size(14.0).color(ui::theme::TEXT_STRONG));
+                ui.label(egui::RichText::new("BASIC SETTINGS").strong().size(14.0).color(ui::theme::text_strong()));
                 ui.add_space(6.0);
                 egui::Grid::new("new_project_basic").num_columns(2).min_col_width(180.0).spacing([16.0, 10.0]).show(ui, |ui| {
                     ui.label("3D mesh");
@@ -2585,7 +2592,7 @@ impl App {
                     ui.end_row();
                 });
                 ui.add_space(12.0);
-                egui::CollapsingHeader::new(egui::RichText::new("ADVANCED SETTINGS").strong().size(14.0).color(ui::theme::TEXT_STRONG))
+                egui::CollapsingHeader::new(egui::RichText::new("ADVANCED SETTINGS").strong().size(14.0).color(ui::theme::text_strong()))
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
@@ -2596,7 +2603,7 @@ impl App {
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let size = egui::vec2(96.0, 28.0);
                     let ready = !d.mesh.trim().is_empty();
-                    let button = egui::Button::new(egui::RichText::new("Create").strong()).min_size(size).fill(if ready { ui::theme::ACCENT_DIM } else { ui::theme::CONTROL });
+                    let button = egui::Button::new(egui::RichText::new("Create").strong()).min_size(size).fill(if ready { ui::theme::accent_dim() } else { ui::theme::control() });
                     create = ui.add_enabled(ready, button).clicked();
                     cancel = ui.add(egui::Button::new("Cancel").min_size(size)).clicked();
                 });

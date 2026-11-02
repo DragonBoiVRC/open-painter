@@ -12,7 +12,7 @@ impl App {
         let mut eye_action: Option<(usize, bool)> = None;
         let mut menu_action: Option<(usize, u8)> = None;
         let mut resize: Option<(usize, u32)> = None;
-        egui::Frame::NONE.fill(theme::LIST).stroke(egui::Stroke::new(1.0, theme::BORDER)).show(ui, |ui| {
+        egui::Frame::NONE.fill(theme::list()).stroke(egui::Stroke::new(1.0, theme::border())).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             egui::ScrollArea::vertical().id_salt("set_list").auto_shrink([false, false]).show(ui, |ui| {
                 for (i, r) in ranges.iter().enumerate() {
@@ -20,21 +20,21 @@ impl App {
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
                     let p = ui.painter_at(rect);
                     let fill = if active {
-                        theme::ACCENT_DIM
+                        theme::accent_dim()
                     } else if resp.hovered() {
-                        theme::CONTROL
+                        theme::control()
                     } else {
-                        theme::PANEL
+                        theme::panel()
                     };
                     p.rect_filled(rect.shrink2(egui::vec2(0.0, 0.5)), 0.0, fill);
                     if active {
-                        p.rect_stroke(rect.shrink(0.5), 0.0, egui::Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+                        p.rect_stroke(rect.shrink(0.5), 0.0, egui::Stroke::new(1.0, theme::accent()), egui::StrokeKind::Inside);
                     }
                     let hidden = self.hidden_sets.contains(&i);
                     let text = match (active, hidden) {
-                        (_, true) => theme::TEXT_DIM.gamma_multiply(0.7),
-                        (true, _) => theme::TEXT_STRONG,
-                        _ => theme::TEXT,
+                        (_, true) => theme::text_dim().gamma_multiply(0.7),
+                        (true, _) => theme::text_strong(),
+                        _ => theme::text(),
                     };
                     // The eye: click to show or hide this material, Alt+click to look at it alone.
                     let eye = egui::Rect::from_center_size(rect.left_center() + egui::vec2(16.0, 0.0), egui::vec2(22.0, 22.0));
@@ -44,7 +44,7 @@ impl App {
                         egui::Align2::CENTER_CENTER,
                         if hidden { ph::EYE_SLASH } else { ph::EYE },
                         egui::FontId::proportional(15.0),
-                        if hidden { theme::TEXT_DIM } else { theme::TEXT },
+                        if hidden { theme::text_dim() } else { theme::text() },
                     );
                     let eye_hot = eye_resp.hovered();
                     if eye_resp.on_hover_text("Show or hide this material (Alt+click: show only this one)").clicked() {
@@ -61,7 +61,7 @@ impl App {
                         let right = rect.right() - if tiles > 1 { 112.0 } else { 64.0 };
                         let size_rect = egui::Rect::from_min_max(egui::pos2(right - w, rect.top() + 3.0), egui::pos2(right, rect.bottom() - 3.0));
                         let mut b = ui.new_child(egui::UiBuilder::new().max_rect(size_rect));
-                        b.menu_button(egui::RichText::new(format!("{size}²")).size(11.5).color(theme::ACCENT), |ui| {
+                        b.menu_button(egui::RichText::new(format!("{size}²")).size(11.5).color(theme::accent()), |ui| {
                             for s in crate::TEXTURE_SIZES {
                                 if ui.selectable_label(s == size, format!("{s}x{s}")).clicked() {
                                     resize = Some((i, s));
@@ -75,7 +75,7 @@ impl App {
                         egui::Align2::RIGHT_CENTER,
                         count,
                         egui::FontId::proportional(10.5),
-                        theme::TEXT_DIM,
+                        theme::text_dim(),
                     );
                     if active && self.sets_scrolled != i {
                         resp.scroll_to_me(Some(egui::Align::Center));
