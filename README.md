@@ -55,6 +55,30 @@ Each push builds a Windows x64 zip in GitHub Actions (`.github/workflows/windows
 from the workflow run's artifacts, or from the release page for tagged versions. Unzip and run
 `open-painter.exe`. To build it yourself, `cargo build --release -p op-app` works on Windows too.
 
+## Memory
+
+Projects with many texture sets or large textures are kept inside your video memory (VRAM) and RAM
+without you managing it:
+
+- **Only the set you edit is full size on the GPU.** The other sets keep a 512 px picture of their
+  finished look, made in the background after a project opens, so the whole model stays painted in
+  the viewport. Picking a set loads its layers at full size; sets you leave unchanged go back to a
+  picture.
+- **Source textures upload when needed.** A set's image textures go to the GPU only while that set is
+  open or being exported, and are freed afterwards.
+- **A GPU budget** (half your video memory) moves the least recently used sets out when it is
+  exceeded. Their paint stays in RAM.
+- **A RAM budget** (half the free memory) moves the oldest of that paint to files in
+  `<data folder>/spill` (`~/.local/share/open-painter/spill` on Linux). Saving, exporting and
+  reopening a set read it back; the files are deleted when it is loaded or the program closes.
+- **Exceptions:** the set being edited and sets with undo history are never moved out. If the active
+  set alone is larger than the budget, the GPU can still run out of memory; lower its resolution in
+  Texture Set Settings.
+
+The status bar and `info` show the GPU memory the texture sets use. Set `OPEN_PAINTER_GPU_BUDGET_MB`
+or `OPEN_PAINTER_RAM_BUDGET_MB` to change either budget. Video memory is detected on Linux (NVIDIA
+via `nvidia-smi`, AMD via the kernel); elsewhere the GPU budget defaults to 2 GB unless you set it.
+
 ## Layout
 
 | Crate | What it does |
