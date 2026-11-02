@@ -590,15 +590,59 @@ pub struct Mask {
     /// Levels applied to the mask's value where it is used (painting still edits the raw mask).
     #[serde(default)]
     pub adjust: MaskAdjust,
+    /// When set the mask follows a channel of a recorded anchor (see [`Node::anchor`]) instead of
+    /// being painted: paint made on it is overwritten while the source is set.
+    #[serde(default)]
+    pub anchor: Option<AnchorSource>,
 }
+
+/// A channel of the stack as it was at an anchor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnchorChannel {
+    /// The colour's brightness.
+    #[default]
+    Base,
+    Metallic,
+    Roughness,
+    Height,
+    /// 1 wherever anything has been laid down, 0 on bare surface.
+    Coverage,
+}
+
+impl AnchorChannel {
+    pub const ALL: [AnchorChannel; 5] = [AnchorChannel::Base, AnchorChannel::Metallic, AnchorChannel::Roughness, AnchorChannel::Height, AnchorChannel::Coverage];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AnchorChannel::Base => "Colour brightness",
+            AnchorChannel::Metallic => "Metallic",
+            AnchorChannel::Roughness => "Roughness",
+            AnchorChannel::Height => "Height",
+            AnchorChannel::Coverage => "Coverage",
+        }
+    }
+
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Which anchor, and which of its channels, drives a mask.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorSource {
+    pub name: String,
+    pub channel: AnchorChannel,
+}
+
+pub const MAX_ANCHOR_NAME: usize = 64;
 
 impl Mask {
     pub fn new(init_white: bool) -> Self {
-        Self { enabled: true, init_white, generator: None, adjust: MaskAdjust::default() }
+        Self { enabled: true, init_white, generator: None, adjust: MaskAdjust::default(), anchor: None }
     }
 
     pub fn generated(generator: Generator) -> Self {
-        Self { enabled: true, init_white: true, generator: Some(generator), adjust: MaskAdjust::default() }
+        Self { enabled: true, init_white: true, generator: Some(generator), adjust: MaskAdjust::default(), anchor: None }
     }
 }
 
@@ -861,6 +905,10 @@ pub struct Node {
     /// everything inside it, if it is a group.
     #[serde(default = "one")]
     pub pattern_scale: f32,
+    /// Records the stack as it stands just above this layer (this layer included) under this name, so
+    /// masks higher up can react to it (see [`Mask::anchor`]). Names are looked up by the layers above.
+    #[serde(default)]
+    pub anchor: Option<String>,
 }
 
 pub const MIN_PATTERN_SCALE: f32 = 0.01;
@@ -1024,6 +1072,23 @@ impl Document {
         go(&self.nodes, None, id)
     }
 
+    /// The names of every anchor in the stack, in stack order, each once.
+    pub fn anchor_names(&self) -> Vec<String> {
+        fn walk(nodes: &[Node], out: &mut Vec<String>) {
+            for n in nodes {
+                if let Some(a) = n.anchor.as_ref().filter(|a| !out.contains(a)) {
+                    out.push(a.clone());
+                }
+                if let NodeKind::Group { children } = &n.kind {
+                    walk(children, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.nodes, &mut out);
+        out
+    }
+
     /// Add a node into `parent` (None = top level) at `index` (None = on top).
     pub fn add(&mut self, parent: Option<NodeId>, index: Option<usize>, name: &str, kind: NodeKind) -> NodeId {
         let id = self.next_id;
@@ -1040,6 +1105,7 @@ impl Document {
             filters: Vec::new(),
             channels: ChannelMixes::default(),
             pattern_scale: 1.0,
+            anchor: None,
         };
         let list = match parent.and_then(|p| self.find_mut(p)) {
             Some(Node { kind: NodeKind::Group { children }, .. }) => children,

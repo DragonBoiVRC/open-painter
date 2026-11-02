@@ -39,6 +39,9 @@ fn check_node(n: &Node, depth: usize, count: &mut usize) -> Result<(), String> {
             g.validate().map_err(|e| format!("layer '{}': {e}", n.name))?;
         }
     }
+    if n.anchor.as_ref().is_some_and(|a| a.len() > crate::MAX_ANCHOR_NAME) || n.mask.as_ref().and_then(|m| m.anchor.as_ref()).is_some_and(|a| a.name.len() > crate::MAX_ANCHOR_NAME) {
+        return Err(format!("layer '{}' has an anchor name that is too long", n.name));
+    }
     match &n.kind {
         NodeKind::Paint => {}
         NodeKind::Fill(f) => {
@@ -102,6 +105,7 @@ fn layer(name: &str, base: [f32; 3], metallic: Option<f32>, roughness: Option<f3
         filters: Vec::new(),
         channels: Default::default(),
         pattern_scale: 1.0,
+        anchor: None,
         kind: NodeKind::Fill(FillParams { base: Some(base), metallic, roughness, ..Default::default() }),
     }
 }
@@ -197,6 +201,7 @@ fn group(name: &str, children: Vec<Node>) -> Node {
         filters: Vec::new(),
         channels: Default::default(),
         pattern_scale: 1.0,
+        anchor: None,
         kind: NodeKind::Group { children },
     }
 }

@@ -1762,6 +1762,9 @@ impl App {
             Target::Mask if node.mask.as_ref().is_some_and(|m| m.generator.is_some()) => {
                 Err("This mask is generated from baked maps: use 'Freeze' to make it paintable")
             }
+            Target::Mask if node.mask.as_ref().is_some_and(|m| m.anchor.is_some()) => {
+                Err("This mask follows an anchor: set 'Follows anchor' to None to paint it (it keeps what it last showed)")
+            }
             Target::Mask if node.mask.is_some() => Ok((node.id, Target::Mask)),
             Target::Mask => Err("This layer has no mask: add one in the layer panel"),
             Target::Content if matches!(node.kind, NodeKind::Paint) => Ok((node.id, Target::Content)),

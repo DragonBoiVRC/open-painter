@@ -106,7 +106,14 @@ pub struct Compositor {
     tile: [f32; 2],
     pool: Vec<Layer>,
     size: u32,
+    anchor_pipeline: wgpu::RenderPipeline,
+    anchor_layout: wgpu::BindGroupLayout,
+    /// The stack as recorded at each anchor during this composite, by name.
+    anchors: HashMap<String, Layer>,
 }
+
+/// Anchors kept at once: each is a whole layer of GPU memory.
+const MAX_ANCHORS: usize = 4;
 
 impl Compositor {
     pub fn new(device: &wgpu::Device, size: u32) -> Self {
@@ -271,6 +278,39 @@ impl Compositor {
             multiview_mask: None,
             cache: None,
         });
+        let anchor_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("anchor_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                tex(1),
+                tex(2),
+                tex(3),
+                tex(4),
+            ],
+        });
+        let anchor_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/anchormask.wgsl"));
+        let anchor_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("anchor_pl"), bind_group_layouts: &[Some(&anchor_layout)], immediate_size: 0 });
+        let anchor_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("anchormask"),
+            layout: Some(&anchor_pl),
+            vertex: wgpu::VertexState { module: &anchor_shader, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+            fragment: Some(wgpu::FragmentState {
+                module: &anchor_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState::from(crate::paint::MASK_FORMAT))],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let filter_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -337,6 +377,9 @@ impl Compositor {
             tile: [0.0, 0.0],
             pool: Vec::new(),
             size,
+            anchor_pipeline,
+            anchor_layout,
+            anchors: HashMap::new(),
         }
     }
 
@@ -374,7 +417,13 @@ impl Compositor {
         store: &HashMap<NodeId, NodeGpu>,
         output: &Layer,
     ) {
+        for (_, layer) in self.anchors.drain() {
+            self.pool.push(layer);
+        }
         let root = self.composite_nodes(device, encoder, &doc.nodes, store);
+        for (_, layer) in self.anchors.drain() {
+            self.pool.push(layer);
+        }
         output.copy_from(encoder, &root);
         self.pool.push(root);
     }
@@ -395,6 +444,10 @@ impl Compositor {
         let mut back = self.acquire(device, encoder);
         let mut front = self.acquire(device, encoder);
         for node in nodes.iter().filter(|n| n.visible) {
+            // A mask that follows an anchor is rewritten from it each time (white if there is no such anchor yet).
+            if let (Some(src), Some(tex)) = (node.mask.as_ref().filter(|m| m.enabled).and_then(|m| m.anchor.as_ref()), store.get(&node.id).and_then(|g| g.mask.as_ref())) {
+                self.anchor_mask(device, encoder, self.anchors.get(&src.name), src.channel.code(), tex);
+            }
             let mask = node
                 .mask
                 .as_ref()
@@ -436,9 +489,49 @@ impl Compositor {
                 }
             }
             std::mem::swap(&mut back, &mut front);
+            if let Some(name) = node.anchor.as_ref().filter(|n| !n.is_empty()) {
+                if self.anchors.len() < MAX_ANCHORS || self.anchors.contains_key(name) {
+                    let recorded = self.acquire(device, encoder);
+                    recorded.copy_from(encoder, &back);
+                    if let Some(old) = self.anchors.insert(name.clone(), recorded) {
+                        self.pool.push(old);
+                    }
+                }
+            }
         }
         self.pool.push(front);
         back
+    }
+
+    /// Write one channel of `anchor` into `mask` (or white, if the anchor has not been recorded yet).
+    fn anchor_mask(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, anchor: Option<&Layer>, channel: u32, mask: &wgpu::Texture) {
+        let view = mask.create_view(&Default::default());
+        let ops = wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("anchor_mask_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, depth_slice: None, resolve_target: None, ops })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let Some(anchor) = anchor else { return };
+        let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("anchor_params"), contents: bytemuck::bytes_of(&[channel, 0u32, 0, 0]), usage: wgpu::BufferUsages::UNIFORM });
+        let v = anchor.views();
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("anchor_bind"),
+            layout: &self.anchor_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&v[0]) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&v[1]) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&v[2]) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&v[3]) },
+            ],
+        });
+        pass.set_pipeline(&self.anchor_pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// A fill layer whose textures are projected onto the model, rendered into a layer of its own, or

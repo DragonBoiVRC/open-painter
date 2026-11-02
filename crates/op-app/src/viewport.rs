@@ -1921,6 +1921,33 @@ mod tests {
         assert!(back[2] > 0.9 && back[0] < 0.1, "back to UV: {back:?}");
     }
 
+    /// A mask that follows an anchor shows its layer only where the anchored stack had the channel.
+    #[test]
+    fn a_mask_can_follow_an_anchor() {
+        use op_core::{AnchorChannel, AnchorSource};
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let paint = doc.add(None, None, "paint", NodeKind::Paint);
+        doc.find_mut(paint).unwrap().anchor = Some("under".into());
+        let blue = doc.add(None, None, "blue", NodeKind::Fill(FillParams { base: Some([0.0, 0.0, 1.0]), ..Default::default() }));
+        doc.find_mut(blue).unwrap().mask = Some(Mask { anchor: Some(AnchorSource { name: "under".into(), channel: AnchorChannel::Metallic }), ..Mask::new(true) });
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let c = SIZE as f32 / 2.0;
+        // Metallic paint in the middle only.
+        rig.run(&doc, &[PaintOp::BeginStroke { layer: paint, target: Target::Content }, PaintOp::Stamps2d { layer: paint, target: Target::Content, stamps: vec![dab(0.5, 0.1, 1.0, [0.0, 1.0, 0.0, 0.0])] }, PaintOp::EndStroke]);
+        let _ = c;
+        rig.run(&doc, &[]);
+        let b = rig.read(&rig.gpu.paint().output.base, 8);
+        let px = |x: u32, y: u32| {
+            let i = ((y * SIZE + x) * 8) as usize;
+            [0, 1, 2].map(|k| f16_to_f32(u16::from_le_bytes([b[i + k * 2], b[i + k * 2 + 1]])))
+        };
+        let middle = px(SIZE / 2, SIZE / 2);
+        let corner = px(SIZE / 16, SIZE / 16);
+        assert!(middle[2] > 0.9, "blue where the anchored stack is metallic: {middle:?}");
+        assert!(corner[2] < 0.1, "hidden elsewhere: {corner:?}");
+    }
+
     /// A decal puts its picture only inside its frame, upright, on surfaces facing it.
     #[test]
     fn a_decal_covers_only_its_frame() {

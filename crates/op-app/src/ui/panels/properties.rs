@@ -1,7 +1,7 @@
 //! "Properties - Layer": name, blending, fill values, mask and generator of the selected layer.
 
 use crate::{builtin_kinds, App, GenAction, Target};
-use op_core::{BlendMode, Filter, Generator, Mask, NodeKind};
+use op_core::{AnchorChannel, AnchorSource, BlendMode, Filter, Generator, Mask, NodeKind};
 
 impl App {
     pub(crate) fn properties_panel(&mut self, ui: &mut egui::Ui) {
@@ -12,6 +12,7 @@ impl App {
         // Property widgets edit the document in place; the gesture is committed to
         // history once the pointer is released so a slider drag is a single undo step.
         let snapshot = self.doc.clone();
+        let anchors = self.doc.anchor_names();
         let mut changed = false;
         let mut mask_action = None;
         let mut gen_action: Option<GenAction> = None;
@@ -79,6 +80,15 @@ impl App {
                 super::hint(ui, "Each channel can be switched off, blended differently from the layer, or made more transparent.");
             });
 
+            ui.horizontal(|ui| {
+                ui.label("Anchor");
+                let mut name = node.anchor.clone().unwrap_or_default();
+                let edit = ui.add(egui::TextEdit::singleline(&mut name).hint_text("name to record the stack as").desired_width(150.0));
+                if edit.on_hover_text("Records the stack up to and including this layer, so masks on layers above it can react to it (Mask > Follows anchor).").changed() {
+                    node.anchor = Some(name.chars().take(op_core::MAX_ANCHOR_NAME).collect()).filter(|n: &String| !n.trim().is_empty());
+                    changed = true;
+                }
+            });
             if !is_fill {
                 egui::CollapsingHeader::new("Filters").id_salt("layer_filters").default_open(!node.filters.is_empty()).show(ui, |ui| {
                     changed |= filters_ui(ui, &mut node.filters);
@@ -143,6 +153,39 @@ impl App {
                             }
                         });
                     });
+                    if m.generator.is_none() {
+                        let current = m.anchor.as_ref().map(|a| a.name.clone());
+                        ui.horizontal(|ui| {
+                            ui.label("Follows anchor");
+                            egui::ComboBox::from_id_salt("mask_anchor").selected_text(current.clone().unwrap_or_else(|| "None (painted)".into())).show_ui(ui, |ui| {
+                                if ui.selectable_label(current.is_none(), "None (painted)").clicked() && current.is_some() {
+                                    m.anchor = None;
+                                    changed = true;
+                                }
+                                for n in &anchors {
+                                    if ui.selectable_label(current.as_deref() == Some(n.as_str()), n).clicked() && current.as_deref() != Some(n.as_str()) {
+                                        let channel = m.anchor.as_ref().map_or(AnchorChannel::default(), |a| a.channel);
+                                        m.anchor = Some(AnchorSource { name: n.clone(), channel });
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        });
+                        if let Some(a) = &mut m.anchor {
+                            ui.horizontal(|ui| {
+                                ui.label("Channel");
+                                egui::ComboBox::from_id_salt("mask_anchor_channel").selected_text(a.channel.label()).show_ui(ui, |ui| {
+                                    for c in AnchorChannel::ALL {
+                                        changed |= ui.selectable_value(&mut a.channel, c, c.label()).changed();
+                                    }
+                                });
+                            });
+                            if !anchors.contains(&a.name) || m.anchor.as_ref().is_some_and(|a| !anchors.contains(&a.name)) {
+                                super::hint(ui, "No layer below records this anchor (the mask is fully white until one does).");
+                            }
+                            super::hint(ui, "The mask follows the anchored layers' result and is not painted. Switching back to Painted keeps what it last showed.");
+                        }
+                    }
                     match &mut m.generator {
                         Some(gen) => {
                             ui.label("Generated from the baked maps:");
