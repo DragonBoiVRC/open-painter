@@ -153,6 +153,11 @@ pub enum PaintOp {
     /// The baked tangent-space normal map of this set as RGBA8 (`None` removes it). It is combined
     /// with painted height in the viewport's normal map. Ignored if `size` is not the set's.
     SetBakedNormal { size: u32, rgba8: Option<Vec<u8>>, projection: Option<ProjectionData> },
+    /// Turn quick-mask protection on or off. While on, paint only lands where the quick mask (the
+    /// texture of [`QUICK_ID`], 1 = free, 0 = protected) is free. Sent when the state changes.
+    QuickMask { on: bool },
+    /// Make the whole quick mask free again.
+    QuickClear,
     /// Like `Reset`, then restore saved texture contents (opening a project).
     Load { size: u32, blobs: Vec<TextureBlob> },
 }
@@ -170,6 +175,9 @@ pub struct ProjectionData {
     pub offset: [f32; 3],
     pub extent: [f32; 3],
 }
+
+/// The quick mask lives in the texture store under this reserved id, so strokes can paint it like a layer mask.
+pub const QUICK_ID: NodeId = NodeId::MAX;
 
 /// The four paintable channels of a layer (and the compositor's working buffers).
 pub struct Layer {
@@ -365,6 +373,14 @@ pub struct PaintGpu {
     resolve_layout: wgpu::BindGroupLayout,
     pipeline_resolve_mask: wgpu::RenderPipeline,
     resolve_mask_layout: wgpu::BindGroupLayout,
+    pipeline_protect: wgpu::RenderPipeline,
+    pipeline_protect_mask: wgpu::RenderPipeline,
+    protect_layout: wgpu::BindGroupLayout,
+    protect_mask_layout: wgpu::BindGroupLayout,
+    /// Quick-mask protection is on, and the layer/target written to since it was last enforced.
+    quick_on: bool,
+    protect_pending: Option<(NodeId, Target)>,
+    protect_mask_scratch: Option<wgpu::Texture>,
     stroke_limit: Option<StrokeLimit>,
     /// When this painter last had operations or composited; scratch memory is freed after a pause.
     last_active: std::time::Instant,
@@ -782,6 +798,24 @@ impl PaintGpu {
         let resolve_mask_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/strokeblend_mask.wgsl"));
         let pipeline_resolve_mask = make_resolve("stroke_resolve_mask", &resolve_mask_shader, "fs_mask", &resolve_mask_layout, &[replace(MASK_FORMAT)]);
 
+        let protect_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("protect_layout"),
+            entries: &(1..=13).map(plain_tex).collect::<Vec<_>>(),
+        });
+        let protect_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/quickprotect.wgsl"));
+        let pipeline_protect = make_resolve(
+            "quick_protect",
+            &protect_shader,
+            "fs_content",
+            &protect_layout,
+            &[replace(BASE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT), replace(VALUE_FORMAT), replace(BASE_FORMAT), replace(VALUE_FORMAT)],
+        );
+        let protect_mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("protect_mask_layout"),
+            entries: &[plain_tex(1), plain_tex(7), plain_tex(13)],
+        });
+        let pipeline_protect_mask = make_resolve("quick_protect_mask", &protect_shader, "fs_mask", &protect_mask_layout, &[replace(MASK_FORMAT)]);
+
         let shader_2d = device.create_shader_module(wgpu::include_wgsl!("shaders/stamp2d.wgsl"));
         let pl_2d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("stamp2d_pl"), bind_group_layouts: &[], immediate_size: 0 });
         let make_2d = |entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
@@ -852,6 +886,13 @@ impl PaintGpu {
             resolve_layout,
             pipeline_resolve_mask,
             resolve_mask_layout,
+            pipeline_protect,
+            pipeline_protect_mask,
+            protect_layout,
+            protect_mask_layout,
+            quick_on: false,
+            protect_pending: None,
+            protect_mask_scratch: None,
             stroke_limit: None,
             stroke_buf: None,
             stroke_mask_buf: None,
@@ -985,9 +1026,88 @@ impl PaintGpu {
         }
     }
 
+    /// Put back the pre-stroke paint wherever the quick mask protects, after marks were made on the
+    /// layer being painted. Only runs while a stroke (with its full snapshot) is open.
+    fn flush_protect(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
+        let Some((layer, target)) = self.protect_pending.take() else { return };
+        if !self.quick_on || layer == QUICK_ID {
+            return;
+        }
+        let Some(id) = self.open_snap else { return };
+        let Some(snap) = self.undo.iter().find(|s| s.id == id && s.layer == layer) else { return };
+        let (Some(quick), Some(g)) = (self.store.get(&QUICK_ID).and_then(|g| g.mask.as_ref()), self.store.get(&layer)) else { return };
+        let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+        let qv = quick.create_view(&Default::default());
+        let size = self.size;
+        match (target, &snap.tex) {
+            (Target::Content, SnapTex::Content(snapshot)) => {
+                let Some(dst) = &g.content else { return };
+                if self.scratch.as_ref().is_none_or(|s| s.size != size) {
+                    self.scratch = Some(Layer::new_paint(device, size));
+                }
+                let cur = self.scratch.as_ref().expect("made above");
+                cur.copy_from(encoder, dst);
+                let (sv, cv, dv) = (snapshot.views(), cur.views(), dst.views());
+                let mut entries = Vec::new();
+                for i in 0..PAINT_TARGETS {
+                    entries.push(wgpu::BindGroupEntry { binding: 1 + i as u32, resource: wgpu::BindingResource::TextureView(&sv[i]) });
+                    entries.push(wgpu::BindGroupEntry { binding: 7 + i as u32, resource: wgpu::BindingResource::TextureView(&cv[i]) });
+                }
+                entries.push(wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&qv) });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("protect_bind"), layout: &self.protect_layout, entries: &entries });
+                let attachments: Vec<_> = dv[..PAINT_TARGETS]
+                    .iter()
+                    .map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: load }))
+                    .collect();
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quick_protect_pass"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pipeline_protect);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            (Target::Mask, SnapTex::Mask(snapshot)) => {
+                let Some(dst) = &g.mask else { return };
+                if self.protect_mask_scratch.as_ref().is_none_or(|s| s.width() != size) {
+                    self.protect_mask_scratch = Some(make_mask_texture(device, size));
+                }
+                let cur = self.protect_mask_scratch.as_ref().expect("made above");
+                copy_tex(encoder, dst, cur, size);
+                let (sv, cv, dv) = (snapshot.create_view(&Default::default()), cur.create_view(&Default::default()), dst.create_view(&Default::default()));
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("protect_mask_bind"),
+                    layout: &self.protect_mask_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sv) },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&cv) },
+                        wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&qv) },
+                    ],
+                });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("quick_protect_mask_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &dv, depth_slice: None, resolve_target: None, ops: load })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pipeline_protect_mask);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            _ => {}
+        }
+    }
+
     fn gc(&mut self, doc: &Document, keep: &[NodeId]) {
         let mut live: HashSet<NodeId> = doc.ids().into_iter().collect();
         live.extend(keep.iter().copied());
+        live.insert(QUICK_ID);
         live.extend(self.undo.iter().chain(&self.redo).map(|s| s.layer));
         self.store.retain(|id, _| live.contains(id));
     }
@@ -1150,6 +1270,7 @@ impl PaintGpu {
     fn reset(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, doc: &Document, size: u32) {
         self.size = size;
         self.store.clear();
+        self.quick_on = false;
         self.undo.clear();
         self.redo.clear();
         self.output = Layer::new(device, size);
@@ -1422,15 +1543,24 @@ impl PaintGpu {
         self.ensure_store(device, encoder, doc);
         let mut dirty = false;
         for op in ops {
-            if let PaintOp::BeginStroke { layer, target: Target::Content }
-            | PaintOp::Stamps { layer, target: Target::Content, .. }
-            | PaintOp::Stamps2d { layer, target: Target::Content, .. }
-            | PaintOp::Fill { layer, target: Target::Content, .. }
-            | PaintOp::Clear { layer, target: Target::Content }
-            | PaintOp::Erase { layer, .. }
-            | PaintOp::Smudge { layer, .. } = op
-            {
-                self.ensure_content(device, *layer);
+            match op {
+                PaintOp::BeginStroke { layer, target: Target::Content }
+                | PaintOp::Stamps { layer, target: Target::Content, .. }
+                | PaintOp::Stamps2d { layer, target: Target::Content, .. }
+                | PaintOp::Fill { layer, target: Target::Content, .. }
+                | PaintOp::Clear { layer, target: Target::Content }
+                | PaintOp::Erase { layer, .. }
+                | PaintOp::Smudge { layer, .. } => self.ensure_content(device, *layer),
+                _ => {}
+            }
+            // Marks on a layer are checked against the quick mask before the stroke ends.
+            match op {
+                PaintOp::Stamps { layer, target, .. } | PaintOp::Stamps2d { layer, target, .. } | PaintOp::Fill { layer, target, .. } => {
+                    self.protect_pending = Some((*layer, *target));
+                }
+                PaintOp::Erase { layer, .. } | PaintOp::Smudge { layer, .. } => self.protect_pending = Some((*layer, Target::Content)),
+                PaintOp::BeginStroke { .. } | PaintOp::EndStroke | PaintOp::UndoStroke | PaintOp::RedoStroke => self.flush_protect(device, encoder),
+                _ => {}
             }
             match op {
                 PaintOp::BeginStroke { layer, target } => {
@@ -1561,6 +1691,20 @@ impl PaintGpu {
                 PaintOp::Resize(size) => {
                     if *size > 0 && *size != self.size {
                         self.resize(device, encoder, doc, *size);
+                        dirty = true;
+                    }
+                }
+                PaintOp::QuickMask { on } => {
+                    self.quick_on = *on;
+                    if *on && self.store.get(&QUICK_ID).is_none_or(|g| g.mask.is_none()) {
+                        let t = make_mask_texture(device, self.size);
+                        clear_textures(encoder, &[&t.create_view(&Default::default())], wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 });
+                        self.store.entry(QUICK_ID).or_default().mask = Some(t);
+                    }
+                }
+                PaintOp::QuickClear => {
+                    if let Some(m) = self.store.get(&QUICK_ID).and_then(|g| g.mask.as_ref()) {
+                        clear_textures(encoder, &[&m.create_view(&Default::default())], wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 });
                         dirty = true;
                     }
                 }
@@ -1932,6 +2076,7 @@ impl PaintGpu {
             // These finish within the frame, with no stroke-end signal.
             self.close_stroke(device, encoder);
         }
+        self.flush_protect(device, encoder);
         if dirty || !ops.is_empty() {
             self.last_active = std::time::Instant::now();
         }

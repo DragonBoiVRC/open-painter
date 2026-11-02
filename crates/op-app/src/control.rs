@@ -40,6 +40,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("set_brush", "{tool?: paint|erase, target?: content|mask, color?: [r,g,b] sRGB, radius?, hardness?, opacity?, spacing?, metallic?, roughness?, mask_value?}"),
     ("paint_uv", "{points: [[u,v],...], radius?: UV units}: one stroke through the points on the selected layer, as one undo step."),
     ("screenshot", "{path}: save a PNG of the 3D view as it is drawn now."),
+    ("quick_mask", "{on?, edit?, clear?}: protect areas: while on, paint lands only where the quick mask is free; with edit, paint_uv strokes mark protected areas (tool erase frees them); clear frees all."),
     ("undo", "Undo the last edit or stroke."),
     ("redo", "Redo."),
     ("bake", "{maps?: [ao, curvature, thickness, normal, position, id, world_normal, height, bent_normals, opacity], samples?, size?}: bake the active set; poll `status`."),
@@ -286,6 +287,19 @@ impl App {
                 let png = op_image::encode_png(w, h, &rgba).map_err(|e| e.to_string())?;
                 std::fs::write(&path, png).map_err(|e| e.to_string())?;
                 Ok(json!(path))
+            }
+            "quick_mask" => {
+                if let Some(on) = p.get("on").and_then(Value::as_bool) {
+                    self.quick_on = on;
+                    self.quick_edit &= on;
+                }
+                if let Some(edit) = p.get("edit").and_then(Value::as_bool) {
+                    self.quick_edit = edit && self.quick_on;
+                }
+                if p.get("clear").and_then(Value::as_bool) == Some(true) {
+                    self.pending.push(PaintOp::QuickClear);
+                }
+                Ok(json!({"on": self.quick_on, "edit": self.quick_edit}))
             }
             "paint_uv" => self.control_paint_uv(p),
             "undo" => {

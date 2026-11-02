@@ -293,7 +293,7 @@ impl App {
             Vec3::new(c * l.x - s * l.z, l.y, s * l.x + c * l.z).normalize()
         };
         // `\\` shows the selected layer's mask on the model, if it has one.
-        let mask_view = if self.mask_view { self.selected.filter(|id| self.doc.find(*id).is_some_and(|n| n.mask.as_ref().is_some_and(|m| m.enabled))) } else { None };
+        let mask_view = if self.quick_edit { Some(crate::paint::QUICK_ID) } else if self.mask_view { self.selected.filter(|id| self.doc.find(*id).is_some_and(|n| n.mask.as_ref().is_some_and(|m| m.enabled))) } else { None };
         let (near, far) = self.camera.near_far();
         let globals = Globals {
             view_proj: self.camera.view_proj(rect.width() / rect.height().max(1.0)).to_cols_array_2d(),

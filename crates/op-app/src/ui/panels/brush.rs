@@ -2,6 +2,7 @@
 
 use super::{hint, section, slider_row};
 use crate::ui::theme;
+use crate::paint::PaintOp;
 use crate::{App, Tool};
 
 /// Names of the stamp shapes, in the order the shaders number them.
@@ -52,6 +53,17 @@ impl App {
             if self.tool == Tool::Clone {
                 hint(ui, "Ctrl+click to choose where to copy from, then paint. The offset stays until you pick a new source.");
             }
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.quick_on, "Quick mask (Y)").on_hover_text("Protect areas: while on, paint only lands where the quick mask is free.");
+                if self.quick_on {
+                    ui.checkbox(&mut self.quick_edit, "Edit (U)").on_hover_text("Strokes paint the quick mask instead of the layer: paint protects, the eraser frees.");
+                    if ui.button("Clear").on_hover_text("Free the whole quick mask").clicked() {
+                        self.pending.push(PaintOp::QuickClear);
+                    }
+                } else {
+                    self.quick_edit = false;
+                }
+            });
             slider_row(ui, "Size", &mut self.brush.radius_pts, 2.0..=300.0);
             slider_row(ui, "Hardness", &mut self.brush.hardness, 0.0..=1.0);
             slider_row(ui, "Flow", &mut self.brush.opacity, 0.0..=1.0).on_hover_text("Opacity of each dab: overlapping dabs build up");

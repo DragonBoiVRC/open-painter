@@ -1237,7 +1237,7 @@ impl ViewportGpu {
 mod tests {
     use super::*;
     use crate::camera::OrbitCamera;
-    use crate::paint::{Stamp, Target};
+    use crate::paint::{Stamp, Target, QUICK_ID};
     use glam::Vec3;
     use op_core::{BlendMode, FillParams, Mask, NodeKind};
 
@@ -1668,6 +1668,37 @@ mod tests {
         let m = rig.metal();
         assert!(texel_rg(&m, (0.375, 0.375)).0 > 250, "revealed inside");
         assert_eq!(texel_rg(&m, (0.1, 0.1)).0, 0, "hidden outside");
+    }
+
+    /// Paint only lands where the quick mask is free, whatever tool made the marks.
+    #[test]
+    fn the_quick_mask_protects_what_it_covers() {
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let layer = doc.add(None, None, "paint", NodeKind::Paint);
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let square = |u: f32| {
+            let (a, b, c, d) = ([u, 0.25], [u + 0.1, 0.25], [u + 0.1, 0.35], [u, 0.35]);
+            vec![a, b, c, a, c, d]
+        };
+        let fill = |layer, target, uvs, v| PaintOp::Fill { layer, target, uvs, color: [1.0, 0.0, 0.0], values: [v, 0.0, 1.0, 0.0], enables: [0.0, 1.0, 0.0, 0.0], emissive: [0.0; 4], opacity: [0.0; 2] };
+        // Protect the left square (paint 0 into the quick mask), then fill both squares.
+        rig.run(&doc, &[
+            PaintOp::QuickMask { on: true },
+            PaintOp::BeginStroke { layer: QUICK_ID, target: Target::Mask },
+            fill(QUICK_ID, Target::Mask, square(0.1), 0.0),
+            PaintOp::EndStroke,
+        ]);
+        let both: Vec<[f32; 2]> = square(0.1).into_iter().chain(square(0.5)).collect();
+        rig.run(&doc, &[PaintOp::BeginStroke { layer, target: Target::Content }, fill(layer, Target::Content, both.clone(), 0.7), PaintOp::EndStroke]);
+        rig.run(&doc, &[]);
+        let m = rig.metal();
+        assert_eq!(texel_rg(&m, (0.13, 0.27)).1, 0, "the protected square stays empty");
+        assert!(texel_rg(&m, (0.53, 0.27)).1 > 200, "the free square is painted");
+        // Switched off, paint lands everywhere.
+        rig.run(&doc, &[PaintOp::QuickMask { on: false }, PaintOp::BeginStroke { layer, target: Target::Content }, fill(layer, Target::Content, both, 0.7), PaintOp::EndStroke]);
+        rig.run(&doc, &[]);
+        assert!(texel_rg(&rig.metal(), (0.13, 0.27)).1 > 200, "protection is off");
     }
 
     /// A fill dragged over several frames is one stroke: it stays open between frames and one undo

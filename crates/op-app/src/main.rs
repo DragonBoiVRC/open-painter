@@ -569,6 +569,11 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    /// Quick mask: paint only lands where it is free (`quick_on`), and strokes edit it instead of a layer (`quick_edit`).
+    quick_on: bool,
+    quick_edit: bool,
+    /// The (set, state) last sent to the GPU, so the state is sent again only when it changes.
+    quick_sent: Option<(usize, bool)>,
     /// The triangles (by the index of their first corner) the user has hidden, mirroring the GPU's
     /// hidden-parts mask so clicks do not land on them.
     hidden_tris: std::collections::HashSet<usize>,
@@ -775,6 +780,9 @@ impl App {
             pick_id_for: None,
             hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
+            quick_on: false,
+            quick_edit: false,
+            quick_sent: None,
             recent_colors: Vec::new(),
             paint_through: false,
             paint_backfaces: false,
@@ -911,6 +919,7 @@ impl App {
     }
 
     fn new_project(&mut self) {
+        (self.quick_on, self.quick_edit, self.quick_sent) = (false, false, None);
         self.drop_project_textures();
         self.init_sets();
         self.set_view(View::Shaded);
@@ -949,6 +958,7 @@ impl App {
     }
 
     fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {
+        (self.quick_on, self.quick_edit, self.quick_sent) = (false, false, None);
         self.drop_project_textures();
         self.udim = p.udim;
         // The project's textures join the library (the id is the content hash, so a mismatch is ignored).
@@ -1683,6 +1693,9 @@ impl App {
 
     /// The layer and channel set the brush would write to right now.
     fn paint_target(&self) -> Result<(NodeId, Target), &'static str> {
+        if self.quick_edit {
+            return Ok((paint::QUICK_ID, Target::Mask));
+        }
         let node = self.selected.and_then(|id| self.doc.find(id)).ok_or("Select a layer to paint on")?;
         match self.target {
             Target::Mask if node.mask.as_ref().is_some_and(|m| m.generator.is_some()) => {
@@ -1703,6 +1716,9 @@ impl App {
 
     /// What the selected layer's mask held before any painting (white if there is none).
     fn mask_start_value(&self) -> f32 {
+        if self.quick_edit {
+            return 1.0; // the quick mask starts free: strokes protect, the eraser frees again
+        }
         let white = self.selected.and_then(|id| self.doc.find(id)).and_then(|n| n.mask.as_ref()).is_none_or(|m| m.init_white);
         if white { 1.0 } else { 0.0 }
     }
@@ -2230,6 +2246,10 @@ impl App {
         }
         self.stroke_was_active = self.stroke.active;
         ops.splice(0..0, std::mem::take(&mut self.pending));
+        if self.quick_sent != Some((self.active, self.quick_on)) {
+            ops.insert(0, PaintOp::QuickMask { on: self.quick_on });
+            self.quick_sent = Some((self.active, self.quick_on));
+        }
         let mut batches = vec![viewport::SetBatch { tile: None, set: self.active, doc: self.doc.clone(), ops }];
         for (tile, op) in std::mem::take(&mut self.pending_tiles) {
             batches.push(viewport::SetBatch { tile: Some(tile), set: self.active, doc: self.doc.clone(), ops: vec![op] });
@@ -2660,6 +2680,14 @@ impl App {
         }
         if ui.input(|i| i.key_pressed(Key::F12)) {
             self.save_viewport_image();
+        }
+        if ui.input(|i| i.key_pressed(Key::Y) && !i.modifiers.any()) {
+            self.quick_on = !self.quick_on;
+            self.quick_edit = self.quick_on;
+            self.status = if self.quick_on { "Quick mask on: paint to protect areas (the eraser frees them). Y leaves it, U toggles editing.".into() } else { "Quick mask off.".into() };
+        }
+        if ui.input(|i| i.key_pressed(Key::U) && !i.modifiers.any()) && self.quick_on {
+            self.quick_edit = !self.quick_edit;
         }
         if ui.input(|i| i.key_pressed(Key::W) && !i.modifiers.any()) {
             self.show_wireframe = !self.show_wireframe;
