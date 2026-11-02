@@ -958,10 +958,8 @@ impl PaintGpu {
         let store = &mut self.store;
         walk(&doc.nodes, &mut |n| {
             if matches!(n.kind, NodeKind::Paint) {
-                let g = store.entry(n.id).or_default();
-                if g.content.is_none() {
-                    g.content = Some(Layer::new_paint(device, size)); // wgpu zero-initialises
-                }
+                // Paint textures are made when first written to (`ensure_content`): an empty layer costs nothing.
+                store.entry(n.id).or_default();
             }
             if let Some(m) = &n.mask {
                 let g = store.entry(n.id).or_default();
@@ -977,6 +975,14 @@ impl PaintGpu {
                 }
             }
         });
+    }
+
+    /// Give a paint layer its textures (zeroed by wgpu) the first time something writes to it.
+    fn ensure_content(&mut self, device: &wgpu::Device, layer: NodeId) {
+        let size = self.size;
+        if let Some(g) = self.store.get_mut(&layer).filter(|g| g.content.is_none()) {
+            g.content = Some(Layer::new_paint(device, size));
+        }
     }
 
     fn gc(&mut self, doc: &Document, keep: &[NodeId]) {
@@ -1416,6 +1422,16 @@ impl PaintGpu {
         self.ensure_store(device, encoder, doc);
         let mut dirty = false;
         for op in ops {
+            if let PaintOp::BeginStroke { layer, target: Target::Content }
+            | PaintOp::Stamps { layer, target: Target::Content, .. }
+            | PaintOp::Stamps2d { layer, target: Target::Content, .. }
+            | PaintOp::Fill { layer, target: Target::Content, .. }
+            | PaintOp::Clear { layer, target: Target::Content }
+            | PaintOp::Erase { layer, .. }
+            | PaintOp::Smudge { layer, .. } = op
+            {
+                self.ensure_content(device, *layer);
+            }
             match op {
                 PaintOp::BeginStroke { layer, target } => {
                     self.close_stroke(device, encoder);
@@ -1488,6 +1504,9 @@ impl PaintGpu {
                             continue;
                         }
                         let size = self.size;
+                        if self.store.get(from).is_some_and(|g| g.content.is_some()) {
+                            self.ensure_content(device, *to);
+                        }
                         let Some(src) = self.store.remove(from) else { continue };
                         if let Some(dst) = self.store.get_mut(to) {
                             if let (Some(s), Some(d)) = (&src.content, &dst.content) {
@@ -1548,6 +1567,9 @@ impl PaintGpu {
                 PaintOp::Load { size, blobs } => {
                     self.reset(device, encoder, doc, *size);
                     for b in blobs {
+                        if b.kind != BlobKind::Mask {
+                            self.ensure_content(device, b.node);
+                        }
                         self.upload(device, encoder, b);
                     }
                     dirty = true;
