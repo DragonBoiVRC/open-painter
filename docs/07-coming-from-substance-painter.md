@@ -74,5 +74,15 @@ maps what you know onto what is here, and says plainly what is not here yet.
 - Brush alpha and stencils: pick an image from the texture library in Properties - Brush ("Image and stencil"). The Image stamp shapes each dab; a stencil is laid over the screen and paint only lands where it is bright. Tick "Move it in the viewport" to drag and scroll it into place.
 - Projection (J) paints the stencil picture onto the model through the brush, using the stencil placement above.
 - Filters (blur, sharpen, invert, levels, directional blur, warp, threshold, pixelate, hue/saturation) are listed under Properties - Layer for paint layers and groups; they reshape what the layer puts down without touching the paint. Fill layers have none, as they are constants.
-- Not here yet: more filters and effects (slope blur, gradient map, ...), anchor points,
-  and path tracing.
+- Quick mask (Y): protect areas so paint only lands where the quick mask is free; U edits it with the brush (paint protects, the eraser frees). It covers strokes, erase, smudge and fills on layer content and masks. It is a working aid: it is not saved with the project.
+- Geometry mask (8): the Fill tool on the selected layer's mask over mesh parts, so the layer shows only on the parts you click (a layer without a mask gets a black one).
+- Lasso, Path and Spray: Lasso (drag an outline) and Path (click corners, Enter or double-click closes) fill everything inside; in the UV view the outline is filled exactly, in the 3D view every region it covers is filled (coarse on dense meshes). Spray scatters small dots around the brush.
+- Decals: a fill layer with the Decal projection puts its picture through a frame on the surface (Width, Height, Turn, Depth; "Place on model" then click). It needs the Position and World space normal maps baked. The Text section of Properties - Brush renders text (built-in or installed fonts, plain left-to-right layout) as a brush stamp, a stencil or a decal.
+- Anchors: give a layer an Anchor name and a mask higher in the stack can follow one channel of the stack as it was there (colour brightness, metallic, roughness, height, coverage): Mask > Follows anchor.
+- More filters: Posterize, Brightness / contrast, Grayscale and Edge detect.
+- More content: 46 base materials, 30 smart materials (with the fabrics), 22 brush presets and 12 brush shapes (triangle, star, cross, ring, hexagon and blot are new).
+- Models: PLY and STL import; a model without UVs gets a rough box layout; File > Reimport model reads the file again keeping all paint (the texture sets must match).
+- View: bloom, sharpen, vignette and grain (Display Settings, Look), saved camera positions per model, and a path-traced render preview (View > Render preview, F10; CPU, refines in the background, can be saved as PNG).
+- Interface: four brightness levels and seven accent colours (Window > Appearance), a start window, and an estimate of GPU memory in the status bar. Empty paint layers take no GPU memory until you paint on them.
+- Agents: `op-app --control <port>` and `op-cli mcp` let scripts and AI agents drive the program; see docs/08-agent-control.md.
+- Not here yet: more PBR channels (clear coat, sheen, anisotropy, subsurface, transmission, ambient occlusion and specular level as paintable channels), depth of field and displacement in the viewport, a shortcut editor, translations, COLLADA, USD and Alembic import, slope blur and gradient map filters, and a scripting API beyond the control channel.

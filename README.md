@@ -6,11 +6,11 @@ baked mesh maps, height-to-normal painting, UDIM tiles and export presets.
 
 ## Features
 
-- Import FBX (binary, multi-material), OBJ and glTF; each material becomes a texture set.
+- Import FBX (binary, multi-material), OBJ, glTF, PLY and STL; each material becomes a texture set (meshes without UVs get a rough layout).
 - Layer stack with groups, blend modes, fill and paint layers, masks and generated masks.
 - Brush painting in 3D (projective) and in the 2D UV view, with Base color, Metallic, Roughness,
   Height, Emissive and Opacity channels; height becomes a tangent-space normal map.
-- Paint, erase, smudge, clone, projection and fill tools; image-tip brushes, stencils, pen pressure,
+- Paint, erase, smudge, clone, projection, fill, lasso, path, spray and decal tools, quick mask, geometry masks and anchor-driven masks; image-tip brushes, stencils, pen pressure,
   stroke opacity vs flow, lazy mouse and saved brush presets.
 - Per-layer colour adjustment, filters (blur, sharpen, levels, warp, ...), per-channel blend modes and
   fill layers that project textures triplanar or along an axis.
@@ -61,11 +61,12 @@ from the workflow run's artifacts, or from the release page for tagged versions.
 |---|---|
 | `op-core` | document model, layer stack, blending reference, normals from height |
 | `op-mesh` | mesh formats (FBX, OBJ, glTF), texture sets, UDIM tiles |
-| `op-bake` | CPU ray baker |
+| `op-bake` | CPU ray baker and path-traced render preview |
 | `op-proc` | procedural mask graphs |
 | `op-export` | export presets and texture writers |
 | `op-project` | `.opproj` project files |
 | `op-app` | the application |
+| `op-cli` | agent control: `call` and an MCP server for a running `op-app --control` |
 
 See `docs/` for the design notes and file-format write-ups.
 

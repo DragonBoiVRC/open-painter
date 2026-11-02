@@ -20,3 +20,10 @@ MCP config (Claude Code: `claude mcp add open-painter -- /path/to/op-cli mcp`). 
 the same code as the UI, so undo, thumbnails and the modified flag behave the same. Strokes are
 painted in UV space (`paint_uv`); there is no 3D-view painting over the channel yet. Layers are
 edited as JSON: `get_layer` shows a layer, `set_layer` merges a partial one into it.
+
+Commands include layers (`add_layer`, `set_layer`, `get_layer`), painting (`paint_uv`, `fill_uv`,
+`lasso_uv`, `set_brush`, `quick_mask`, `geometry_mask`), images (`import_image`, `text_image`,
+`set_texture`, `add_decal`), bake and export, `reimport_mesh`, the look (`camera`, `set_display`,
+`appearance`) and pictures (`screenshot` of the 3D view, `render` a path-traced preview).
+`info` reports an estimate of GPU memory in use as `gpu_bytes`. Commands run a few frames apart, so
+an `export` or `screenshot` always sees the edits before it.
