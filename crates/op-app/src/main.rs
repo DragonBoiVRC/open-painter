@@ -14,6 +14,7 @@ mod lasso;
 mod paint;
 mod normal_gpu;
 mod picker;
+mod preview;
 mod procgen;
 mod sets;
 mod text;
@@ -595,6 +596,8 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    /// The render preview window, while open.
+    render_ui: Option<preview::RenderUi>,
     /// Saved camera positions by model name (kept between sessions with the display settings).
     saved_cameras: HashMap<String, Vec<camera::SavedCamera>>,
     /// The model file the mesh was loaded from, for Reimport.
@@ -827,6 +830,7 @@ impl App {
             pick_id_for: None,
             hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
+            render_ui: None,
             saved_cameras: display.cameras.clone(),
             mesh_source: None,
             text_ui: Default::default(),
@@ -2490,6 +2494,7 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.render_window(ctx);
         if self.start_window {
             let mut close = false;
             let mut open_dialog = false;
@@ -2846,6 +2851,9 @@ impl App {
         if ui.input(|i| i.key_pressed(Key::Backslash) && !i.modifiers.any()) {
             self.mask_view = !self.mask_view;
             self.status = if self.mask_view { "Showing the selected layer's mask on the model (\\ to go back).".into() } else { String::new() };
+        }
+        if ui.input(|i| i.key_pressed(Key::F10)) {
+            self.start_render();
         }
         if ui.input(|i| i.key_pressed(Key::F12)) {
             self.save_viewport_image();

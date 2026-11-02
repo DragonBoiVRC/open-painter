@@ -173,6 +173,10 @@ impl App {
                         self.frame_model();
                         ui.close();
                     }
+                    if ui.add(egui::Button::new("Render preview (path traced)").shortcut_text("F10")).clicked() {
+                        self.start_render();
+                        ui.close();
+                    }
                     ui.separator();
                     ui.label(egui::RichText::new("Shading").color(theme::text_dim()).small());
                     let current = self.view;

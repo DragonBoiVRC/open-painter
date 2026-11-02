@@ -7,6 +7,7 @@
 
 mod bvh;
 mod geom;
+pub mod render;
 
 use bvh::{Bvh, Ray};
 use geom::Geometry;
