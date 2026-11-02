@@ -837,6 +837,11 @@ impl ViewportGpu {
         self.queued.push(batch);
     }
 
+    /// Roughly how much GPU memory the texture sets hold (see `PaintGpu::memory_bytes`).
+    pub fn memory_bytes(&self) -> u64 {
+        self.sets.iter().flat_map(|s| s.tiles.iter()).map(PaintGpu::memory_bytes).sum()
+    }
+
     /// Forget queued batches (they belong to a mesh that was replaced).
     pub fn clear_queue(&mut self) {
         self.queued.clear();

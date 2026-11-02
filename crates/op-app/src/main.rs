@@ -669,6 +669,8 @@ struct App {
     texture_import: Option<textures::TextureImport>,
     /// Where the last texture import went: the shared library (true) or just the project.
     import_global: bool,
+    /// Estimated GPU memory of the texture sets, refreshed twice a second.
+    gpu_bytes: (Instant, u64),
     /// Messages about the GPU running short of memory, raised while uploading pictures (which only
     /// has `&self`) and shown in the status bar by `housekeeping`.
     gpu_notices: std::cell::RefCell<Vec<String>>,
@@ -896,6 +898,7 @@ impl App {
             texture_import: None,
             import_global: false,
             gpu_notices: Default::default(),
+            gpu_bytes: (Instant::now(), 0),
             control: None,
             control_wait: 0,
         };

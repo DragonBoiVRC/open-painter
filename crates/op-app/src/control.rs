@@ -191,6 +191,7 @@ impl App {
                 "triangles": self.mesh.indices.len() / 3, "texture_size": self.tex_size, "active_set": self.active,
                 "sets": (0..self.set_ranges_len()).map(|i| self.set_name(i)).collect::<Vec<_>>(),
                 "layers": self.doc.nodes.iter().map(|n| node_json(n, self.selected)).collect::<Vec<_>>(),
+                "gpu_bytes": self.render_state.renderer.read().callback_resources.get::<ViewportGpu>().map_or(0, |g| g.memory_bytes()),
                 "selected": self.selected, "tool": if self.tool == Tool::Erase { "erase" } else { "paint" },
                 "paint_on": if self.target == Target::Mask { "mask" } else { "content" },
                 "images": self.assets.iter().map(|a| json!({"id": a.id, "name": a.name})).collect::<Vec<_>>(),

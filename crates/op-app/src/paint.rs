@@ -1385,6 +1385,17 @@ impl PaintGpu {
     }
 
     /// Bytes of GPU memory the undo snapshots hold.
+    /// Roughly how much GPU memory this store holds: layer textures (only those made so far),
+    /// masks, the composite output, working buffers and undo snapshots.
+    pub fn memory_bytes(&self) -> u64 {
+        let px = self.size as u64 * self.size as u64;
+        let full = px * (8 + 2 + 2 + 2 + 8 + 2 + 4);
+        let content: u64 = self.store.values().map(|g| g.content.is_some() as u64 * Layer::bytes(self.size) + g.mask.is_some() as u64 * px).sum();
+        let work = (self.stroke_buf.is_some() as u64 + self.scratch.is_some() as u64) * full
+            + (self.stroke_mask_buf.is_some() as u64 + self.protect_mask_scratch.is_some() as u64) * px;
+        full + px + content + work + self.compositor.scratch_bytes() + self.history_bytes()
+    }
+
     pub fn history_bytes(&self) -> u64 {
         self.undo.iter().chain(&self.redo).map(|s| s.bytes(self.size)).sum()
     }

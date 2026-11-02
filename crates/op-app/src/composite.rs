@@ -396,6 +396,11 @@ impl Compositor {
         self.tile = tile;
     }
 
+    /// GPU bytes held by the pooled working layers and recorded anchors.
+    pub fn scratch_bytes(&self) -> u64 {
+        (self.pool.len() + self.anchors.len()) as u64 * self.size as u64 * self.size as u64 * (8 + 2 + 2 + 2 + 8 + 2 + 4)
+    }
+
     /// Drop the pooled working layers; they are allocated again on the next composite.
     pub fn release_scratch(&mut self) {
         self.pool.clear();

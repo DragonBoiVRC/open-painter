@@ -2,6 +2,7 @@
 
 use super::dock::{self, Tab};
 use super::theme;
+use std::time::{Duration, Instant};
 use crate::{App, Pending, PathDialog, Todo, Tool};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_phosphor::regular as ph;
@@ -242,7 +243,20 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.label(egui::RichText::new(self.status.lines().next().unwrap_or("")).color(theme::text_dim()).size(11.5));
+                    if self.gpu_bytes.0.elapsed() > Duration::from_millis(500) {
+                        let bytes = self.render_state.renderer.read().callback_resources.get::<crate::viewport::ViewportGpu>().map_or(0, |g| g.memory_bytes());
+                        self.gpu_bytes = (Instant::now(), bytes);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mb = self.gpu_bytes.1 as f64 / (1 << 20) as f64;
+                        let heavy = mb > 2048.0;
+                        ui.label(
+                            egui::RichText::new(format!("GPU ~{}", if mb >= 1024.0 { format!("{:.1} GB", mb / 1024.0) } else { format!("{mb:.0} MB") }))
+                                .color(if heavy { theme::warn() } else { theme::text_dim() })
+                                .size(11.5),
+                        )
+                        .on_hover_text("Estimated memory of the layers, masks, undo history and working buffers. Empty paint layers cost nothing until you paint on them; a lower texture size or fewer layers frees the rest.");
+                        ui.label(egui::RichText::new("|").color(theme::text_dim()).size(11.5));
                         let baked = if self.baked0().is_empty() { String::new() } else { format!("{} baked  |  ", self.baked0().len()) };
                         let tris = self.mesh.indices.len() / 3;
                         ui.label(
