@@ -1620,6 +1620,6 @@ mod tests {
         let old: FillParams = serde_json::from_value(v).unwrap();
         assert_eq!((old.projection, old.sharpness), (Projection::Uv, 4.0));
         let codes: Vec<u32> = Projection::ALL.iter().map(|p| p.code()).collect();
-        assert_eq!(codes, [0, 1, 2, 3, 4]);
+        assert_eq!(codes, [0, 1, 2, 3, 4, 5]);
     }
 }
