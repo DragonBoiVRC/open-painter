@@ -2,6 +2,7 @@
 
 mod camera;
 mod composite;
+mod control;
 mod history;
 mod envmap;
 mod export_ui;
@@ -625,6 +626,8 @@ struct App {
     /// Messages about the GPU running short of memory, raised while uploading pictures (which only
     /// has `&self`) and shown in the status bar by `housekeeping`.
     gpu_notices: std::cell::RefCell<Vec<String>>,
+    /// Commands from the `--control` channel, when it is on.
+    control: Option<Receiver<control::Request>>,
 }
 
 fn is_project(p: &Path) -> bool {
@@ -632,7 +635,7 @@ fn is_project(p: &Path) -> bool {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>, control_port: Option<u16>) -> Self {
         let rs = cc.wgpu_render_state.clone().expect("wgpu backend required");
         // A GPU error should not close the app (and lose the session): note it and carry on. The
         // default handler panics.
@@ -831,6 +834,7 @@ impl App {
             texture_import: None,
             import_global: false,
             gpu_notices: Default::default(),
+            control: None,
         };
         let saved_export = export_ui::SavedExport::load();
         app.export.apply_saved(saved_export, &app.presets);
@@ -841,6 +845,15 @@ impl App {
         }
         app.set_mesh(Mesh::uv_sphere(1.0, 96, 48), "sphere".into());
         app.init_sets();
+        if let Some(port) = control_port {
+            match control::serve(port, cc.egui_ctx.clone()) {
+                Ok(rx) => {
+                    app.control = Some(rx);
+                    eprintln!("control channel listening on 127.0.0.1:{port}");
+                }
+                Err(e) => app.status = format!("Could not open the control channel on port {port}: {e}"),
+            }
+        }
         if let Some(p) = initial {
             if is_project(&p) {
                 app.open_path(&p);
@@ -2705,6 +2718,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.housekeeping(&ctx);
+        self.poll_control(&ctx);
 
         let raw_drops: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         let mut dropped = Vec::new();
@@ -2743,7 +2757,20 @@ fn main() -> eframe::Result {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_some() && std::env::var_os("OPEN_PAINTER_WAYLAND").is_none() {
         std::env::remove_var("WAYLAND_DISPLAY");
     }
-    let initial = std::env::args_os().nth(1).map(PathBuf::from);
+    let mut initial = None;
+    let mut control_port = None;
+    let mut args = std::env::args_os().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--control" {
+            control_port = args.next().and_then(|p| p.to_str().and_then(|s| s.parse::<u16>().ok()));
+            if control_port.is_none() {
+                eprintln!("--control needs a port number");
+                std::process::exit(2);
+            }
+        } else if initial.is_none() {
+            initial = Some(PathBuf::from(a));
+        }
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 850.0])
@@ -2754,7 +2781,7 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
-    eframe::run_native("open-painter", options, Box::new(|cc| Ok(Box::new(App::new(cc, initial)))))
+    eframe::run_native("open-painter", options, Box::new(|cc| Ok(Box::new(App::new(cc, initial, control_port)))))
 }
 
 #[cfg(test)]

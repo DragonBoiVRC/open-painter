@@ -22,6 +22,7 @@ baked mesh maps, height-to-normal painting, UDIM tiles and export presets.
 - Brush shapes, rotation, jitter and mirror symmetry; HDRI or procedural environment lighting, wireframe,
   anti-aliasing and single-channel views.
 - Dockable interface; the layout is remembered.
+- Agent control: a JSON channel (`op-app --control`) and an MCP server (`op-cli mcp`); see [docs/08-agent-control.md](docs/08-agent-control.md).
 
 Coming from Substance Painter? See [docs/07-coming-from-substance-painter.md](docs/07-coming-from-substance-painter.md).
 

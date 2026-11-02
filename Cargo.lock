@@ -2029,6 +2029,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "op-cli"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "op-core"
 version = "0.0.1"
 dependencies = [
