@@ -823,6 +823,10 @@ impl ViewportGpu {
         self.images.lock().expect("image library lock").brush = pictures;
     }
 
+    pub fn keep_images(&self, keep: &std::collections::HashSet<String>) {
+        self.images.lock().expect("image library lock").retain(keep);
+    }
+
     pub fn has_image(&self, id: &str) -> bool {
         self.images.lock().expect("image library lock").contains(id)
     }
@@ -840,6 +844,32 @@ impl ViewportGpu {
     /// Roughly how much GPU memory the texture sets hold (see `PaintGpu::memory_bytes`).
     pub fn memory_bytes(&self) -> u64 {
         self.sets.iter().flat_map(|s| s.tiles.iter()).map(PaintGpu::memory_bytes).sum()
+    }
+
+    /// Run the queued batches now, outside a frame, for a read-back that must see them.
+    pub fn flush_queue(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let Some(off) = self.offscreen.as_ref().filter(|_| !self.queued.is_empty()) else { return };
+        let view = StampView {
+            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            camera_pos: [0.0; 4],
+            forward: [0.0, 0.0, 1.0, 0.0],
+            size_px: off.size,
+            near_far: [0.1, 100.0],
+            depth: &off.depth_view,
+            uv: &off.uv_view,
+            through: [false; 2],
+            clip: [0.0; 4],
+        };
+        let bufs = match (&self.vbuf, &self.ibuf) {
+            (Some(v), Some(i)) => Some((v, i)),
+            _ => None,
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        for b in &self.queued {
+            apply_batch(&mut self.sets, bufs, device, queue, &mut encoder, b, &view);
+        }
+        queue.submit([encoder.finish()]);
+        self.queued.clear();
     }
 
     /// Forget queued batches (they belong to a mesh that was replaced).

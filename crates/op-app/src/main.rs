@@ -1150,13 +1150,14 @@ impl App {
                 (&st.doc, &st.bakes)
             };
             let untouched = i != self.active && self.parked.get(i).and_then(Option::as_ref).is_some_and(|s| !s.materialized);
+            let saved = if untouched { self.parked[i].as_ref().and_then(|s| s.saved.clone()).unwrap_or_default() } else { Vec::new() };
             let texture_size = if untouched { self.parked[i].as_ref().map_or(unit.size(), |s| s.tex_size) } else { unit.size() };
             let tiles = unit
                 .tiles
                 .iter()
                 .enumerate()
                 .map(|(t, paint)| op_project::TileData {
-                    blobs: if untouched { Vec::new() } else { paint.capture_blobs(&self.render_state.device, &self.render_state.queue, doc) },
+                    blobs: if untouched { saved.get(t).cloned().unwrap_or_default() } else { paint.capture_blobs(&self.render_state.device, &self.render_state.queue, doc) },
                     baked: bakes.get(t).map(|b| (*b.baked).clone()).unwrap_or_default(),
                 })
                 .collect();

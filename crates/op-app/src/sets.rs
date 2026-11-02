@@ -54,6 +54,8 @@ pub struct SetState {
     /// False while the set's paint store is held at the small placeholder size: nothing has been
     /// painted in it, so it looks the same and costs almost no GPU memory.
     pub materialized: bool,
+    /// The set's paint (per tile) while it is not on the GPU: kept in memory, uploaded when opened.
+    pub saved: Option<Vec<Vec<op_project::TextureBlob>>>,
 }
 
 impl SetState {
@@ -61,7 +63,7 @@ impl SetState {
     pub fn restored(doc: Document, tex_size: u32, baked: Vec<HashMap<MeshMap, BakedMap>>) -> Self {
         let selected = doc.nodes.last().map(|n| n.id);
         let bakes = baked.into_iter().map(|b| TileBake { baked: Arc::new(b), rev: 1 }).collect();
-        Self { doc, selected, undo: Vec::new(), redo: Vec::new(), bakes, tex_size, collapsed: HashSet::new(), materialized: true }
+        Self { doc, selected, undo: Vec::new(), redo: Vec::new(), bakes, tex_size, collapsed: HashSet::new(), materialized: true, saved: None }
     }
 
     /// A new set with the default material layer.
@@ -77,6 +79,7 @@ impl SetState {
             tex_size,
             collapsed: HashSet::new(),
             materialized: false,
+            saved: None,
         }
     }
 }
@@ -189,6 +192,7 @@ impl App {
             tex_size: self.tex_size,
             collapsed: std::mem::take(&mut self.collapsed),
             materialized: true,
+            saved: None,
         }
     }
 
@@ -320,9 +324,10 @@ impl App {
         let active = active.min(states.len().saturating_sub(1));
         let mut states = states;
         for (set, ((size, blobs), st)) in loads.into_iter().zip(states.iter_mut()).enumerate() {
-            if set != active && blobs.iter().all(|b| b.is_empty()) {
-                // Nothing painted: keep it small until it is opened.
+            if set != active {
+                // Not open: keep it small (and its paint in memory) until it is opened.
                 st.materialized = false;
+                st.saved = blobs.iter().any(|b| !b.is_empty()).then_some(blobs);
                 self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
             } else {
                 // Each tile gets its own textures and baked normal.
@@ -339,6 +344,7 @@ impl App {
         let live = self.parked[active].take().expect("the active set is present");
         self.put_live(live);
         self.active = active;
+        self.trim_images();
     }
 
     /// Make the texture set under `pos` (a point in the viewport `rect`) the active one.
@@ -432,18 +438,18 @@ impl App {
         self.flush_pending();
         self.restart_procgen();
         self.ensure_materialized(i);
-        let untouched = self.undo.is_empty() && self.doc == Document::with_default_material();
+        let quiet = self.undo.is_empty() && self.redo.is_empty();
         let mut old = self.take_live();
-        if untouched {
-            // Nothing was done here: give its memory back.
-            old.materialized = false;
-            let (a, d) = (self.active, old.doc.clone());
-            self.gpu_rebuild(a, &d, PLACEHOLDER_SIZE);
+        if quiet {
+            // Nothing was done here since it was loaded: give its memory back.
+            let a = self.active;
+            self.release_state(a, &mut old);
         }
         self.parked[self.active] = Some(old);
         let next = self.parked[i].take().expect("a parked set has its state");
         self.put_live(next);
         self.active = i;
+        self.trim_images();
         let view = self.view;
         self.set_view(view);
         // Working on a set you cannot see is confusing, so choosing it brings it back.
@@ -451,8 +457,19 @@ impl App {
         self.status = format!("Texture set '{}'.", self.set_name(i));
     }
 
+    /// Free the pictures no open set uses (parked sets at the placeholder size draw without them).
+    fn trim_images(&self) {
+        let open = self.parked.iter().flatten().filter(|s| s.materialized).flat_map(|s| s.doc.texture_ids());
+        let keep: HashSet<String> = open.chain(self.doc.texture_ids()).collect();
+        if let Some(gpu) = self.render_state.renderer.read().callback_resources.get::<ViewportGpu>() {
+            gpu.keep_images(&keep);
+        }
+    }
+
     fn gpu_rebuild(&self, set: usize, doc: &Document, size: u32) {
-        self.ensure_doc_images(doc);
+        if size != PLACEHOLDER_SIZE {
+            self.ensure_doc_images(doc);
+        }
         if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
             gpu.rebuild_set(&self.render_state.device, &self.render_state.queue, set, doc, size);
         }
@@ -465,7 +482,12 @@ impl App {
             return;
         }
         let (doc, size) = (st.doc.clone(), st.tex_size);
+        let saved = self.parked[set].as_mut().and_then(|st| st.saved.take());
+        let loaded = saved.is_some();
         self.gpu_rebuild(set, &doc, size);
+        for (t, blobs) in saved.into_iter().flatten().enumerate() {
+            self.enqueue(SetBatch { tile: Some(t), set, doc: doc.clone(), ops: vec![PaintOp::Load { size, blobs }] });
+        }
         let extents: Vec<BakeFrame> = (0..self.parked[set].as_ref().map_or(0, |st| st.bakes.len())).map(|t| self.bake_extent(set, t)).collect();
         let ops: Vec<(usize, PaintOp)> = self.parked[set]
             .as_ref()
@@ -474,21 +496,41 @@ impl App {
         for (t, op) in ops {
             self.enqueue(SetBatch { tile: Some(t), set, doc: doc.clone(), ops: vec![op] });
         }
+        if loaded {
+            // Callers read the set back at once, so the upload must not wait for the next frame.
+            self.flush_gpu();
+        }
         if let Some(Some(st)) = self.parked.get_mut(set) {
             st.materialized = true;
         }
     }
 
+    fn flush_gpu(&self) {
+        if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
+            gpu.flush_queue(&self.render_state.device, &self.render_state.queue);
+        }
+    }
+
+    /// Give a set's GPU memory back, keeping its paint in memory (`st` is that set's state).
+    fn release_state(&mut self, set: usize, st: &mut SetState) {
+        self.flush_gpu();
+        st.saved = (st.doc != Document::with_default_material()).then(|| {
+            let renderer = self.render_state.renderer.read();
+            let tiles = renderer.callback_resources.get::<ViewportGpu>().and_then(|g| g.sets.get(set)).map(|u| &u.tiles[..]).unwrap_or_default();
+            tiles.iter().map(|p| p.capture_blobs(&self.render_state.device, &self.render_state.queue, &st.doc)).collect()
+        });
+        st.materialized = false;
+        self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
+    }
+
     /// Return a set that was materialised only for reading (export) to the placeholder size.
     pub(crate) fn release_if_untouched(&mut self, set: usize) {
-        let Some(Some(st)) = self.parked.get(set) else { return };
-        if st.materialized && st.undo.is_empty() && st.doc == Document::with_default_material() {
-            let doc = st.doc.clone();
-            self.gpu_rebuild(set, &doc, PLACEHOLDER_SIZE);
-            if let Some(Some(st)) = self.parked.get_mut(set) {
-                st.materialized = false;
-            }
+        let Some(mut st) = self.parked.get_mut(set).and_then(Option::take) else { return };
+        if st.materialized && st.undo.is_empty() && st.redo.is_empty() {
+            self.release_state(set, &mut st);
         }
+        self.parked[set] = Some(st);
+        self.trim_images();
     }
 
     /// Apply `f` to a set's state wherever it currently lives.

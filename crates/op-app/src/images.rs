@@ -119,6 +119,12 @@ impl ImageLibrary {
         self.failed.contains(id)
     }
 
+    /// Drop every picture not in `keep`, giving its GPU memory back (it re-uploads when next needed).
+    pub fn retain(&mut self, keep: &std::collections::HashSet<String>) {
+        self.map.retain(|id, _| keep.contains(id));
+        self.failed.clear();
+    }
+
     pub fn insert(&mut self, id: &str, image: GpuImage) {
         self.map.insert(id.to_string(), Arc::new(image));
     }
