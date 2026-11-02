@@ -751,6 +751,15 @@ impl ViewportGpu {
         }
     }
 
+    /// Shrink a set to a `preview`-sized picture of its composited look (see `PaintGpu::freeze`).
+    pub fn freeze_set(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, set: usize, doc: &Document, preview: u32) {
+        if let Some(s) = self.sets.get_mut(set) {
+            for p in &mut s.tiles {
+                p.freeze(device, queue, doc, preview);
+            }
+        }
+    }
+
     /// Build the edge lists the wireframe overlay draws: every edge once per tile of each set.
     fn build_wire_edges(&mut self, device: &wgpu::Device) {
         self.wire_edges = self

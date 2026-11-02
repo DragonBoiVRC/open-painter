@@ -365,7 +365,7 @@ pub struct PaintGpu {
     pipeline_smudge: wgpu::RenderPipeline,
     resample_layout: wgpu::BindGroupLayout,
     resample_sampler: wgpu::Sampler,
-    resample_pipelines: [wgpu::RenderPipeline; 3],
+    resample_pipelines: [wgpu::RenderPipeline; 4],
     pipeline_fill: wgpu::RenderPipeline,
     pipeline_fill_mask: wgpu::RenderPipeline,
     fill_layout: wgpu::BindGroupLayout,
@@ -747,8 +747,8 @@ impl PaintGpu {
                 cache: None,
             })
         };
-        // Colour (RGBA16F), two-channel values (RG8) and masks (R8).
-        let resample_pipelines = [make_resample(BASE_FORMAT), make_resample(VALUE_FORMAT), make_resample(MASK_FORMAT)];
+        // Colour (RGBA16F), two-channel values (RG8), masks (R8) and normals (RGBA8).
+        let resample_pipelines = [make_resample(BASE_FORMAT), make_resample(VALUE_FORMAT), make_resample(MASK_FORMAT), make_resample(crate::normal_gpu::NORMAL_FORMAT)];
         let plain_tex = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1187,9 +1187,9 @@ impl PaintGpu {
         }
     }
 
-    /// Resample `src` into a new texture of `size` (`kind`: 0 colour, 1 values, 2 mask).
+    /// Resample `src` into a new texture of `size` (`kind`: 0 colour, 1 values, 2 mask, 3 normal).
     fn resampled(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture, size: u32, kind: usize) -> wgpu::Texture {
-        let format = [BASE_FORMAT, VALUE_FORMAT, MASK_FORMAT][kind];
+        let format = [BASE_FORMAT, VALUE_FORMAT, MASK_FORMAT, crate::normal_gpu::NORMAL_FORMAT][kind];
         let dst = texture(device, "resampled", size, format);
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("resample_params"),
@@ -1264,6 +1264,42 @@ impl PaintGpu {
         self.compositor.set_size(size);
         self.last_doc = None;
         self.ensure_store(device, encoder, doc);
+    }
+
+    /// Keep only a `preview`-sized copy of the composited result, which is all the viewport needs of a
+    /// set that is not being edited. The paint and history are dropped (`rebuild` brings them back).
+    pub fn freeze(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, doc: &Document, preview: u32) {
+        if self.size <= preview {
+            return;
+        }
+        let mut enc = device.create_command_encoder(&Default::default());
+        let o = &self.output;
+        let output = Layer {
+            size: preview,
+            base: self.resampled(device, &mut enc, &o.base, preview, 0),
+            metal: self.resampled(device, &mut enc, &o.metal, preview, 1),
+            rough: self.resampled(device, &mut enc, &o.rough, preview, 1),
+            height: self.resampled(device, &mut enc, &o.height, preview, 1),
+            emissive: self.resampled(device, &mut enc, &o.emissive, preview, 0),
+            opacity: self.resampled(device, &mut enc, &o.opacity, preview, 1),
+            normal: self.resampled(device, &mut enc, &o.normal, preview, 3),
+        };
+        let hidden = self.resampled(device, &mut enc, &self.hidden, preview, 2);
+        self.store.clear();
+        self.undo.clear();
+        self.redo.clear();
+        self.scratch = None;
+        self.stroke_limit = None;
+        self.stroke_buf = None;
+        self.stroke_mask_buf = None;
+        self.compositor.release_scratch();
+        self.compositor.set_size(preview);
+        (self.size, self.output, self.hidden) = (preview, output, hidden);
+        self.normal.resize(device, preview);
+        self.normal.run(device, &mut enc, &self.output.height, &self.output.normal, doc.height_strength);
+        self.material_bind = Self::make_material_bind(device, &self.material_layout, &self.sampler, &self.output, &self.normal, &self.tile_buf, &self.hidden);
+        self.last_doc = None;
+        queue.submit([enc.finish()]);
     }
 
     /// Drop all paint and history; reallocate everything at `size`.

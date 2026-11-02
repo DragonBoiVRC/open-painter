@@ -17,6 +17,7 @@ mod picker;
 mod preview;
 mod procgen;
 mod sets;
+mod spill;
 mod text;
 mod textures;
 mod thumbs;
@@ -674,6 +675,8 @@ struct App {
     import_global: bool,
     /// Estimated GPU memory of the texture sets, refreshed twice a second.
     gpu_bytes: (Instant, u64),
+    /// Memory budgets and which texture sets were used when.
+    memory: sets::Memory,
     /// Messages about the GPU running short of memory, raised while uploading pictures (which only
     /// has `&self`) and shown in the status bar by `housekeeping`.
     gpu_notices: std::cell::RefCell<Vec<String>>,
@@ -903,6 +906,7 @@ impl App {
             import_global: false,
             gpu_notices: Default::default(),
             gpu_bytes: (Instant::now(), 0),
+            memory: sets::Memory::detect(),
             control: None,
             control_wait: 0,
         };
@@ -1150,7 +1154,7 @@ impl App {
                 (&st.doc, &st.bakes)
             };
             let untouched = i != self.active && self.parked.get(i).and_then(Option::as_ref).is_some_and(|s| !s.materialized);
-            let saved = if untouched { self.parked[i].as_ref().and_then(|s| s.saved.clone()).unwrap_or_default() } else { Vec::new() };
+            let saved = if untouched { self.parked[i].as_ref().and_then(|s| s.saved.as_ref()).map(|s| s.blobs().map_err(|e| format!("a texture set's paint could not be read back: {e}"))).transpose()?.unwrap_or_default() } else { Vec::new() };
             let texture_size = if untouched { self.parked[i].as_ref().map_or(unit.size(), |s| s.tex_size) } else { unit.size() };
             let tiles = unit
                 .tiles
@@ -1581,6 +1585,9 @@ impl App {
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(250)),
                 Err(mpsc::TryRecvError::Disconnected) => self.autosave_rx = None,
             }
+        }
+        if self.cache_step() {
+            ctx.request_repaint();
         }
         self.poll_picker(ctx);
         self.poll_texture_import(ctx);

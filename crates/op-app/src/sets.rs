@@ -3,6 +3,7 @@
 //! the `App` fields the rest of the program already uses; the others are parked here and swapped in
 //! when the user picks them.
 
+use crate::spill::Saved;
 use crate::viewport::{SetBatch, ViewportGpu};
 use crate::paint::ProjectionData;
 use crate::{App, Hist, PaintOp, DEFAULT_TEXTURE_SIZE};
@@ -13,6 +14,74 @@ use std::sync::Arc;
 
 /// Size of the paint store of a set nobody has touched.
 pub(crate) const PLACEHOLDER_SIZE: u32 = 64;
+/// Size of the picture of its finished look that a set keeps while it is not being edited.
+const PREVIEW_SIZE: u32 = 512;
+
+/// What the program keeps track of to stay inside the GPU and RAM: which sets were used when, which
+/// still need their preview made, and how much of each kind of memory paint may take.
+pub struct Memory {
+    clock: u64,
+    used_at: HashMap<usize, u64>,
+    /// Sets waiting for their preview picture, made one at a time after a project opens.
+    queue: Vec<usize>,
+    /// GPU bytes the texture sets may hold before the ones not in use are moved out.
+    gpu_budget: u64,
+    /// Bytes of paint kept in memory for sets off the GPU before the rest goes to disk.
+    ram_budget: u64,
+}
+
+impl Memory {
+    /// Budgets from the machine: half the video memory and half the free RAM. Either can be set with
+    /// `OPEN_PAINTER_GPU_BUDGET_MB` / `OPEN_PAINTER_RAM_BUDGET_MB`.
+    pub fn detect() -> Self {
+        let mb = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u64>().ok()).map(|v| v << 20);
+        let gpu_budget = mb("OPEN_PAINTER_GPU_BUDGET_MB").unwrap_or_else(|| detect_vram().unwrap_or(4 << 30) / 2);
+        let ram_budget = mb("OPEN_PAINTER_RAM_BUDGET_MB").unwrap_or_else(|| available_ram().unwrap_or(8 << 30) / 2);
+        remove_stale_spill(&crate::files::data_dir().join("spill"));
+        Self { clock: 0, used_at: HashMap::new(), queue: Vec::new(), gpu_budget, ram_budget }
+    }
+
+    fn touch(&mut self, set: usize) {
+        self.clock += 1;
+        self.used_at.insert(set, self.clock);
+    }
+
+    fn last_used(&self, set: usize) -> u64 {
+        self.used_at.get(&set).copied().unwrap_or(0)
+    }
+}
+
+/// Total video memory, if we can find out (NVIDIA's tool, or the kernel's AMD counters).
+fn detect_vram() -> Option<u64> {
+    if !cfg!(windows) {
+        let out = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"]).output().ok()?;
+        if let Some(mib) = String::from_utf8_lossy(&out.stdout).lines().next().and_then(|l| l.trim().parse::<u64>().ok()) {
+            return Some(mib << 20);
+        }
+        let dirs = std::fs::read_dir("/sys/class/drm").ok()?;
+        return dirs.flatten().filter_map(|d| std::fs::read_to_string(d.path().join("device/mem_info_vram_total")).ok()).filter_map(|t| t.trim().parse().ok()).max();
+    }
+    None
+}
+
+/// Delete spill files left by a copy of the program that is no longer running (names start with its pid).
+fn remove_stale_spill(dir: &std::path::Path) {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    for f in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let pid = f.file_name().to_string_lossy().split('-').next().map(str::to_owned);
+        if pid.is_some_and(|p| !std::path::Path::new("/proc").join(p).exists()) {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
+}
+
+fn available_ram() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = info.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?.trim().trim_end_matches("kB").trim().parse().ok()?;
+    Some(kb << 10)
+}
 
 /// Baked maps of one UV tile of a set, and a revision that changes whenever they do (generated
 /// masks regenerate when it moves).
@@ -55,7 +124,7 @@ pub struct SetState {
     /// painted in it, so it looks the same and costs almost no GPU memory.
     pub materialized: bool,
     /// The set's paint (per tile) while it is not on the GPU: kept in memory, uploaded when opened.
-    pub saved: Option<Vec<Vec<op_project::TextureBlob>>>,
+    pub saved: Option<Saved>,
 }
 
 impl SetState {
@@ -327,7 +396,7 @@ impl App {
             if set != active {
                 // Not open: keep it small (and its paint in memory) until it is opened.
                 st.materialized = false;
-                st.saved = blobs.iter().any(|b| !b.is_empty()).then_some(blobs);
+                st.saved = blobs.iter().any(|b| !b.is_empty()).then_some(Saved::Ram(blobs));
                 self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
             } else {
                 // Each tile gets its own textures and baked normal.
@@ -341,6 +410,8 @@ impl App {
             }
         }
         self.parked = states.into_iter().map(Some).collect();
+        self.memory.used_at.clear();
+        self.memory.queue = (0..self.parked.len()).rev().filter(|&i| i != active && self.parked[i].as_ref().is_some_and(|st| st.doc != Document::with_default_material())).collect();
         let live = self.parked[active].take().expect("the active set is present");
         self.put_live(live);
         self.active = active;
@@ -438,6 +509,7 @@ impl App {
         self.flush_pending();
         self.restart_procgen();
         self.ensure_materialized(i);
+        self.memory.touch(self.active);
         let quiet = self.undo.is_empty() && self.redo.is_empty();
         let mut old = self.take_live();
         if quiet {
@@ -477,12 +549,24 @@ impl App {
 
     /// Give a parked set its full-size paint store (it starts empty, as it was). The active set always has one.
     pub(crate) fn ensure_materialized(&mut self, set: usize) {
+        let blobs = self.parked.get_mut(set).and_then(Option::as_mut).filter(|st| !st.materialized).and_then(|st| st.saved.take());
+        let blobs = blobs.map(|s| self.read_saved(&s));
+        self.materialize(set, blobs);
+    }
+
+    fn read_saved(&mut self, saved: &Saved) -> crate::spill::Tiles {
+        saved.blobs().unwrap_or_else(|e| {
+            self.status = format!("A texture set's paint could not be read back from disk: {e}");
+            Vec::new()
+        })
+    }
+
+    fn materialize(&mut self, set: usize, saved: Option<crate::spill::Tiles>) {
         let Some(Some(st)) = self.parked.get(set) else { return };
         if st.materialized {
             return;
         }
         let (doc, size) = (st.doc.clone(), st.tex_size);
-        let saved = self.parked[set].as_mut().and_then(|st| st.saved.take());
         let loaded = saved.is_some();
         self.gpu_rebuild(set, &doc, size);
         for (t, blobs) in saved.into_iter().flatten().enumerate() {
@@ -503,6 +587,8 @@ impl App {
         if let Some(Some(st)) = self.parked.get_mut(set) {
             st.materialized = true;
         }
+        self.memory.touch(set);
+        self.enforce_budgets(set);
     }
 
     fn flush_gpu(&self) {
@@ -511,19 +597,33 @@ impl App {
         }
     }
 
-    /// Give a set's GPU memory back, keeping its paint in memory (`st` is that set's state).
-    fn release_state(&mut self, set: usize, st: &mut SetState) {
-        self.flush_gpu();
-        st.saved = (st.doc != Document::with_default_material()).then(|| {
-            let renderer = self.render_state.renderer.read();
-            let tiles = renderer.callback_resources.get::<ViewportGpu>().and_then(|g| g.sets.get(set)).map(|u| &u.tiles[..]).unwrap_or_default();
-            tiles.iter().map(|p| p.capture_blobs(&self.render_state.device, &self.render_state.queue, &st.doc)).collect()
-        });
-        st.materialized = false;
-        self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
+    /// Shrink a set's GPU copy to a picture of its look.
+    fn freeze_gpu(&self, set: usize, doc: &Document) {
+        if let Some(gpu) = self.render_state.renderer.write().callback_resources.get_mut::<ViewportGpu>() {
+            gpu.freeze_set(&self.render_state.device, &self.render_state.queue, set, doc, PREVIEW_SIZE);
+        }
     }
 
-    /// Return a set that was materialised only for reading (export) to the placeholder size.
+    /// Give a set's GPU memory back, keeping its paint in memory and its look as a small picture
+    /// (`st` is that set's state).
+    fn release_state(&mut self, set: usize, st: &mut SetState) {
+        self.flush_gpu();
+        if st.doc == Document::with_default_material() {
+            st.saved = None;
+            self.gpu_rebuild(set, &st.doc, PLACEHOLDER_SIZE);
+        } else {
+            let tiles = {
+                let renderer = self.render_state.renderer.read();
+                let tiles = renderer.callback_resources.get::<ViewportGpu>().and_then(|g| g.sets.get(set)).map(|u| &u.tiles[..]).unwrap_or_default();
+                tiles.iter().map(|p| p.capture_blobs(&self.render_state.device, &self.render_state.queue, &st.doc)).collect()
+            };
+            st.saved = Some(Saved::Ram(tiles));
+            self.freeze_gpu(set, &st.doc);
+        }
+        st.materialized = false;
+    }
+
+    /// Return a set that was materialised only for reading (export) to its small picture.
     pub(crate) fn release_if_untouched(&mut self, set: usize) {
         let Some(mut st) = self.parked.get_mut(set).and_then(Option::take) else { return };
         if st.materialized && st.undo.is_empty() && st.redo.is_empty() {
@@ -531,6 +631,74 @@ impl App {
         }
         self.parked[set] = Some(st);
         self.trim_images();
+    }
+
+    /// Make the small picture of a parked set's look (after a project opens), keeping its paint where it is.
+    fn cache_set(&mut self, set: usize) {
+        let Some(Some(st)) = self.parked.get_mut(set) else { return };
+        if st.materialized {
+            return;
+        }
+        let saved = st.saved.take();
+        let blobs = saved.as_ref().map(|s| self.read_saved(s));
+        self.materialize(set, blobs);
+        self.flush_gpu();
+        if let Some(mut st) = self.parked.get_mut(set).and_then(Option::take) {
+            self.freeze_gpu(set, &st.doc);
+            (st.materialized, st.saved) = (false, saved);
+            self.parked[set] = Some(st);
+        }
+        self.trim_images();
+        self.enforce_budgets(usize::MAX);
+    }
+
+    /// One step of the background work after a project opens: a preview picture for the next set.
+    pub(crate) fn cache_step(&mut self) -> bool {
+        if self.stroke.active {
+            return !self.memory.queue.is_empty();
+        }
+        if let Some(set) = self.memory.queue.pop() {
+            self.cache_set(set);
+        }
+        !self.memory.queue.is_empty()
+    }
+
+    /// Stay inside the memory budgets. The sets that were used longest ago leave the GPU first
+    /// (their paint goes to RAM, their look stays as a small picture); when RAM is short, the oldest
+    /// paint goes on to disk. The set being edited, `keep` (just loaded for a reader) and sets with undo
+    /// history stay where they are.
+    pub(crate) fn enforce_budgets(&mut self, keep: usize) {
+        let gpu_bytes = |app: &Self| app.render_state.renderer.read().callback_resources.get::<ViewportGpu>().map_or(0, |g| g.memory_bytes());
+        if gpu_bytes(self) > self.memory.gpu_budget {
+            let mut idle: Vec<usize> = (0..self.parked.len())
+                .filter(|&i| i != keep && self.parked[i].as_ref().is_some_and(|st| st.materialized && st.undo.is_empty() && st.redo.is_empty()))
+                .collect();
+            idle.sort_by_key(|&i| self.memory.last_used(i));
+            for i in idle {
+                if gpu_bytes(self) <= self.memory.gpu_budget {
+                    break;
+                }
+                self.release_if_untouched(i);
+            }
+        }
+        let ram = |app: &Self| app.parked.iter().flatten().filter_map(|st| st.saved.as_ref()).map(Saved::ram_bytes).sum::<u64>();
+        if ram(self) > self.memory.ram_budget {
+            let mut held: Vec<usize> = (0..self.parked.len()).filter(|&i| self.parked[i].as_ref().and_then(|st| st.saved.as_ref()).is_some_and(|s| s.ram_bytes() > 0)).collect();
+            held.sort_by_key(|&i| self.memory.last_used(i));
+            let dir = crate::files::data_dir().join("spill");
+            for i in held {
+                if ram(self) <= self.memory.ram_budget {
+                    break;
+                }
+                let name = format!("{}-{}-{}.bin", std::process::id(), i, self.memory.clock);
+                if let Some(Some(st)) = self.parked.get_mut(i) {
+                    if let Some(Err(e)) = st.saved.as_mut().map(|s| s.spill(&dir, &name)) {
+                        self.status = format!("Could not move a texture set's paint to disk: {e}");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Apply `f` to a set's state wherever it currently lives.
