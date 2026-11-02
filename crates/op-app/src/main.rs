@@ -578,6 +578,8 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    /// The model file the mesh was loaded from, for Reimport.
+    mesh_source: Option<PathBuf>,
     text_ui: text::TextUi,
     /// Installed fonts, listed the first time the Text section is opened.
     fonts: Option<Vec<text::FontFile>>,
@@ -798,6 +800,7 @@ impl App {
             pick_id_for: None,
             hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
+            mesh_source: None,
             text_ui: Default::default(),
             fonts: None,
             decal_place: None,
@@ -952,27 +955,34 @@ impl App {
         self.status = "New project.".into();
     }
 
-    fn load_mesh_file(&mut self, path: &Path) -> bool {
+    /// Read a model file; true in the second place if its UVs had to be generated.
+    fn read_mesh_file(path: &Path) -> Result<(Mesh, bool), String> {
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        let loaded = match ext.as_str() {
+        let mut mesh = match ext.as_str() {
             "fbx" => Mesh::load_fbx(path),
             "obj" => Mesh::load_obj(path),
             "ply" => Mesh::load_ply(path),
             "stl" => Mesh::load_stl(path),
             _ => Mesh::load_gltf(path),
-        };
-        match loaded {
-            Ok(mut mesh) => {
-                let generated = !mesh.has_uvs();
-                if generated {
-                    mesh.generate_uvs();
-                }
+        }
+        .map_err(|e| format!("Failed to load {}: {e}", path.display()))?;
+        let generated = !mesh.has_uvs();
+        if generated {
+            mesh.generate_uvs();
+        }
+        Ok((mesh, generated))
+    }
+
+    fn load_mesh_file(&mut self, path: &Path) -> bool {
+        match Self::read_mesh_file(path) {
+            Ok((mesh, generated)) => {
                 let tris = mesh.indices.len() / 3;
                 let sets = mesh.set_ranges().len();
                 let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "mesh".into());
                 self.set_mesh(mesh, name);
                 // Paint belongs to the old mesh's UVs: start a fresh project.
                 self.new_project();
+                self.mesh_source = Some(path.to_path_buf());
                 self.status = if sets > 1 {
                     format!("Loaded {} ({tris} tris, {sets} texture sets)", path.display())
                 } else {
@@ -984,10 +994,28 @@ impl App {
                 true
             }
             Err(e) => {
-                self.status = format!("Failed to load {}: {e}", path.display());
+                self.status = e;
                 false
             }
         }
+    }
+
+    /// Swap in a changed version of the model and keep all the paint, layers and settings. Paint
+    /// lives in UV space, so this is right when the UVs and texture sets did not change; it refuses
+    /// when the sets differ, and the baked maps (made from the old surface) need baking again.
+    pub(crate) fn reimport_mesh(&mut self, path: &Path) -> Result<String, String> {
+        let (mesh, generated) = Self::read_mesh_file(path)?;
+        let (old, new): (Vec<String>, Vec<String>) = (self.mesh.set_ranges().iter().map(|s| s.name.clone()).collect(), mesh.set_ranges().iter().map(|s| s.name.clone()).collect());
+        if old != new {
+            return Err(format!("The texture sets differ ({} before, {} now), so the paint cannot follow: open it as a new project instead.", old.len(), new.len()));
+        }
+        let name = self.mesh_name.clone();
+        self.set_mesh(mesh, name);
+        self.mesh_source = Some(path.to_path_buf());
+        self.modified = true;
+        let note = if generated { " Its UVs were generated for it." } else { "" };
+        self.status = format!("Reimported {}: paint kept. If the UVs changed the paint will not line up; baked maps need baking again.{note}", path.display());
+        Ok(self.status.clone())
     }
 
     fn apply_project(&mut self, p: Project, path: Option<PathBuf>, modified: bool) {

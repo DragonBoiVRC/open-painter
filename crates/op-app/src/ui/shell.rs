@@ -95,6 +95,15 @@ impl App {
                         self.dialog = Some(PathDialog { save: false, path: start });
                         ui.close();
                     }
+                    let source = self.mesh_source.clone().filter(|p| p.exists());
+                    if ui.add_enabled(source.is_some(), egui::Button::new("Reimport model")).on_hover_text("Read the model file again after changing it elsewhere, keeping the paint (the texture sets must be the same)").clicked() {
+                        if let Some(p) = source {
+                            if let Err(e) = self.reimport_mesh(&p) {
+                                self.status = e;
+                            }
+                        }
+                        ui.close();
+                    }
                     let recent: Vec<_> = self.recent.iter().filter(|p| p.exists()).cloned().collect();
                     ui.add_enabled_ui(!recent.is_empty(), |ui| {
                         ui.menu_button("Open recent", |ui| {
