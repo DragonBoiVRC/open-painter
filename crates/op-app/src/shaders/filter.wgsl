@@ -9,6 +9,8 @@
 //   kind 5: threshold
 //   kind 6: pixelate (v.x = block size)
 //   kind 7: hue / saturation / brightness (v = hue turns, saturation, brightness)
+//   kind 8: posterize (v.x = steps); kind 9: brightness / contrast (v.x = brightness, v.y = contrast)
+//   kind 10: grayscale (v.x = amount, colours only); kind 11: edge detect (v.x = strength)
 
 struct Params {
     kind: vec4<u32>,   // x: kind
@@ -70,6 +72,15 @@ fn blur(t: texture_2d<f32>, xy: vec2<i32>) -> vec4<f32> {
     return sum / wsum;
 }
 
+// Posterize and brightness / contrast, for the kinds that map each value on its own.
+fn tone(v: f32, kind: u32) -> f32 {
+    if (kind == 8u) {
+        let n = max(p.v.x, 2.0) - 1.0;
+        return floor(clamp(v, 0.0, 1.0) * n + 0.5) / n;
+    }
+    return clamp((v - 0.5) * p.v.y + 0.5 + p.v.x, 0.0, 1.0);
+}
+
 fn levels(v: f32) -> f32 {
     let span = max(p.v.y - p.v.x, 1e-4);
     return pow(clamp((v - p.v.x) / span, 0.0, 1.0), 1.0 / max(p.v.z, 0.1));
@@ -80,7 +91,7 @@ fn map_scalar(s: vec4<f32>, kind: u32) -> vec4<f32> {
     let cov = s.g;
     if (cov <= 0.0) { return s; }
     var v = s.r / cov;
-    if (kind == 2u) { v = 1.0 - v; } else { v = levels(v); }
+    if (kind == 2u) { v = 1.0 - v; } else if (kind >= 8u) { v = tone(v, kind); } else { v = levels(v); }
     return vec4<f32>(v * cov, cov, s.b, s.a);
 }
 
@@ -91,7 +102,11 @@ fn map_color(s: vec4<f32>, kind: u32) -> vec4<f32> {
     if (kind == 2u) {
         c = vec3<f32>(1.0) - c;
     } else {
-        c = vec3<f32>(levels(c.r), levels(c.g), levels(c.b));
+        if (kind >= 8u) {
+            c = vec3<f32>(tone(c.r, kind), tone(c.g, kind), tone(c.b, kind));
+        } else {
+            c = vec3<f32>(levels(c.r), levels(c.g), levels(c.b));
+        }
     }
     return vec4<f32>(c * cov, cov);
 }
@@ -157,6 +172,43 @@ fn map_hsb(s: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(hsv2rgb(h) * cov, cov);
 }
 
+fn gray(s: vec4<f32>) -> vec4<f32> {
+    let cov = s.a;
+    if (cov <= 0.0) { return s; }
+    let c = s.rgb / cov;
+    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec4<f32>(mix(c, vec3<f32>(l), clamp(p.v.x, 0.0, 1.0)) * cov, cov);
+}
+
+fn sv(t: texture_2d<f32>, xy: vec2<i32>, dx: i32, dy: i32) -> f32 {
+    let s = load(t, xy + vec2<i32>(dx, dy));
+    return select(0.0, s.r / s.g, s.g > 0.0);
+}
+
+fn lv(xy: vec2<i32>, dx: i32, dy: i32) -> f32 {
+    let s = load(a_base, xy + vec2<i32>(dx, dy));
+    return select(0.0, dot(s.rgb / s.a, vec3<f32>(0.2126, 0.7152, 0.0722)), s.a > 0.0);
+}
+
+// Sobel gradient of one scalar channel's value, as a new value (coverage kept).
+fn edge_scalar(t: texture_2d<f32>, xy: vec2<i32>) -> vec4<f32> {
+    let here = load(t, xy);
+    if (here.g <= 0.0) { return here; }
+    let gx = (sv(t, xy, 1, -1) + 2.0 * sv(t, xy, 1, 0) + sv(t, xy, 1, 1)) - (sv(t, xy, -1, -1) + 2.0 * sv(t, xy, -1, 0) + sv(t, xy, -1, 1));
+    let gy = (sv(t, xy, -1, 1) + 2.0 * sv(t, xy, 0, 1) + sv(t, xy, 1, 1)) - (sv(t, xy, -1, -1) + 2.0 * sv(t, xy, 0, -1) + sv(t, xy, 1, -1));
+    let e = clamp(length(vec2<f32>(gx, gy)) * p.v.x, 0.0, 1.0);
+    return vec4<f32>(e * here.g, here.g, here.b, here.a);
+}
+
+fn edge_color(xy: vec2<i32>) -> vec4<f32> {
+    let here = load(a_base, xy);
+    if (here.a <= 0.0) { return here; }
+    let gx = (lv(xy, 1, -1) + 2.0 * lv(xy, 1, 0) + lv(xy, 1, 1)) - (lv(xy, -1, -1) + 2.0 * lv(xy, -1, 0) + lv(xy, -1, 1));
+    let gy = (lv(xy, -1, 1) + 2.0 * lv(xy, 0, 1) + lv(xy, 1, 1)) - (lv(xy, -1, -1) + 2.0 * lv(xy, 0, -1) + lv(xy, 1, -1));
+    let e = clamp(length(vec2<f32>(gx, gy)) * p.v.x, 0.0, 1.0);
+    return vec4<f32>(vec3<f32>(e) * here.a, here.a);
+}
+
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
     let xy = vec2<i32>(pos.xy);
@@ -211,6 +263,20 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         o.height = load(a_height, c);
         o.emissive = load(a_emissive, c);
         o.opacity = load(a_opacity, c);
+    } else if (kind == 10u) {
+        o.base = gray(load(a_base, xy));
+        o.metal = load(a_metal, xy);
+        o.rough = load(a_rough, xy);
+        o.height = load(a_height, xy);
+        o.emissive = gray(load(a_emissive, xy));
+        o.opacity = load(a_opacity, xy);
+    } else if (kind == 11u) {
+        o.base = edge_color(xy);
+        o.metal = edge_scalar(a_metal, xy);
+        o.rough = edge_scalar(a_rough, xy);
+        o.height = edge_scalar(a_height, xy);
+        o.emissive = load(a_emissive, xy);
+        o.opacity = load(a_opacity, xy);
     } else if (kind == 7u) {
         o.base = map_hsb(load(a_base, xy));
         o.metal = load(a_metal, xy);

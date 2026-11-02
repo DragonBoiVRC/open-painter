@@ -1938,6 +1938,32 @@ mod tests {
         assert!(back[2] > 0.9 && back[0] < 0.1, "back to UV: {back:?}");
     }
 
+    /// The tone filters act on the colour a group puts down.
+    #[test]
+    fn posterize_and_grayscale_filters_change_the_colour() {
+        use op_core::Filter;
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let mut doc = Document::default();
+        let group = doc.add(None, None, "group", NodeKind::Group { children: Vec::new() });
+        doc.add(Some(group), None, "red", NodeKind::Fill(FillParams { base: Some([0.9, 0.3, 0.1]), ..Default::default() }));
+        let centre = |rig: &Rig| {
+            let b = rig.read(&rig.gpu.paint().output.base, 8);
+            let i = (((SIZE / 2) * SIZE + SIZE / 2) * 8) as usize;
+            [0, 1, 2].map(|k| f16_to_f32(u16::from_le_bytes([b[i + k * 2], b[i + k * 2 + 1]])))
+        };
+        rig.run(&doc, &[PaintOp::Reset(SIZE)]);
+        let plain = centre(&rig);
+        doc.find_mut(group).unwrap().filters = vec![Filter::Grayscale { amount: 1.0 }];
+        rig.run(&doc, &[]);
+        let grey = centre(&rig);
+        assert!((grey[0] - grey[1]).abs() < 0.01 && (grey[1] - grey[2]).abs() < 0.01, "grey: {grey:?}");
+        assert!(plain[0] - plain[2] > 0.1, "the fill is coloured: {plain:?}");
+        doc.find_mut(group).unwrap().filters = vec![Filter::Posterize { steps: 2.0 }];
+        rig.run(&doc, &[]);
+        let two = centre(&rig);
+        assert!(two.iter().all(|c| *c < 0.01 || *c > 0.99), "two levels per channel: {two:?}");
+    }
+
     /// A mask that follows an anchor shows its layer only where the anchored stack had the channel.
     #[test]
     fn a_mask_can_follow_an_anchor() {

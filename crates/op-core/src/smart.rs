@@ -377,6 +377,126 @@ pub fn builtin_smart_materials() -> Vec<SmartMaterial> {
                 ],
             )],
         },
+        SmartMaterial {
+            name: "Sooty brick".into(),
+            nodes: vec![group(
+                "Sooty brick",
+                vec![
+                    layer("Brick", [0.52, 0.21, 0.15], Some(0.0), Some(0.9)),
+                    relief("Brick relief", 0.66, 20.0),
+                    layer("Soot", [0.04, 0.04, 0.04], None, Some(0.95))
+                        .blended(BlendMode::Multiply, 0.85)
+                        .with_mask(Generator::new(CreviceDirt).with("amount", 0.8)),
+                    layer("Soot (top)", [0.08, 0.07, 0.07], None, Some(0.95))
+                        .blended(BlendMode::Multiply, 0.5)
+                        .with_mask(Generator::new(TopDust).with("amount", 0.5)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Chipped enamel".into(),
+            nodes: vec![group(
+                "Chipped enamel",
+                vec![
+                    layer("Steel", [0.40, 0.40, 0.42], Some(1.0), Some(0.45)),
+                    layer("Enamel", [0.92, 0.93, 0.92], Some(0.0), Some(0.2))
+                        .with_height(0.57)
+                        .with_mask(Generator::new(EdgeWear).inverted()),
+                    layer("Rust bloom", [0.40, 0.16, 0.06], Some(0.0), Some(0.85))
+                        .blended(BlendMode::Multiply, 0.8)
+                        .with_mask(Generator::new(EdgeWear).with("amount", 0.5)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Weathered wood".into(),
+            nodes: vec![group(
+                "Weathered wood",
+                vec![
+                    layer("Wood", [0.36, 0.24, 0.14], Some(0.0), Some(0.75)),
+                    relief("Grain relief", 0.64, 28.0),
+                    layer("Sun bleach", [0.62, 0.58, 0.52], Some(0.0), Some(0.85))
+                        .blended(BlendMode::Normal, 0.7)
+                        .with_mask(Generator::new(TopDust).with("amount", 0.6)),
+                    layer("Dark cracks", [0.06, 0.04, 0.03], None, Some(0.95))
+                        .blended(BlendMode::Multiply, 0.85)
+                        .with_mask(Generator::new(CreviceDirt)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Burnt metal".into(),
+            nodes: vec![group(
+                "Burnt metal",
+                vec![
+                    layer("Steel", [0.50, 0.50, 0.52], Some(1.0), Some(0.35)),
+                    layer("Heat tint", [0.20, 0.15, 0.42], Some(1.0), Some(0.4))
+                        .blended(BlendMode::Overlay, 0.6)
+                        .with_mask(Generator::new(Noise).with("scale", 5.0).with("contrast", 0.6)),
+                    layer("Scorch", [0.03, 0.03, 0.03], Some(0.0), Some(0.9))
+                        .blended(BlendMode::Multiply, 0.8)
+                        .with_mask(Generator::new(CreviceDirt)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Frosted metal".into(),
+            nodes: vec![group(
+                "Frosted metal",
+                vec![
+                    layer("Metal", [0.70, 0.72, 0.75], Some(1.0), Some(0.25)),
+                    layer("Frost", [0.92, 0.96, 1.0], Some(0.0), Some(0.7))
+                        .with_height(0.58)
+                        .with_mask(Generator::new(TopDust).with("amount", 0.55)),
+                    layer("Frost (crevices)", [0.90, 0.95, 1.0], Some(0.0), Some(0.75))
+                        .with_mask(Generator::new(CreviceDirt).with("amount", 0.5)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Muddy".into(),
+            nodes: vec![group(
+                "Muddy",
+                vec![
+                    layer("Base", [0.30, 0.30, 0.30], Some(0.0), Some(0.8)),
+                    layer("Mud", [0.20, 0.13, 0.07], Some(0.0), Some(0.55))
+                        .with_height(0.62)
+                        .with_mask(Generator::new(HeightGradient).inverted()),
+                    layer("Splatter", [0.22, 0.15, 0.08], Some(0.0), Some(0.6))
+                        .with_mask(Generator::new(Noise).with("scale", 18.0).with("contrast", 0.85)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Sun-faded paint".into(),
+            nodes: vec![group(
+                "Sun-faded paint",
+                vec![
+                    layer("Paint", [0.68, 0.10, 0.08], Some(0.0), Some(0.4)),
+                    layer("Fade", [0.80, 0.62, 0.58], None, Some(0.7))
+                        .blended(BlendMode::Normal, 0.8)
+                        .with_mask(Generator::new(TopDust).with("amount", 0.6)),
+                    layer("Chalky patches", [0.86, 0.80, 0.76], None, Some(0.85))
+                        .blended(BlendMode::Normal, 0.4)
+                        .with_mask(Generator::new(Noise).with("scale", 8.0).with("contrast", 0.7)),
+                ],
+            )],
+        },
+        SmartMaterial {
+            name: "Oxidized aluminium".into(),
+            nodes: vec![group(
+                "Oxidized aluminium",
+                vec![
+                    layer("Aluminium", [0.90, 0.91, 0.92], Some(1.0), Some(0.3)),
+                    layer("Oxide", [0.55, 0.57, 0.58], Some(0.0), Some(0.8))
+                        .with_height(0.54)
+                        .with_mask(Generator::new(Noise).with("scale", 9.0).with("contrast", 0.8)),
+                    layer("Pitting", [0.20, 0.21, 0.22], Some(0.0), Some(0.9))
+                        .blended(BlendMode::Multiply, 0.7)
+                        .with_mask(Generator::new(CreviceDirt)),
+                ],
+            )],
+        },
     ];
     all.extend(builtin_fabrics());
     all.extend(builtin_base_materials());
@@ -407,6 +527,31 @@ pub fn builtin_base_materials() -> Vec<SmartMaterial> {
         ("Marble", [0.85, 0.84, 0.82], 0.0, 0.25, 12.0, 0.54, 0.15),
         ("Wood (oak)", [0.55, 0.38, 0.21], 0.0, 0.65, 30.0, 0.6, 0.1),
         ("Skin", [0.80, 0.58, 0.47], 0.0, 0.5, 56.0, 0.57, 0.1),
+        ("Lead", [0.55, 0.56, 0.60], 1.0, 0.45, 40.0, 0.54, 0.15),
+        ("Zinc", [0.84, 0.86, 0.88], 1.0, 0.4, 48.0, 0.53, 0.15),
+        ("Nickel", [0.66, 0.61, 0.53], 1.0, 0.3, 50.0, 0.52, 0.1),
+        ("Platinum", [0.67, 0.64, 0.59], 1.0, 0.2, 50.0, 0.52, 0.1),
+        ("Tin", [0.91, 0.92, 0.92], 1.0, 0.35, 48.0, 0.53, 0.12),
+        ("Plastic (red)", [0.75, 0.06, 0.05], 0.0, 0.3, 0.0, 0.5, 0.0),
+        ("Plastic (blue)", [0.08, 0.20, 0.70], 0.0, 0.3, 0.0, 0.5, 0.0),
+        ("Plastic (green)", [0.08, 0.55, 0.15], 0.0, 0.3, 0.0, 0.5, 0.0),
+        ("Plastic (yellow)", [0.95, 0.78, 0.08], 0.0, 0.3, 0.0, 0.5, 0.0),
+        ("Rubber (red)", [0.45, 0.05, 0.04], 0.0, 0.8, 36.0, 0.6, 0.1),
+        ("Asphalt", [0.12, 0.12, 0.12], 0.0, 0.92, 70.0, 0.62, 0.12),
+        ("Brick", [0.55, 0.22, 0.16], 0.0, 0.88, 24.0, 0.6, 0.12),
+        ("Sand", [0.76, 0.66, 0.47], 0.0, 0.95, 90.0, 0.58, 0.05),
+        ("Clay", [0.62, 0.38, 0.26], 0.0, 0.85, 30.0, 0.55, 0.1),
+        ("Porcelain", [0.96, 0.95, 0.93], 0.0, 0.08, 0.0, 0.5, 0.0),
+        ("Cork", [0.68, 0.50, 0.30], 0.0, 0.8, 80.0, 0.62, 0.12),
+        ("Paper", [0.93, 0.92, 0.88], 0.0, 0.85, 120.0, 0.52, 0.05),
+        ("Cardboard", [0.60, 0.46, 0.30], 0.0, 0.9, 100.0, 0.55, 0.08),
+        ("Cotton", [0.90, 0.88, 0.84], 0.0, 0.95, 100.0, 0.56, 0.05),
+        ("Wax", [0.92, 0.85, 0.62], 0.0, 0.35, 0.0, 0.5, 0.0),
+        ("Wood (walnut)", [0.30, 0.18, 0.10], 0.0, 0.6, 30.0, 0.6, 0.1),
+        ("Wood (pine)", [0.78, 0.60, 0.36], 0.0, 0.7, 30.0, 0.6, 0.1),
+        ("Granite", [0.45, 0.43, 0.42], 0.0, 0.5, 70.0, 0.54, 0.15),
+        ("Limestone", [0.80, 0.77, 0.68], 0.0, 0.85, 40.0, 0.58, 0.1),
+        ("Glass (frosted)", [0.85, 0.90, 0.90], 0.0, 0.55, 0.0, 0.5, 0.0),
     ];
     TABLE
         .iter()

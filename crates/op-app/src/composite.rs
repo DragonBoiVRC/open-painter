@@ -666,6 +666,17 @@ impl Compositor {
                     }
                     vec![(7, [hue / 360.0, saturation, brightness, 0.0])]
                 }
+                Filter::Posterize { steps } => vec![(8, [steps, 0.0, 0.0, 0.0])],
+                Filter::BrightnessContrast { brightness, contrast } => {
+                    if brightness == 0.0 && contrast == 1.0 {
+                        continue;
+                    }
+                    vec![(9, [brightness, contrast, 0.0, 0.0])]
+                }
+                Filter::Grayscale { amount } if amount <= 0.0 => continue,
+                Filter::Grayscale { amount } => vec![(10, [amount, 0.0, 0.0, 0.0])],
+                Filter::EdgeDetect { strength } if strength <= 0.0 => continue,
+                Filter::EdgeDetect { strength } => vec![(11, [strength, 0.0, 0.0, 0.0])],
             };
             let start = current.take();
             let source = start.as_ref().unwrap_or(input);

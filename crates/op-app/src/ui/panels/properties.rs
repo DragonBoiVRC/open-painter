@@ -370,6 +370,13 @@ fn filters_ui(ui: &mut egui::Ui, filters: &mut Vec<Filter>) -> bool {
                     changed |= super::slider_row(ui, "Saturation", saturation, 0.0..=2.0).changed();
                     changed |= super::slider_row(ui, "Brightness", brightness, 0.0..=2.0).changed();
                 }
+                Filter::Posterize { steps } => changed |= super::slider_row(ui, "Levels", steps, 2.0..=32.0).changed(),
+                Filter::BrightnessContrast { brightness, contrast } => {
+                    changed |= super::slider_row(ui, "Brightness", brightness, -1.0..=1.0).changed();
+                    changed |= super::slider_row(ui, "Contrast", contrast, 0.0..=3.0).changed();
+                }
+                Filter::Grayscale { amount } => changed |= super::slider_row(ui, "Amount", amount, 0.0..=1.0).changed(),
+                Filter::EdgeDetect { strength } => changed |= super::slider_row(ui, "Strength", strength, 0.0..=8.0).changed(),
             }
             ui.separator();
         });

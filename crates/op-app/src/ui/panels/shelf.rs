@@ -170,7 +170,7 @@ impl Default for ShelfState {
     }
 }
 
-const BRUSHES: [(&str, BrushPreset); 11] = [
+const BRUSHES: [(&str, BrushPreset); 22] = [
     (
         "Soft round",
         BrushPreset {
@@ -244,6 +244,50 @@ const BRUSHES: [(&str, BrushPreset); 11] = [
     (
         "Diamond",
         BrushPreset { radius_pts: 20.0, hardness: 1.0, shape: 2, spacing: 0.1, ..BrushPreset::BASE },
+    ),
+    (
+        "Fine liner",
+        BrushPreset { radius_pts: 3.0, hardness: 1.0, spacing: 0.05, lazy_radius: 24.0, ..BrushPreset::BASE },
+    ),
+    (
+        "Pencil",
+        BrushPreset { radius_pts: 5.0, hardness: 0.85, opacity: 0.6, spacing: 0.06, shape: 3, pressure_opacity: true, ..BrushPreset::BASE },
+    ),
+    (
+        "Marker",
+        BrushPreset { radius_pts: 18.0, hardness: 0.95, stroke_opacity: 0.7, spacing: 0.05, ..BrushPreset::BASE },
+    ),
+    (
+        "Splatter",
+        BrushPreset { radius_pts: 40.0, hardness: 1.0, spacing: 1.5, size_jitter: 0.9, position_jitter: 8.0, angle_jitter: 1.0, ..BrushPreset::BASE },
+    ),
+    (
+        "Stipple",
+        BrushPreset { radius_pts: 6.0, hardness: 1.0, opacity: 0.9, spacing: 1.2, size_jitter: 0.3, position_jitter: 6.0, ..BrushPreset::BASE },
+    ),
+    (
+        "Dust",
+        BrushPreset { radius_pts: 90.0, hardness: 0.0, opacity: 0.12, spacing: 0.4, size_jitter: 0.4, position_jitter: 3.0, opacity_jitter: 0.6, ..BrushPreset::BASE },
+    ),
+    (
+        "Rake",
+        BrushPreset { radius_pts: 60.0, hardness: 0.7, opacity: 0.8, spacing: 0.05, shape: 4, follow_path: true, ..BrushPreset::BASE },
+    ),
+    (
+        "Scratch",
+        BrushPreset { radius_pts: 4.0, hardness: 1.0, opacity: 0.9, spacing: 0.04, shape: 4, follow_path: true, opacity_jitter: 0.4, ..BrushPreset::BASE },
+    ),
+    (
+        "Smooth wash",
+        BrushPreset { radius_pts: 160.0, hardness: 0.1, opacity: 0.3, stroke_opacity: 0.6, spacing: 0.15, lazy_radius: 30.0, ..BrushPreset::BASE },
+    ),
+    (
+        "Sponge",
+        BrushPreset { radius_pts: 38.0, hardness: 0.6, opacity: 0.6, spacing: 0.7, shape: 3, size_jitter: 0.4, angle_jitter: 1.0, position_jitter: 2.0, ..BrushPreset::BASE },
+    ),
+    (
+        "Dot",
+        BrushPreset { radius_pts: 14.0, hardness: 1.0, spacing: 3.0, ..BrushPreset::BASE },
     ),
 ];
 

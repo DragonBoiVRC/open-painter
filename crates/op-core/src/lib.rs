@@ -825,6 +825,14 @@ pub enum Filter {
     /// Shift colours: `hue` in degrees, `saturation` and `brightness` as multipliers (1 is unchanged).
     /// Only colours (base, emissive) change; values such as roughness are left alone.
     HueSaturation { hue: f32, saturation: f32, brightness: f32 },
+    /// Cut colours and values to `steps` levels each.
+    Posterize { steps: f32 },
+    /// Add `brightness` (-1..1) and scale the distance from mid-grey by `contrast`, on colours and values.
+    BrightnessContrast { brightness: f32, contrast: f32 },
+    /// Fade colours toward grey: 1 is fully grey. Values such as roughness are left alone.
+    Grayscale { amount: f32 },
+    /// Replace colours and values with how fast they change (a Sobel gradient) times `strength`.
+    EdgeDetect { strength: f32 },
 }
 
 impl Filter {
@@ -839,11 +847,15 @@ impl Filter {
             Filter::Threshold { .. } => "Threshold",
             Filter::Pixelate { .. } => "Pixelate",
             Filter::HueSaturation { .. } => "Hue / saturation",
+            Filter::Posterize { .. } => "Posterize",
+            Filter::BrightnessContrast { .. } => "Brightness / contrast",
+            Filter::Grayscale { .. } => "Grayscale",
+            Filter::EdgeDetect { .. } => "Edge detect",
         }
     }
 
     /// A new filter of each kind with its default settings.
-    pub fn defaults() -> [Filter; 9] {
+    pub fn defaults() -> [Filter; 13] {
         [
             Filter::Blur { radius: 4.0 },
             Filter::Sharpen { amount: 1.0, radius: 3.0 },
@@ -854,6 +866,10 @@ impl Filter {
             Filter::Threshold { position: 0.5, softness: 0.05 },
             Filter::Pixelate { size: 8.0 },
             Filter::HueSaturation { hue: 0.0, saturation: 1.0, brightness: 1.0 },
+            Filter::Posterize { steps: 4.0 },
+            Filter::BrightnessContrast { brightness: 0.0, contrast: 1.0 },
+            Filter::Grayscale { amount: 1.0 },
+            Filter::EdgeDetect { strength: 1.0 },
         ]
     }
 
@@ -870,6 +886,10 @@ impl Filter {
             Filter::Threshold { position, softness } => Filter::Threshold { position: f(position, 0.5, 0.0, 1.0), softness: f(softness, 0.0, 0.0, 1.0) },
             Filter::Pixelate { size } => Filter::Pixelate { size: f(size, 1.0, 1.0, 256.0) },
             Filter::HueSaturation { hue, saturation, brightness } => Filter::HueSaturation { hue: f(hue, 0.0, -360.0, 360.0), saturation: f(saturation, 1.0, 0.0, 4.0), brightness: f(brightness, 1.0, 0.0, 4.0) },
+            Filter::Posterize { steps } => Filter::Posterize { steps: f(steps, 4.0, 2.0, 64.0) },
+            Filter::BrightnessContrast { brightness, contrast } => Filter::BrightnessContrast { brightness: f(brightness, 0.0, -1.0, 1.0), contrast: f(contrast, 1.0, 0.0, 4.0) },
+            Filter::Grayscale { amount } => Filter::Grayscale { amount: f(amount, 1.0, 0.0, 1.0) },
+            Filter::EdgeDetect { strength } => Filter::EdgeDetect { strength: f(strength, 1.0, 0.0, 16.0) },
         }
     }
 }
