@@ -389,10 +389,13 @@ pub enum Projection {
     PlanarX,
     PlanarY,
     PlanarZ,
+    /// Straight along the normal of a placed frame (a decal): the picture covers only the part of the
+    /// surface that faces the frame and lies inside it. Needs the Position and World space normal maps.
+    Decal,
 }
 
 impl Projection {
-    pub const ALL: [Projection; 5] = [Projection::Uv, Projection::Triplanar, Projection::PlanarX, Projection::PlanarY, Projection::PlanarZ];
+    pub const ALL: [Projection; 6] = [Projection::Uv, Projection::Triplanar, Projection::PlanarX, Projection::PlanarY, Projection::PlanarZ, Projection::Decal];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -401,6 +404,7 @@ impl Projection {
             Projection::PlanarX => "Planar X",
             Projection::PlanarY => "Planar Y",
             Projection::PlanarZ => "Planar Z",
+            Projection::Decal => "Decal",
         }
     }
 
@@ -412,7 +416,34 @@ impl Projection {
             Projection::PlanarX => 2,
             Projection::PlanarY => 3,
             Projection::PlanarZ => 4,
+            Projection::Decal => 5,
         }
+    }
+}
+
+/// Where a decal sits: a rectangle in space (the model's longest side is 1, measured from its minimum
+/// corner, as the baked Position map is) seen from the side `cross(u, v)` points to.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Decal {
+    pub center: [f32; 3],
+    /// The rectangle's width and height as vectors: their lengths are its size, their directions its axes.
+    pub u: [f32; 3],
+    pub v: [f32; 3],
+    /// How far in front of and behind the rectangle the surface still takes the picture.
+    pub depth: f32,
+}
+
+impl Default for Decal {
+    fn default() -> Self {
+        Self { center: [0.5; 3], u: [0.25, 0.0, 0.0], v: [0.0, 0.25, 0.0], depth: 0.15 }
+    }
+}
+
+impl Decal {
+    pub fn is_sane(&self) -> bool {
+        let ok = |v: &[f32; 3]| v.iter().all(|c| c.is_finite() && c.abs() < 1e4);
+        let len = |v: &[f32; 3]| v.iter().map(|c| c * c).sum::<f32>().sqrt();
+        ok(&self.center) && ok(&self.u) && ok(&self.v) && len(&self.u) > 1e-4 && len(&self.v) > 1e-4 && self.depth.is_finite() && self.depth > 0.0
     }
 }
 
@@ -448,6 +479,9 @@ pub struct FillParams {
     /// Triplanar only: how quickly the three projections hand over to each other (higher is sharper).
     #[serde(default = "default_sharpness")]
     pub sharpness: f32,
+    /// Where the picture sits, for the Decal projection.
+    #[serde(default)]
+    pub decal: Decal,
 }
 
 impl Default for FillParams {
@@ -463,6 +497,7 @@ impl Default for FillParams {
             opacity: None,
             projection: Projection::Uv,
             sharpness: default_sharpness(),
+            decal: Decal::default(),
         }
     }
 }

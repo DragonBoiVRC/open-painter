@@ -88,6 +88,16 @@ impl App {
             if let NodeKind::Fill(f) = &mut node.kind {
                 ui.add_space(4.0);
                 changed |= super::fill::fill_controls(ui, f, &self.assets, &self.tex_thumbs);
+                if f.projection == op_core::Projection::Decal {
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("DECAL").size(11.0).strong().color(crate::ui::theme::TEXT_DIM));
+                    changed |= crate::decal::decal_controls(ui, &mut f.decal);
+                    let armed = self.decal_place == Some(node.id);
+                    if ui.selectable_label(armed, "Place on model: click the surface").clicked() {
+                        self.decal_place = (!armed).then_some(node.id);
+                    }
+                    super::hint(ui, "Click the model to put the picture there, facing out of the surface; Width, Height and Turn size it. It shows on surfaces facing the frame within Depth, and needs the Position and World space normal maps baked.");
+                }
             }
 
             ui.separator();

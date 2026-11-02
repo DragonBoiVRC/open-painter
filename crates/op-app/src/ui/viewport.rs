@@ -157,6 +157,21 @@ impl App {
             }
         }
         let picking_id = self.pick_id_for.is_some();
+        // A decal waiting to be placed: the next click on the model puts it there.
+        if let Some(layer) = self.decal_place {
+            if resp.hovered() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.decal_place = None;
+            } else if let (true, Some(pos)) = (resp.clicked() && !alt && !modal_open, resp.interact_pointer_pos()) {
+                let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+                let ndc = glam::Vec2::new((pos.x - rect.min.x) / w * 2.0 - 1.0, 1.0 - (pos.y - rect.min.y) / h * 2.0);
+                let inv = self.camera.view_proj(w / h).inverse();
+                let (near, far) = (inv.project_point3(ndc.extend(0.0)), inv.project_point3(ndc.extend(1.0)));
+                match self.place_decal(layer, near, (far - near).normalize_or_zero()) {
+                    Ok(()) => self.decal_place = None,
+                    Err(e) => self.status = e,
+                }
+            }
+        }
         // Lasso and path fill: outline an area on screen, fill the regions inside it.
         if matches!(self.tool, Tool::Lasso | Tool::Path) && !alt && !modal_open && !mods.command && !picking_id {
             if let Some(poly) = self.outline_input(ui, &resp, false) {
@@ -225,7 +240,7 @@ impl App {
                 place[2] = (place[2] * (1.0 + scroll * 0.002)).clamp(0.05, 2.0);
             }
         }
-        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && !matches!(self.tool, Tool::Fill | Tool::Hide | Tool::Lasso | Tool::Path) && !picking_id;
+        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && self.decal_place.is_none() && !matches!(self.tool, Tool::Fill | Tool::Hide | Tool::Lasso | Tool::Path) && !picking_id;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {

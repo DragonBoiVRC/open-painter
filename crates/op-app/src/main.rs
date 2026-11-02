@@ -2,6 +2,7 @@
 
 mod camera;
 mod composite;
+mod decal;
 mod control;
 mod history;
 mod envmap;
@@ -576,6 +577,8 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    /// A decal layer waiting for the next click on the model to be placed.
+    decal_place: Option<NodeId>,
     /// The Lasso/Path outline being drawn, in screen points of the view it started in.
     outline: Vec<egui::Pos2>,
     outline_uv: bool,
@@ -790,6 +793,7 @@ impl App {
             pick_id_for: None,
             hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
+            decal_place: None,
             outline: Vec::new(),
             outline_uv: false,
             quick_on: false,

@@ -16,6 +16,9 @@ struct Params {
     xf2: vec4<f32>,        // cos and sin of the rotation, triplanar sharpness, _
     extent: vec4<f32>,     // the baked mesh's size along x, y, z, in units of the model's longest side
     offset: vec4<f32>,     // where that box starts, in the same units from the model's minimum corner
+    d_center: vec4<f32>,   // decal: the frame's centre; w is how far from it the surface still takes the picture
+    d_u: vec4<f32>,        // decal: the frame's width vector
+    d_v: vec4<f32>,        // decal: the frame's height vector
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -60,12 +63,30 @@ fn plane_uv(axis: u32, q: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(q.x, 1.0 - q.y);
 }
 
+// The decal frame: where a point of the model falls in it (0..1 across, y down), and how much of the
+// picture it takes (0 outside the frame, behind it, or on surfaces turned away from it).
+fn decal_uv(q: vec3<f32>) -> vec2<f32> {
+    let l = q - p.d_center.xyz;
+    return vec2<f32>(dot(l, p.d_u.xyz) / dot(p.d_u.xyz, p.d_u.xyz) + 0.5, 0.5 - dot(l, p.d_v.xyz) / dot(p.d_v.xyz, p.d_v.xyz));
+}
+
+fn decal_weight(q: vec3<f32>, n: vec3<f32>) -> f32 {
+    let uv = decal_uv(q);
+    let fwd = normalize(cross(p.d_u.xyz, p.d_v.xyz));
+    let inside = step(abs(uv.x - 0.5), 0.5) * step(abs(uv.y - 0.5), 0.5);
+    let near = step(abs(dot(q - p.d_center.xyz, fwd)), p.d_center.w);
+    return inside * near * smoothstep(0.05, 0.35, dot(normalize(n), fwd));
+}
+
 // One slot's picture at a point, projected: a single plane, or three blended by `w`.
 fn project(t: texture_2d<f32>, q: vec3<f32>, w: vec3<f32>) -> vec4<f32> {
     // Roughly one texel of the baked maps spans this many texels of the picture.
     let density = f32(textureDimensions(t).x) * max(abs(p.xf.x), abs(p.xf.y)) / f32(textureDimensions(pos_tex).x);
     let lod = max(log2(max(density, 1e-3)), 0.0);
     let mode = p.bits.w;
+    if (mode == 5u) {
+        return textureSampleLevel(t, img_samp, decal_uv(q), lod);
+    }
     if (mode >= 2u) {
         return textureSampleLevel(t, img_samp, place(plane_uv(mode - 2u, q)), lod);
     }
@@ -120,6 +141,12 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> Out {
         let v = project(img_opacity, q, w).r;
         o_val = select(v, 1.0 - v, (p.bits.z & 64u) != 0u);
         o_cov = 1.0;
+    }
+    if (p.bits.w == 5u) {
+        let m = decal_weight(q, n);
+        cov = cov * m;
+        e_cov = e_cov * m;
+        o_cov = o_cov * m;
     }
     var o: Out;
     o.base = vec4<f32>(color * cov.x, cov.x);

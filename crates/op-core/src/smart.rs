@@ -53,7 +53,7 @@ fn check_node(n: &Node, depth: usize, count: &mut usize) -> Result<(), String> {
             if f.maps.iter().any(|(_, t)| !crate::is_valid_texture_id(&t.id)) {
                 return Err(format!("layer '{}' names a texture in an unknown form", n.name));
             }
-            if !f.uv.is_sane() {
+            if !f.uv.is_sane() || !f.decal.is_sane() {
                 return Err(format!("layer '{}' has an unusable texture placement", n.name));
             }
         }

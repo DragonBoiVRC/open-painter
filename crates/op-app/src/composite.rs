@@ -65,6 +65,9 @@ struct ProjParams {
     xf2: [f32; 4],
     extent: [f32; 4],
     offset: [f32; 4],
+    d_center: [f32; 4],
+    d_u: [f32; 4],
+    d_v: [f32; 4],
 }
 
 #[repr(C)]
@@ -485,6 +488,9 @@ impl Compositor {
             xf2: [cos, sin, sharpness, 0.0],
             extent: [maps.extent[0], maps.extent[1], maps.extent[2], 0.0],
             offset: [maps.offset[0], maps.offset[1], maps.offset[2], 0.0],
+            d_center: [f.decal.center[0], f.decal.center[1], f.decal.center[2], f.decal.depth],
+            d_u: [f.decal.u[0], f.decal.u[1], f.decal.u[2], 0.0],
+            d_v: [f.decal.v[0], f.decal.v[1], f.decal.v[2], 0.0],
         };
         let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("projfill_params"),

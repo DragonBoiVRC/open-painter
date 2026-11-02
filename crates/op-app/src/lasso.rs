@@ -73,8 +73,8 @@ impl App {
                 hi[k] = hi[k].max(p[k]);
             }
         }
-        // Finer than a typical triangle on screen, but bounded so a huge outline stays responsive.
-        let step = (((hi[0] - lo[0]) * (hi[1] - lo[1])) / 40_000.0).sqrt().clamp(3.0, 24.0);
+        // About 4000 rays at most: each one tests every triangle, so a dense mesh needs a coarse grid (the UV view is exact).
+        let step = (((hi[0] - lo[0]) * (hi[1] - lo[1])) / 4_000.0).sqrt().clamp(3.0, 64.0);
         if !self.begin_fill_drag(poly[0], false) {
             return;
         }

@@ -1921,6 +1921,44 @@ mod tests {
         assert!(back[2] > 0.9 && back[0] < 0.1, "back to UV: {back:?}");
     }
 
+    /// A decal puts its picture only inside its frame, upright, on surfaces facing it.
+    #[test]
+    fn a_decal_covers_only_its_frame() {
+        use op_core::{Decal, Projection, Slot, TexRef};
+        let Some(mut rig) = Rig::new() else { return eprintln!("no GPU adapter; skipping") };
+        let (blue, red) = ([0u8, 0, 255, 255], [255u8, 0, 0, 255]);
+        let rgba8: Vec<u8> = [blue, blue, red, red].concat();
+        let (device, queue) = (&rig.device, &rig.queue);
+        let id = "00000000000000000000000000000abd";
+        rig.gpu.upload_image(device, queue, id, &op_image::Decoded { width: 2, height: 2, rgba8 });
+        let mut f = FillParams::default();
+        f.maps.set(Slot::BaseColor, Some(TexRef::new(id)));
+        f.projection = Projection::Decal;
+        f.decal = Decal { center: [0.5, 0.5, 0.0], u: [0.5, 0.0, 0.0], v: [0.0, 0.5, 0.0], depth: 0.1 };
+        let mut doc = Document::default();
+        doc.add(None, None, "decal", NodeKind::Fill(f));
+        let mut position = Vec::new();
+        for ty in 0..SIZE {
+            for tx in 0..SIZE {
+                for v in [(tx as f32 + 0.5) / SIZE as f32, (ty as f32 + 0.5) / SIZE as f32, 0.0, 1.0] {
+                    position.extend(half::f16::from_f32(v).to_bits().to_le_bytes());
+                }
+            }
+        }
+        let normal: Vec<u8> = [128u8, 128, 255, 255].repeat((SIZE * SIZE) as usize);
+        let projection = crate::paint::ProjectionData { position, normal, offset: [0.0; 3], extent: [1.0, 1.0, 1.0] };
+        rig.run(&doc, &[PaintOp::Reset(SIZE), PaintOp::SetBakedNormal { size: SIZE, rgba8: None, projection: Some(projection) }]);
+        let b = rig.read(&rig.gpu.paint().output.base, 8);
+        let px = |x: u32, y: u32| {
+            let i = ((y * SIZE + x) * 8) as usize;
+            [0, 1, 2].map(|c| f16_to_f32(u16::from_le_bytes([b[i + c * 2], b[i + c * 2 + 1]])))
+        };
+        let inside = px(SIZE * 2 / 5, SIZE * 2 / 5); // y grows downward in position, up in the frame: the bottom row
+        assert!(inside[0] > 0.8 && inside[2] < 0.2, "inside the frame, the bottom (red) row: {inside:?}");
+        let outside = px(SIZE / 16, SIZE / 16);
+        assert!(outside.iter().all(|c| *c < 0.05), "nothing outside the frame: {outside:?}");
+    }
+
     /// The opacity channel composites like the other scalar channels, brushes paint it on its own, and
     /// the viewport shows see-through paint as dithered holes.
     #[test]

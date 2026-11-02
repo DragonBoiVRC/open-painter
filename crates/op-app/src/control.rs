@@ -44,6 +44,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("geometry_mask", "{}: select the Fill tool on the selected layer's mask (adding a black one if missing) over mesh parts, so fill_uv shows the layer only where it fills."),
     ("fill_uv", "{points: [[u,v],...], scope?: triangle|face|island|part|set, hide?: bool}: fill the region of the mesh under each UV point on the selected layer (content, or its mask after geometry_mask)."),
     ("lasso_uv", "{points: [[u,v],...], hide?}: fill the polygon with these corners (in UV space) on the selected layer, as one undo step."),
+    ("import_image", "{path}: add an image file to the texture library; returns its id (see `info` images)."),
+    ("set_texture", "{id, image?: image id or null, slot?: base|metallic|roughness|height|normal|emissive|opacity}: put an image in a fill layer's channel (default base)."),
+    ("add_decal", "{image, origin: [x,y,z], dir: [x,y,z], width?, height?, name?}: a fill layer with the image projected onto the model where the ray from origin along dir hits it (world units). Needs the Position and World space normal maps baked (`bake`)."),
     ("undo", "Undo the last edit or stroke."),
     ("redo", "Redo."),
     ("bake", "{maps?: [ao, curvature, thickness, normal, position, id, world_normal, height, bent_normals, opacity], samples?, size?}: bake the active set; poll `status`."),
@@ -175,6 +178,7 @@ impl App {
                 "layers": self.doc.nodes.iter().map(|n| node_json(n, self.selected)).collect::<Vec<_>>(),
                 "selected": self.selected, "tool": if self.tool == Tool::Erase { "erase" } else { "paint" },
                 "paint_on": if self.target == Target::Mask { "mask" } else { "content" },
+                "images": self.assets.iter().map(|a| json!({"id": a.id, "name": a.name})).collect::<Vec<_>>(),
                 "presets": self.presets.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
                 "status": self.status,
             })),
@@ -347,6 +351,60 @@ impl App {
                 }
                 self.lasso_fill_uv(&points, p.get("hide").and_then(Value::as_bool).unwrap_or(false));
                 Ok(json!(self.status))
+            }
+            "import_image" => self.import_texture_file(std::path::Path::new(str_param(p, "path")?)).map(|id| json!(id)),
+            "set_texture" => {
+                let id = id_param(p)?;
+                let slot = match p.get("slot").and_then(Value::as_str).unwrap_or("base") {
+                    "base" => op_core::Slot::BaseColor,
+                    "metallic" => op_core::Slot::Metallic,
+                    "roughness" => op_core::Slot::Roughness,
+                    "height" => op_core::Slot::Height,
+                    "normal" => op_core::Slot::Normal,
+                    "emissive" => op_core::Slot::Emissive,
+                    "opacity" => op_core::Slot::Opacity,
+                    other => return Err(format!("unknown slot '{other}'")),
+                };
+                let tex = match p.get("image").and_then(Value::as_str) {
+                    Some(img) => Some(self.texture(img).map(|_| op_core::TexRef::new(img)).ok_or("no such image: see `info`")?),
+                    None => None,
+                };
+                if !matches!(self.doc.find(id).map(|n| &n.kind), Some(NodeKind::Fill(_))) {
+                    return Err("that is not a fill layer".into());
+                }
+                self.set_slot_texture(id, slot, tex);
+                Ok(json!(id))
+            }
+            "add_decal" => {
+                let vec3 = |key: &str| -> Result<glam::Vec3, String> {
+                    let a: Vec<f32> = p.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).map(|x| x as f32).collect()).unwrap_or_default();
+                    match a[..] {
+                        [x, y, z] if [x, y, z].iter().all(|c| c.is_finite()) => Ok(glam::Vec3::new(x, y, z)),
+                        _ => Err(format!("'{key}' must be [x, y, z]")),
+                    }
+                };
+                let (origin, dir) = (vec3("origin")?, vec3("dir")?.normalize_or_zero());
+                let image = str_param(p, "image")?;
+                self.texture(image).ok_or("no such image: see `info`")?;
+                let before = self.selected;
+                self.add_node(p.get("name").and_then(Value::as_str).unwrap_or("Decal"), NodeKind::Fill(FillParams::default()));
+                let id = self.selected.ok_or("could not add the layer")?;
+                self.set_slot_texture(id, op_core::Slot::BaseColor, Some(op_core::TexRef::new(image)));
+                let (w, h) = (f32_param(p, "width").unwrap_or(0.25), f32_param(p, "height").unwrap_or(0.25));
+                self.edit(|d| {
+                    if let Some(NodeKind::Fill(f)) = d.find_mut(id).map(|n| &mut n.kind) {
+                        f.decal.u = [w, 0.0, 0.0];
+                        f.decal.v = [0.0, h, 0.0];
+                    }
+                });
+                if let Err(e) = self.place_decal(id, origin, dir) {
+                    self.edit(|d| {
+                        d.remove(id);
+                    });
+                    self.selected = before;
+                    return Err(e);
+                }
+                Ok(json!(id))
             }
             "paint_uv" => self.control_paint_uv(p),
             "undo" => {
