@@ -247,6 +247,15 @@ impl App {
                     if tool_button(ui, ph::HAND_POINTING, "Smudge (S)", self.tool == Tool::Smudge).clicked() {
                         self.tool = Tool::Smudge;
                     }
+                    if tool_button(ui, ph::SPRAY_BOTTLE, "Spray: scattered dots around the brush", self.tool == Tool::Spray).clicked() {
+                        self.tool = Tool::Spray;
+                    }
+                    if tool_button(ui, ph::LASSO, "Lasso fill: drag an outline, everything inside it is filled; Shift writes the opposite on a mask", self.tool == Tool::Lasso).clicked() {
+                        self.tool = Tool::Lasso;
+                    }
+                    if tool_button(ui, ph::POLYGON, "Path fill: click the corners of an outline, Enter or double-click closes it and fills inside; Esc cancels", self.tool == Tool::Path).clicked() {
+                        self.tool = Tool::Path;
+                    }
                     if tool_button(ui, ph::PAINT_BUCKET, "Fill (G): click or drag over faces, UV islands, mesh parts or texture sets. Shift writes the opposite on a mask", self.tool == Tool::Fill).clicked() {
                         self.tool = Tool::Fill;
                     }

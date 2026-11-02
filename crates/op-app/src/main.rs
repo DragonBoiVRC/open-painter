@@ -9,6 +9,7 @@ mod export_ui;
 mod files;
 mod gpu_io;
 mod images;
+mod lasso;
 mod paint;
 mod normal_gpu;
 mod picker;
@@ -253,6 +254,12 @@ enum Tool {
     Fill,
     /// Click to hide a face, island or part of the model (Shift+click shows it again).
     Hide,
+    /// Drag a freehand outline and fill everything inside it.
+    Lasso,
+    /// Click the corners of an outline (Enter or double-click closes it) and fill everything inside.
+    Path,
+    /// A spray of small dots around the brush instead of a solid stamp.
+    Spray,
 }
 
 /// What a click with the fill tool covers.
@@ -569,6 +576,9 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    /// The Lasso/Path outline being drawn, in screen points of the view it started in.
+    outline: Vec<egui::Pos2>,
+    outline_uv: bool,
     /// Quick mask: paint only lands where it is free (`quick_on`), and strokes edit it instead of a layer (`quick_edit`).
     quick_on: bool,
     quick_edit: bool,
@@ -780,6 +790,8 @@ impl App {
             pick_id_for: None,
             hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
+            outline: Vec::new(),
+            outline_uv: false,
             quick_on: false,
             quick_edit: false,
             quick_sent: None,
@@ -1729,6 +1741,19 @@ impl App {
         if erase { self.mask_start_value() } else { self.mask_value.unwrap_or_else(|| self.auto_mask_value()).clamp(0.0, 1.0) }
     }
 
+    /// The stamps for one dab position: one stamp, or with the Spray tool a few small dots scattered
+    /// over the brush's disc.
+    fn push_dabs(&self, brush: [f32; 4], target: Target, dir: [f32; 2], out: &mut Vec<Stamp>) {
+        if self.tool != Tool::Spray {
+            out.push(self.make_stamp_raw(brush, target, dir));
+            return;
+        }
+        for _ in 0..3 {
+            let (a, d, s) = (next_random(&self.rng) * std::f32::consts::TAU, next_random(&self.rng).sqrt() * brush[2], 0.5 + next_random(&self.rng));
+            out.push(self.make_stamp_raw([brush[0] + a.cos() * d, brush[1] + a.sin() * d, brush[2] * 0.1 * s, 1.0], target, dir));
+        }
+    }
+
     fn make_stamp(&self, px: [f32; 2], ppp: f32, target: Target, dir: [f32; 2]) -> Stamp {
         self.make_stamp_raw([px[0], px[1], self.brush.radius_pts * ppp, self.brush.hardness], target, dir)
     }
@@ -1849,7 +1874,7 @@ impl App {
     /// Cap the stroke that just began at the brush's stroke opacity, where that makes sense.
     fn push_stroke_limit(&mut self, layer: NodeId, target: Target) {
         let k = self.brush.stroke_opacity;
-        let tool_ok = matches!(self.tool, Tool::Paint | Tool::Project) || (self.tool == Tool::Erase && target == Target::Mask);
+        let tool_ok = matches!(self.tool, Tool::Paint | Tool::Project | Tool::Spray) || (self.tool == Tool::Erase && target == Target::Mask);
         self.stroke_limited = k < 0.999 && tool_ok;
         if self.stroke_limited {
             let mask_value = self.mask_paint_value(self.tool == Tool::Erase);
@@ -1895,7 +1920,7 @@ impl App {
             if self.tool == Tool::Paint && target == Target::Content {
                 self.note_color();
             }
-            out.push(self.make_stamp(to, ppp, target, [0.0; 2]));
+            self.push_dabs([to[0], to[1], self.brush.radius_pts * ppp, self.brush.hardness], target, [0.0; 2], out);
             return;
         }
         let from = self.stroke.last_px;
@@ -1907,7 +1932,7 @@ impl App {
         let dir = [delta[0] / dist, delta[1] / dist];
         let mut t = self.stroke.next_in;
         while t <= dist && out.len() < MAX_STAMPS {
-            out.push(self.make_stamp([from[0] + dir[0] * t, from[1] + dir[1] * t], ppp, target, dir));
+            self.push_dabs([from[0] + dir[0] * t, from[1] + dir[1] * t, self.brush.radius_pts * ppp, self.brush.hardness], target, dir, out);
             t += spacing;
         }
         self.stroke.next_in = t - dist;
@@ -1924,7 +1949,7 @@ impl App {
             self.pending.push(PaintOp::BeginStroke { layer, target });
             self.push_hist(Hist::Stroke);
             self.push_stroke_limit(layer, target);
-            out.push(self.make_stamp_raw(at(to), target, [0.0; 2]));
+            self.push_dabs(at(to), target, [0.0; 2], out);
             return;
         }
         let from = self.stroke.last_px;
@@ -1936,7 +1961,7 @@ impl App {
         let dir = [delta[0] / dist, delta[1] / dist];
         let mut t = self.stroke.next_in;
         while t <= dist && out.len() < MAX_STAMPS {
-            out.push(self.make_stamp_raw(at([from[0] + dir[0] * t, from[1] + dir[1] * t]), target, dir));
+            self.push_dabs(at([from[0] + dir[0] * t, from[1] + dir[1] * t]), target, dir, out);
             t += spacing;
         }
         self.stroke.next_in = t - dist;

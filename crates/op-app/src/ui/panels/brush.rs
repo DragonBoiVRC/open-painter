@@ -12,7 +12,7 @@ impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
         section(ui, "Brush", |ui| {
             ui.horizontal_wrapped(|ui| {
-                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone"), (Tool::Project, "Project"), (Tool::Fill, "Fill"), (Tool::Hide, "Hide")] {
+                for (tool, label) in [(Tool::Paint, "Paint"), (Tool::Erase, "Erase"), (Tool::Smudge, "Smudge"), (Tool::Clone, "Clone"), (Tool::Project, "Project"), (Tool::Fill, "Fill"), (Tool::Hide, "Hide"), (Tool::Spray, "Spray"), (Tool::Lasso, "Lasso"), (Tool::Path, "Path")] {
                     if ui.selectable_label(self.tool == tool, label).clicked() {
                         self.tool = tool;
                     }
@@ -46,6 +46,20 @@ impl App {
                     }
                 });
                 hint(ui, "Click the model to fill with the paint colour and channels below (flow sets the opacity), or drag across it to fill every region you pass over; Triangle is the finest, for polygon-by-polygon fills. On a mask it writes the Mask value (hides on a white mask, reveals on a black one); Shift writes the opposite.");
+            }
+            if self.tool == Tool::Spray {
+                hint(ui, "Scatters small dots over the brush's disc as you paint; Size sets how far they spread, Flow and Spacing how dense.");
+            }
+            if matches!(self.tool, Tool::Lasso | Tool::Path) {
+                hint(ui, "Lasso: drag an outline. Path: click its corners, Enter or double-click to close, Esc to cancel. Everything inside is filled with the paint colour and channels (on a mask, the Mask value; Shift writes the opposite). In the UV view the outline is filled exactly; in the 3D view, every region (see Fill scope) it covers.");
+                ui.horizontal(|ui| {
+                    ui.label("Region");
+                    for scope in crate::FillScope::ALL {
+                        if ui.selectable_label(self.fill_scope == scope, scope.label()).clicked() {
+                            self.fill_scope = scope;
+                        }
+                    }
+                });
             }
             if self.tool == Tool::Project {
                 hint(ui, "Paints the stencil picture onto the model from the camera's point of view. Set the stencil below, line it up, then paint over it.");

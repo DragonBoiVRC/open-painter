@@ -157,6 +157,15 @@ impl App {
             }
         }
         let picking_id = self.pick_id_for.is_some();
+        // Lasso and path fill: outline an area on screen, fill the regions inside it.
+        if matches!(self.tool, Tool::Lasso | Tool::Path) && !alt && !modal_open && !mods.command && !picking_id {
+            if let Some(poly) = self.outline_input(ui, &resp, false) {
+                self.lasso_fill_3d(&poly, rect, mods.shift);
+            }
+            self.draw_outline(ui, false);
+        } else {
+            self.outline.clear();
+        }
         // Fill: one click fills the island, mesh part or texture set under the cursor.
         let fill = matches!(self.tool, Tool::Fill | Tool::Hide) && !alt && !modal_open;
         if let (true, true, Some(pos)) = (fill, resp.clicked() && !mods.command, resp.interact_pointer_pos()) {
@@ -216,7 +225,7 @@ impl App {
                 place[2] = (place[2] * (1.0 + scroll * 0.002)).clamp(0.05, 2.0);
             }
         }
-        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && !matches!(self.tool, Tool::Fill | Tool::Hide) && !picking_id;
+        let painting = resp.is_pointer_button_down_on() && primary_down && !alt && !mods.command && !modal_open && !placing && !matches!(self.tool, Tool::Fill | Tool::Hide | Tool::Lasso | Tool::Path) && !picking_id;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {

@@ -72,7 +72,17 @@ impl App {
                 self.status = format!("Filled {} region(s).", d.done.len());
             }
         }
-        let painting = resp.is_pointer_button_down_on() && primary_down && !mods.alt && !mods.command && !modal_open && !copies && self.tool != crate::Tool::Fill;
+        let outline_tool = matches!(self.tool, crate::Tool::Lasso | crate::Tool::Path);
+        if outline_tool && !mods.alt && !mods.command && !modal_open {
+            if let Some(poly) = self.outline_input(ui, &resp, true) {
+                let uv: Vec<[f32; 2]> = poly.iter().map(|&p| at_uv(p)).collect();
+                self.lasso_fill_uv(&uv, mods.shift);
+            }
+            self.draw_outline(ui, true);
+        } else {
+            self.outline.clear();
+        }
+        let painting = resp.is_pointer_button_down_on() && primary_down && !mods.alt && !mods.command && !modal_open && !copies && self.tool != crate::Tool::Fill && !outline_tool;
         match (painting, resp.interact_pointer_pos().or(resp.hover_pos())) {
             (true, Some(pos)) => match self.paint_target() {
                 Ok((layer, target)) => {

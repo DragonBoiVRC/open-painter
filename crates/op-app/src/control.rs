@@ -37,12 +37,13 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("set_layer", "{id, patch}: merge a partial layer into a layer, e.g. {\"opacity\":0.5,\"kind\":{\"Fill\":{\"base\":[1,0,0]}}}."),
     ("select_layer", "{id}: select a layer to paint on."),
     ("delete_layer", "{id}: delete a layer."),
-    ("set_brush", "{tool?: paint|erase, target?: content|mask, color?: [r,g,b] sRGB, radius?, hardness?, opacity?, spacing?, metallic?, roughness?, mask_value?}"),
+    ("set_brush", "{tool?: paint|erase|spray, target?: content|mask, color?: [r,g,b] sRGB, radius?, hardness?, opacity?, spacing?, metallic?, roughness?, mask_value?}"),
     ("paint_uv", "{points: [[u,v],...], radius?: UV units}: one stroke through the points on the selected layer, as one undo step."),
     ("screenshot", "{path}: save a PNG of the 3D view as it is drawn now."),
     ("quick_mask", "{on?, edit?, clear?}: protect areas: while on, paint lands only where the quick mask is free; with edit, paint_uv strokes mark protected areas (tool erase frees them); clear frees all."),
     ("geometry_mask", "{}: select the Fill tool on the selected layer's mask (adding a black one if missing) over mesh parts, so fill_uv shows the layer only where it fills."),
     ("fill_uv", "{points: [[u,v],...], scope?: triangle|face|island|part|set, hide?: bool}: fill the region of the mesh under each UV point on the selected layer (content, or its mask after geometry_mask)."),
+    ("lasso_uv", "{points: [[u,v],...], hide?}: fill the polygon with these corners (in UV space) on the selected layer, as one undo step."),
     ("undo", "Undo the last edit or stroke."),
     ("redo", "Redo."),
     ("bake", "{maps?: [ao, curvature, thickness, normal, position, id, world_normal, height, bent_normals, opacity], samples?, size?}: bake the active set; poll `status`."),
@@ -249,6 +250,7 @@ impl App {
                 match p.get("tool").and_then(Value::as_str) {
                     Some("paint") => self.tool = Tool::Paint,
                     Some("erase") => self.tool = Tool::Erase,
+                    Some("spray") => self.tool = Tool::Spray,
                     Some(o) => return Err(format!("unknown tool '{o}': paint or erase")),
                     None => {}
                 }
@@ -332,6 +334,18 @@ impl App {
                     let picked = self.picked_triangles_uv(pt);
                     self.fill_picked(picked, hide);
                 }
+                Ok(json!(self.status))
+            }
+            "lasso_uv" => {
+                let points: Vec<[f32; 2]> = p
+                    .get("points")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|pt| Some([pt.get(0)?.as_f64()? as f32, pt.get(1)?.as_f64()? as f32])).collect())
+                    .unwrap_or_default();
+                if points.len() < 3 {
+                    return Err("'points' needs at least three [u, v] corners".into());
+                }
+                self.lasso_fill_uv(&points, p.get("hide").and_then(Value::as_bool).unwrap_or(false));
                 Ok(json!(self.status))
             }
             "paint_uv" => self.control_paint_uv(p),
