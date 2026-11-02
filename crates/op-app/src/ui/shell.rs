@@ -253,6 +253,9 @@ impl App {
                     if tool_button(ui, ph::EYE_SLASH, "Hide parts (7): click a face, island or part to hide it; Shift+click shows it", self.tool == Tool::Hide).clicked() {
                         self.tool = Tool::Hide;
                     }
+                    if tool_button(ui, ph::CUBE, "Geometry mask (8): click or drag over mesh parts to show the selected layer only there (adds a mask if it has none); Shift hides them again", false).clicked() {
+                        self.use_geometry_mask();
+                    }
                     if tool_button(ui, ph::PROJECTOR_SCREEN, "Projection (J): paint the stencil picture onto the model", self.tool == Tool::Project).clicked() {
                         self.tool = Tool::Project;
                     }

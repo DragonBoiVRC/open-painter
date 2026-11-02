@@ -2131,6 +2131,25 @@ impl App {
         [n[0], n[1], n[2], position]
     }
 
+    /// The Fill tool on the selected layer's mask, over mesh parts: the layer shows only where the
+    /// user clicks. A layer without a mask gets a black one, so it starts hidden everywhere.
+    fn use_geometry_mask(&mut self) {
+        let Some(id) = self.selected.filter(|id| self.doc.find(*id).is_some()) else {
+            self.status = "Select a layer to give it a geometry mask.".into();
+            return;
+        };
+        if self.doc.find(id).is_some_and(|n| n.mask.is_none()) {
+            self.edit(|d| {
+                if let Some(n) = d.find_mut(id) {
+                    n.mask = Some(Mask::new(false));
+                }
+            });
+        }
+        self.quick_edit = false;
+        (self.tool, self.target, self.fill_scope, self.mask_value) = (Tool::Fill, Target::Mask, FillScope::MeshPart, None);
+        self.status = "Geometry mask: click a part of the model to show the layer there (Shift hides it); G goes back to the Fill tool.".into();
+    }
+
     fn clear_target(&mut self) {
         match self.paint_target() {
             Ok((layer, target)) => {
@@ -2735,6 +2754,9 @@ impl App {
         }
         if ui.input(|i| i.key_pressed(Key::Num7)) {
             self.tool = Tool::Hide;
+        }
+        if ui.input(|i| i.key_pressed(Key::Num8)) {
+            self.use_geometry_mask();
         }
         if frame {
             self.frame_model();

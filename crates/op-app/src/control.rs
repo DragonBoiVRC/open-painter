@@ -7,7 +7,7 @@
 
 use crate::paint::{PaintOp, Target, MAX_STAMPS};
 use crate::viewport::ViewportGpu;
-use crate::{App, Pending, Tool};
+use crate::{App, FillScope, Pending, Tool};
 use eframe::egui;
 use op_core::{FillParams, Mask, MeshMap, NodeId, NodeKind};
 use serde_json::{json, Value};
@@ -41,6 +41,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("paint_uv", "{points: [[u,v],...], radius?: UV units}: one stroke through the points on the selected layer, as one undo step."),
     ("screenshot", "{path}: save a PNG of the 3D view as it is drawn now."),
     ("quick_mask", "{on?, edit?, clear?}: protect areas: while on, paint lands only where the quick mask is free; with edit, paint_uv strokes mark protected areas (tool erase frees them); clear frees all."),
+    ("geometry_mask", "{}: select the Fill tool on the selected layer's mask (adding a black one if missing) over mesh parts, so fill_uv shows the layer only where it fills."),
+    ("fill_uv", "{points: [[u,v],...], scope?: triangle|face|island|part|set, hide?: bool}: fill the region of the mesh under each UV point on the selected layer (content, or its mask after geometry_mask)."),
     ("undo", "Undo the last edit or stroke."),
     ("redo", "Redo."),
     ("bake", "{maps?: [ao, curvature, thickness, normal, position, id, world_normal, height, bent_normals, opacity], samples?, size?}: bake the active set; poll `status`."),
@@ -300,6 +302,37 @@ impl App {
                     self.pending.push(PaintOp::QuickClear);
                 }
                 Ok(json!({"on": self.quick_on, "edit": self.quick_edit}))
+            }
+            "geometry_mask" => {
+                self.use_geometry_mask();
+                Ok(json!(self.status))
+            }
+            "fill_uv" => {
+                let points: Vec<[f32; 2]> = p
+                    .get("points")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|pt| Some([pt.get(0)?.as_f64()? as f32, pt.get(1)?.as_f64()? as f32])).collect())
+                    .unwrap_or_default();
+                if points.is_empty() {
+                    return Err("'points' must be a list of [u, v]".into());
+                }
+                if let Some(scope) = p.get("scope").and_then(Value::as_str) {
+                    self.fill_scope = match scope {
+                        "triangle" => FillScope::Triangle,
+                        "face" => FillScope::Face,
+                        "island" => FillScope::UvIsland,
+                        "part" => FillScope::MeshPart,
+                        "set" => FillScope::TextureSet,
+                        other => return Err(format!("unknown scope '{other}': triangle, face, island, part or set")),
+                    };
+                }
+                let hide = p.get("hide").and_then(Value::as_bool).unwrap_or(false);
+                self.paint_target().map_err(str::to_string)?;
+                for pt in points {
+                    let picked = self.picked_triangles_uv(pt);
+                    self.fill_picked(picked, hide);
+                }
+                Ok(json!(self.status))
             }
             "paint_uv" => self.control_paint_uv(p),
             "undo" => {
