@@ -62,7 +62,7 @@ struct Brush {
     stroke_opacity: f32,
     /// Stamp spacing as a fraction of the brush radius.
     spacing: f32,
-    /// The stamp shape: 0 round, 1 square, 2 diamond, 3 chalk, 4 streaks.
+    /// The stamp shape: 0 round, 1 square, 2 diamond, 3 chalk, 4 streaks, 5 image, 6 triangle, 7 star, 8 cross, 9 ring, 10 hexagon, 11 blot.
     shape: u32,
     /// Rotation of the stamp in degrees.
     angle: f32,

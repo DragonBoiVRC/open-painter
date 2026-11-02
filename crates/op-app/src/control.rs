@@ -37,7 +37,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("set_layer", "{id, patch}: merge a partial layer into a layer, e.g. {\"opacity\":0.5,\"kind\":{\"Fill\":{\"base\":[1,0,0]}}}."),
     ("select_layer", "{id}: select a layer to paint on."),
     ("delete_layer", "{id}: delete a layer."),
-    ("set_brush", "{tool?: paint|erase|spray, target?: content|mask, color?: [r,g,b] sRGB, radius?, hardness?, opacity?, spacing?, metallic?, roughness?, mask_value?}"),
+    ("set_brush", "{tool?: paint|erase|spray, target?: content|mask, color?: [r,g,b] sRGB, radius?, hardness?, opacity?, spacing?, shape?: 0 round, 1 square, 2 diamond, 3 chalk, 4 streaks, 6 triangle, 7 star, 8 cross, 9 ring, 10 hexagon, 11 blot, metallic?, roughness?, mask_value?}"),
     ("paint_uv", "{points: [[u,v],...], radius?: UV units}: one stroke through the points on the selected layer, as one undo step."),
     ("screenshot", "{path}: save a PNG of the 3D view as it is drawn now."),
     ("quick_mask", "{on?, edit?, clear?}: protect areas: while on, paint lands only where the quick mask is free; with edit, paint_uv strokes mark protected areas (tool erase frees them); clear frees all."),
@@ -286,6 +286,9 @@ impl App {
                 }
                 if let Some(v) = f32_param(p, "opacity") {
                     self.brush.opacity = v.clamp(0.0, 1.0);
+                }
+                if let Some(v) = p.get("shape").and_then(Value::as_u64) {
+                    self.brush.shape = (v as u32).min(11);
                 }
                 if let Some(v) = f32_param(p, "spacing") {
                     self.brush.spacing = v.clamp(0.01, 2.0);

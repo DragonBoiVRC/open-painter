@@ -65,7 +65,8 @@ fn vnoise(p: vec2<f32>) -> f32 {
 
 // Distance from the brush centre, in brush radii, for the stamp's shape. `off` is the offset
 // from the centre in radii (screen or UV axes); `shape` is (angle, kind, seed, _).
-//   0 round, 1 square, 2 diamond, 3 chalk (noisy edge), 4 streaks (stretched noise)
+//   0 round, 1 square, 2 diamond, 3 chalk (noisy edge), 4 streaks (stretched noise), 5 image (stamp.wgsl),
+//   6 triangle, 7 star, 8 cross, 9 ring, 10 hexagon, 11 blot
 fn shape_dist(off: vec2<f32>, shape: vec4<f32>) -> f32 {
     let c = cos(shape.x);
     let s = sin(shape.x);
@@ -74,6 +75,12 @@ fn shape_dist(off: vec2<f32>, shape: vec4<f32>) -> f32 {
     if (kind == 1) { return max(abs(l.x), abs(l.y)); }
     if (kind == 2) { return abs(l.x) + abs(l.y); }
     let r = length(l);
+    if (kind == 6) { return 2.0 * max(abs(l.x) * 0.866 + l.y * 0.5, -l.y); }
+    if (kind == 7) { return r / (0.42 + 0.58 * pow(abs(cos(2.5 * atan2(l.y, l.x))), 3.0)); }
+    if (kind == 8) { return min(max(abs(l.x) / 0.3, abs(l.y)), max(abs(l.x), abs(l.y) / 0.3)); }
+    if (kind == 9) { return abs(r - 0.7) / 0.3; }
+    if (kind == 10) { return max(abs(l.x) * 0.866 + abs(l.y) * 0.5, abs(l.y)); }
+    if (kind == 11) { return r + (vnoise(l * 2.5 + shape.z) - 0.5) * 0.5 + (vnoise(l * 7.0 + shape.z) - 0.5) * 0.2; }
     if (kind == 3) { return r + (vnoise(l * 5.0 + shape.z) - 0.5) * 0.7; }
     if (kind == 4) { return r + (vnoise(vec2<f32>(l.x * 1.5, l.y * 14.0) + shape.z) - 0.5) * 0.9; }
     return r;

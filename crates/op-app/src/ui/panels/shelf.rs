@@ -119,7 +119,7 @@ impl BrushPreset {
             && ok(self.hardness, 0.0, 1.0)
             && ok(self.opacity, 0.0, 1.0)
             && ok(self.spacing, 0.005, 5.0)
-            && self.shape <= 5
+            && self.shape <= 11
             && ok(self.angle, -3600.0, 3600.0)
             && ok(self.angle_jitter, 0.0, 1.0)
             && ok(self.size_jitter, 0.0, 1.0)

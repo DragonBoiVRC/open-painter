@@ -6,7 +6,7 @@ use crate::paint::PaintOp;
 use crate::{App, Tool};
 
 /// Names of the stamp shapes, in the order the shaders number them.
-const SHAPES: [&str; 6] = ["Round", "Square", "Diamond", "Chalk", "Streaks", "Image"];
+const SHAPES: [&str; 12] = ["Round", "Square", "Diamond", "Chalk", "Streaks", "Image", "Triangle", "Star", "Cross", "Ring", "Hexagon", "Blot"];
 
 impl App {
     pub(crate) fn brush_panel(&mut self, ui: &mut egui::Ui) {
