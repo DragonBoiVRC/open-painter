@@ -156,11 +156,13 @@ struct DisplaySettings {
     /// Interface look: brightness level and accent colour (indexes into `ui::theme`'s lists).
     brightness: u8,
     accent: u8,
+    /// Offer the start window (new, open, recent) when the program opens without a file.
+    show_start: bool,
 }
 
 impl Default for DisplaySettings {
     fn default() -> Self {
-        Self { env: Environment::default(), hdri: None, ortho: false, fov_degrees: 45.0, cameras: HashMap::new(), brightness: 0, accent: 0 }
+        Self { env: Environment::default(), hdri: None, ortho: false, fov_degrees: 45.0, cameras: HashMap::new(), brightness: 0, accent: 0, show_start: true }
     }
 }
 
@@ -661,6 +663,9 @@ struct App {
     display_saved: Option<DisplaySettings>,
     layout_check: Instant,
     show_shortcuts: bool,
+    /// The window offering new / open / recent projects at launch.
+    start_window: bool,
+    show_start_pref: bool,
     texture_import: Option<textures::TextureImport>,
     /// Where the last texture import went: the shared library (true) or just the project.
     import_global: bool,
@@ -678,6 +683,7 @@ fn is_project(p: &Path) -> bool {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>, control_port: Option<u16>) -> Self {
+        let initial_is_none = initial.is_none() && control_port.is_none();
         let rs = cc.wgpu_render_state.clone().expect("wgpu backend required");
         // A GPU error should not close the app (and lose the session): note it and carry on. The
         // default handler panics.
@@ -885,6 +891,8 @@ impl App {
             layout_json: String::new(),
             layout_check: Instant::now(),
             show_shortcuts: false,
+            start_window: initial_is_none && display.show_start,
+            show_start_pref: display.show_start,
             texture_import: None,
             import_global: false,
             gpu_notices: Default::default(),
@@ -1631,7 +1639,7 @@ impl App {
         if self.hdri_rx.is_some() {
             return;
         }
-        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone(), ortho: self.camera.ortho, fov_degrees: self.camera.fov_y.to_degrees(), cameras: self.saved_cameras.clone(), brightness: ui::theme::brightness(), accent: ui::theme::accent_index() };
+        let now = DisplaySettings { env: self.env.clone(), hdri: self.hdri_name.clone(), ortho: self.camera.ortho, fov_degrees: self.camera.fov_y.to_degrees(), cameras: self.saved_cameras.clone(), brightness: ui::theme::brightness(), accent: ui::theme::accent_index(), show_start: self.show_start_pref };
         if self.display_saved.as_ref() == Some(&now) {
             return;
         }
@@ -2479,6 +2487,46 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.start_window {
+            let mut close = false;
+            let mut open_dialog = false;
+            let mut open_recent = None;
+            egui::Window::new("open-painter").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.label("Paint PBR textures straight onto a model.");
+                ui.add_space(6.0);
+                if ui.button("Open a model or project...").clicked() {
+                    open_dialog = true;
+                }
+                if ui.button("Start with the sample sphere").clicked() {
+                    close = true;
+                }
+                let recent: Vec<PathBuf> = self.recent.iter().filter(|p| p.exists()).take(6).cloned().collect();
+                if !recent.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("RECENT").size(11.0).strong().color(ui::theme::text_dim()));
+                    for p in recent {
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
+                            open_recent = Some(p);
+                        }
+                    }
+                }
+                ui.add_space(6.0);
+                ui.checkbox(&mut self.show_start_pref, "Show this when the program starts");
+            });
+            if open_dialog {
+                self.dialog = Some(PathDialog { save: false, path: String::new() });
+                close = true;
+            }
+            if let Some(p) = open_recent {
+                self.request(Pending::Open(p), ctx);
+                close = true;
+            }
+            if close {
+                self.start_window = false;
+            }
+        }
         if self.show_shortcuts {
             let mut open = true;
             egui::Window::new("Keyboard shortcuts").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
@@ -2498,6 +2546,8 @@ impl App {
                         ("P / E  or  1 / 2", "paint / erase"),
                         ("S / K / J / G  or  3 / 4 / 5 / 6", "smudge / clone / projection / fill"),
                         ("7", "hide parts of the model"),
+                        ("8", "geometry mask: show the layer only on the parts you click"),
+                        ("Y / U", "quick mask on or off / edit it"),
                         ("Ctrl + click (clone)", "set the clone source"),
                         ("I / Shift+I", "pick the colour / every channel under the cursor"),
                         ("L", "toggle symmetry"),
