@@ -16,6 +16,7 @@ mod normal_gpu;
 mod picker;
 mod procgen;
 mod sets;
+mod text;
 mod textures;
 mod thumbs;
 mod uvview;
@@ -577,6 +578,9 @@ struct App {
     recent_colors: Vec<[f32; 3]>,
     /// Show the selected layer's mask on the model (toggled with the backslash key).
     mask_view: bool,
+    text_ui: text::TextUi,
+    /// Installed fonts, listed the first time the Text section is opened.
+    fonts: Option<Vec<text::FontFile>>,
     /// A decal layer waiting for the next click on the model to be placed.
     decal_place: Option<NodeId>,
     /// The Lasso/Path outline being drawn, in screen points of the view it started in.
@@ -646,6 +650,7 @@ struct App {
     gpu_notices: std::cell::RefCell<Vec<String>>,
     /// Commands from the `--control` channel, when it is on.
     control: Option<Receiver<control::Request>>,
+    control_wait: u8,
 }
 
 fn is_project(p: &Path) -> bool {
@@ -793,6 +798,8 @@ impl App {
             pick_id_for: None,
             hidden_tris: std::collections::HashSet::new(),
             mask_view: false,
+            text_ui: Default::default(),
+            fonts: None,
             decal_place: None,
             outline: Vec::new(),
             outline_uv: false,
@@ -859,6 +866,7 @@ impl App {
             import_global: false,
             gpu_notices: Default::default(),
             control: None,
+            control_wait: 0,
         };
         let saved_export = export_ui::SavedExport::load();
         app.export.apply_saved(saved_export, &app.presets);

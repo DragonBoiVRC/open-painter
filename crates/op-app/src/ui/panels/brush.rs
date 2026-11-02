@@ -169,6 +169,8 @@ impl App {
             } else {
                 self.place_stencil = false;
             }
+            ui.separator();
+            self.text_section(ui);
         });
         section(ui, "Pen pressure", |ui| {
             ui.checkbox(&mut self.brush.pressure_size, "Pressure changes size");

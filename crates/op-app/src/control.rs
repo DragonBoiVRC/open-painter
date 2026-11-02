@@ -47,6 +47,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("import_image", "{path}: add an image file to the texture library; returns its id (see `info` images)."),
     ("set_texture", "{id, image?: image id or null, slot?: base|metallic|roughness|height|normal|emissive|opacity}: put an image in a fill layer's channel (default base)."),
     ("add_decal", "{image, origin: [x,y,z], dir: [x,y,z], width?, height?, name?}: a fill layer with the image projected onto the model where the ray from origin along dir hits it (world units). Needs the Position and World space normal maps baked (`bake`)."),
+    ("text_image", "{text, size?: px per line (default 128), font?: path to a .ttf/.otf}: render text as white letters on transparent and add it to the library; returns the image id (use it with add_decal or set_texture)."),
     ("undo", "Undo the last edit or stroke."),
     ("redo", "Redo."),
     ("bake", "{maps?: [ao, curvature, thickness, normal, position, id, world_normal, height, bent_normals, opacity], samples?, size?}: bake the active set; poll `status`."),
@@ -162,9 +163,19 @@ fn node_json(n: &op_core::Node, selected: Option<NodeId>) -> Value {
 impl App {
     /// Runs the commands that arrived since the last frame.
     pub(crate) fn poll_control(&mut self, ctx: &egui::Context) {
-        while let Some(req) = self.control.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        // A few frames between commands, so a read (export, save, screenshot) never sees the state from
+        // before the edit ahead of it: strokes, new layers and images take a frame or two to reach the
+        // composite.
+        if self.control_wait > 0 {
+            self.control_wait -= 1;
+            ctx.request_repaint();
+            return;
+        }
+        if let Some(req) = self.control.as_ref().and_then(|rx| rx.try_recv().ok()) {
             let result = self.run_command(&req.cmd, &req.params, ctx);
             let _ = req.reply.send(result);
+            self.control_wait = 4;
+            ctx.request_repaint();
         }
     }
 
@@ -405,6 +416,10 @@ impl App {
                     return Err(e);
                 }
                 Ok(json!(id))
+            }
+            "text_image" => {
+                let font = p.get("font").and_then(Value::as_str).map(PathBuf::from);
+                self.make_text_image(str_param(p, "text")?, font.as_deref(), f32_param(p, "size").unwrap_or(128.0)).map(|id| json!(id))
             }
             "paint_uv" => self.control_paint_uv(p),
             "undo" => {
